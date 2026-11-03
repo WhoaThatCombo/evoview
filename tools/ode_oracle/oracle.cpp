@@ -28,12 +28,14 @@ static int collide_scenario(int steps);
 static int space_kind;
 static int trimesh_scenario(int steps);
 static int shapes_scenario(int steps);
+static int ttl_scenario(int steps);
 
 int main(int argc, char **argv) {
     int steps = argc > 1 ? atoi(argv[1]) : 400;
     if (argc > 2 && !strcmp(argv[2], "collide")) return collide_scenario(steps);
     if (argc > 2 && !strcmp(argv[2], "trimesh")) return trimesh_scenario(steps);
     if (argc > 2 && !strcmp(argv[2], "shapes")) return shapes_scenario(steps);
+    if (argc > 2 && !strcmp(argv[2], "ttl")) return ttl_scenario(steps);
     if (argc > 2 && !strcmp(argv[2], "quadtree")) { space_kind = 1; return collide_scenario(steps); }
     if (argc > 2 && !strcmp(argv[2], "sap")) { space_kind = 2; return collide_scenario(steps); }
     dInitODE2(0);
@@ -691,6 +693,63 @@ static int shapes_scenario(int steps) {
             }
             int maxc = 1 + (q % 4) * 3;
             both('T', q, tr, p, maxc);
+        }
+    }
+    return 0;
+}
+
+// ---- scenario 5: trimesh against trimesh. The bumpy grid against a
+// smaller bumpy grid and an octahedron, posed across its surface.
+static double g2_verts[7 * 7 * 3];
+static dTriIndex g2_idx[6 * 6 * 6];
+static int ttl_scenario(int steps) {
+    dInitODE2(0);
+    build_grid();
+    int k = 0;
+    for (int j = 0; j < 7; j++)
+        for (int i = 0; i < 7; i++) {
+            double x = (i - 3) * 0.3, z = (j - 3) * 0.3;
+            g2_verts[k++] = x;
+            g2_verts[k++] = 0.15 * cos(x * 2.1) * sin(z * 1.7);
+            g2_verts[k++] = z;
+        }
+    k = 0;
+    for (int j = 0; j < 6; j++)
+        for (int i = 0; i < 6; i++) {
+            int a = j * 7 + i, b = a + 1, c = a + 7, d = c + 1;
+            g2_idx[k++] = a; g2_idx[k++] = c; g2_idx[k++] = d;
+            g2_idx[k++] = a; g2_idx[k++] = d; g2_idx[k++] = b;
+        }
+    octa(0.5, 0.35, 0.4, cv_planes, cv_points, cv_polys, om_tris);
+    for (int i = 0; i < 18; i++) om_verts[i] = cv_points[i] * 0.8;
+    dTriMeshDataID da = dGeomTriMeshDataCreate();
+    dGeomTriMeshDataBuildDouble(da, tm_verts, 3 * sizeof(double), 13 * 13, tm_idx, 12 * 12 * 6, 3 * sizeof(dTriIndex));
+    dTriMeshDataID db = dGeomTriMeshDataCreate();
+    dGeomTriMeshDataBuildDouble(db, g2_verts, 3 * sizeof(double), 7 * 7, g2_idx, 6 * 6 * 6, 3 * sizeof(dTriIndex));
+    dTriMeshDataID dc = dGeomTriMeshDataCreate();
+    dGeomTriMeshDataBuildDouble(dc, om_verts, 3 * sizeof(double), 6, om_tris, 24, 3 * sizeof(dTriIndex));
+    nsg = 0;
+    dGeomID A = SG[nsg++] = dCreateTriMesh(0, da, 0, 0, 0);
+    dGeomID B = SG[nsg++] = dCreateTriMesh(0, db, 0, 0, 0);
+    dGeomID O = SG[nsg++] = dCreateTriMesh(0, dc, 0, 0, 0);
+    dMatrix3 R;
+    for (int s = 0; s < steps; s++) {
+        printf("S%d\n", s);
+        dRFromAxisAndAngle(R, 0.1, 1, 0.2, 0.03 * s);
+        dGeomSetRotation(A, R);
+        dGeomSetPosition(A, 0.005 * s, -0.1, 0.01 * s);
+        for (int q = 0; q < 10; q++) {
+            double x = -2.2 + 0.45 * q + 0.01 * s, z = 1.9 - 0.4 * q;
+            double y = 0.3 * sin(x * 1.3) * cos(z * 0.7) + 0.1 * x - 0.1 + 0.08 * sin(q + 0.1 * s);
+            int maxc = (1 + (q % 5) * 3) | ((q % 4 == 3) ? CONTACTS_UNIMPORTANT : 0);
+            dRFromAxisAndAngle(R, sin(q), 1, 0.4 * cos(q), 0.2 * q + 0.04 * s);
+            dGeomSetRotation(B, R);
+            dGeomSetPosition(B, x, y, z);
+            both('A', q, A, B, maxc);
+            dRFromAxisAndAngle(R, cos(q * 0.8), 0.6, 1, 0.5 * q + 0.03 * s);
+            dGeomSetRotation(O, R);
+            dGeomSetPosition(O, z, y + 0.05, x);
+            both('O', q, A, O, maxc);
         }
     }
     return 0;

@@ -6060,7 +6060,376 @@ fn collide_ray_convex(o1: &Prim, o2: &Prim, flags: i32) -> Vec<ContactGeom> {
     }
 }
 
-/// dCollideTTL: not ported yet
-fn collide_trimesh_trimesh(_o1: &Prim, _o2: &Prim, _flags: i32) -> Vec<ContactGeom> {
-    Vec::new()
+// ---- dCollideTTL (collision_trimesh_trimesh.cpp, the new collider)
+
+/// a contact slot: the caller's buffer, or the scratch contact used once
+/// the buffer is full
+const TTL_LOCAL: usize = usize::MAX;
+
+/// CONTACT_KEY_HASH_TABLE: 256 buckets of up to 4 (contact, key)
+struct TtlHash {
+    nodes: Vec<([(usize, u32); 4], usize)>,
+}
+
+/// UpdateContactKey
+fn ttl_key(pos: &[Real]) -> u32 {
+    let mut hash: u32 = 0;
+    let mut i = 0;
+    loop {
+        let coord = (pos[i] * 10000.0).floor();
+        let bits = coord.to_bits();
+        let hi = (bits as u32) ^ ((bits >> 32) as u32);
+        hash = (hash << 4).wrapping_add(hi >> 24) ^ (hash >> 28);
+        hash = (hash << 4).wrapping_add((hi >> 16) & 0xff) ^ (hash >> 28);
+        hash = (hash << 4).wrapping_add((hi >> 8) & 0xff) ^ (hash >> 28);
+        hash = (hash << 4).wrapping_add(hi & 0xff) ^ (hash >> 28);
+        i += 1;
+        if i == 3 {
+            break;
+        }
+        hash = hash.rotate_left(11);
+    }
+    hash
+}
+fn ttl_index(key: u32) -> usize {
+    let index = key ^ (key >> 16);
+    ((index ^ (index >> 8)) & 0xff) as usize
+}
+
+struct Ttl<'a> {
+    out: Vec<ContactGeom>,
+    local: ContactGeom,
+    count: usize,
+    maxc: usize,
+    hash: TtlHash,
+    g1: &'a Prim<'a>,
+    g2: &'a Prim<'a>,
+}
+
+impl Ttl<'_> {
+    fn slot(&mut self, i: usize) -> &mut ContactGeom {
+        if i == TTL_LOCAL {
+            return &mut self.local;
+        }
+        while self.out.len() <= i {
+            self.out.push(ContactGeom::default());
+        }
+        &mut self.out[i]
+    }
+    fn pos_of(&self, i: usize) -> V3 {
+        if i == TTL_LOCAL {
+            self.local.pos
+        } else {
+            self.out[i].pos
+        }
+    }
+    /// InsertContactInSet (AddContactToNode)
+    fn insert(&mut self, contact: usize, key: u32) -> usize {
+        let n = ttl_index(key);
+        let newpos = self.pos_of(contact);
+        let (keys, cnt) = self.hash.nodes[n];
+        for &(c, k) in &keys[..cnt] {
+            if k == key {
+                let p = self.pos_of(c);
+                let d = sub3(&p, &newpos);
+                if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() < 1.00001 * 1.7320508075688773 / 10000.0 {
+                    return c;
+                }
+            }
+        }
+        if cnt < 4 {
+            let node = &mut self.hash.nodes[n];
+            node.0[cnt] = (contact, key);
+            node.1 += 1;
+        }
+        contact
+    }
+    /// AllocNewContact: (allocated new, the contact to fill or merge into)
+    fn alloc(&mut self, point: &V3) -> (bool, Option<usize>) {
+        let pc = if self.count != self.maxc { self.count } else { TTL_LOCAL };
+        let c = self.slot(pc);
+        c.pos = [point[0], point[1], point[2], 1.0];
+        let key = ttl_key(&c.pos);
+        let found = self.insert(pc, key);
+        if found == pc {
+            if pc != TTL_LOCAL {
+                self.count += 1;
+                return (true, Some(pc));
+            }
+            // RemoveNewContactFromNode
+            let node = &mut self.hash.nodes[ttl_index(key)];
+            if node.0[node.1 - 1].0 == pc {
+                node.1 -= 1;
+            }
+            return (true, None);
+        }
+        (false, Some(found))
+    }
+    /// FreeExistingContact
+    fn free(&mut self, pc: usize) {
+        let key = ttl_key(&self.out[pc].pos);
+        // RemoveArbitraryContactFromNode
+        let node = &mut self.hash.nodes[ttl_index(key)];
+        let last = node.1 - 1;
+        for k in 0..last {
+            if node.0[k].0 == pc {
+                node.0[k] = node.0[last];
+                break;
+            }
+        }
+        node.1 = last;
+        let lastc = self.count - 1;
+        if pc != lastc {
+            self.out[pc] = self.out[lastc];
+            let lkey = ttl_key(&self.out[lastc].pos);
+            // UpdateArbitraryContactInNode
+            let node = &mut self.hash.nodes[ttl_index(lkey)];
+            let last = node.1 - 1;
+            let mut k = 0;
+            while k < last {
+                if node.0[k].0 == lastc {
+                    break;
+                }
+                k += 1;
+            }
+            node.0[k].0 = pc;
+        }
+        self.count = lastc;
+    }
+    /// PushNewContact
+    #[allow(clippy::too_many_arguments)]
+    fn push(&mut self, tri1: i32, tri2: i32, point: &V3, normal: &V3, depth: Real) {
+        let (g1, g2) = (self.g1.id, self.g2.id);
+        let (new, pc) = self.alloc(point);
+        let Some(pc) = pc else { return };
+        if !new {
+            let c = &mut self.out[pc];
+            let diff = depth - c.depth;
+            if diff > 0.00001 {
+                c.normal = [normal[0], normal[1], normal[2], 1.0];
+                c.depth = depth;
+                c.g1 = g1;
+                c.g2 = g2;
+                c.side1 = tri1;
+                c.side2 = tri2;
+            } else if diff >= -0.00001 {
+                let mut n = *normal;
+                if c.g1 == g2 {
+                    n = [-n[0], -n[1], -n[2], n[3]];
+                }
+                let old = c.normal[3];
+                for k in 0..3 {
+                    c.normal[k] = n[k] + c.normal[k] * old;
+                }
+                let len = (c.normal[0] * c.normal[0] + c.normal[1] * c.normal[1] + c.normal[2] * c.normal[2]).sqrt();
+                if len > 0.0000001 {
+                    let s = 1.0 / len;
+                    for k in 0..3 {
+                        c.normal[k] *= s;
+                    }
+                    c.normal[3] = len;
+                    // no TriMergeCallback
+                    c.side1 = -1;
+                    c.side2 = -1;
+                } else {
+                    self.free(pc);
+                }
+            }
+        } else {
+            let c = &mut self.out[pc];
+            c.normal = [normal[0], normal[1], normal[2], 1.0];
+            c.depth = depth;
+            c.g1 = g1;
+            c.g2 = g2;
+            c.side1 = tri1;
+            c.side2 = tri2;
+        }
+    }
+}
+
+/// LineContactSet
+#[derive(Clone, Copy)]
+struct LineSet {
+    p: [V3; 8],
+    n: usize,
+}
+impl LineSet {
+    fn new() -> LineSet {
+        LineSet { p: [[0.0; 4]; 8], n: 0 }
+    }
+}
+
+fn ttl_plane_clip_segment(s1: &V3, s2: &V3, n: &[Real], c: Real) -> V3 {
+    let dis1 = dot3(s1, n) - c;
+    let mut clipped = sub3(s2, s1);
+    let dis2 = dot3(&clipped, n);
+    let k = -dis1 / dis2;
+    for i in 0..3 {
+        clipped[i] *= k;
+    }
+    let mut r = add3(&clipped, s1);
+    r[3] = 1.0;
+    r
+}
+
+/// ClipConvexPolygonAgainstPlane
+fn ttl_clip(n: &[Real], c: Real, set: &mut LineSet) {
+    if set.n == 0 {
+        return;
+    }
+    let mut clipped = [[0.0; 4]; 8];
+    let mut cc = 0;
+    let mut prev = 32000;
+    for i in 0..=set.n {
+        let vi = i % set.n;
+        let d = dot3(n, &set.p[vi]) - c;
+        let classif = if d > 1.0e-8 { 1 } else { 0 };
+        if classif == 0 {
+            if i > 0 && prev == 1 && cc < 8 {
+                clipped[cc] = ttl_plane_clip_segment(&set.p[i - 1], &set.p[vi], n, c);
+                cc += 1;
+            }
+            if cc < 8 && i < set.n {
+                clipped[cc] = [set.p[vi][0], set.p[vi][1], set.p[vi][2], 1.0];
+                cc += 1;
+            }
+        } else if i > 0 && prev == 0 && cc < 8 {
+            clipped[cc] = ttl_plane_clip_segment(&set.p[i - 1], &set.p[vi], n, c);
+            cc += 1;
+        }
+        prev = classif;
+    }
+    if cc == 0 {
+        set.n = 0;
+        return;
+    }
+    set.n = cc;
+    set.p[..cc].copy_from_slice(&clipped[..cc]);
+}
+
+/// BuildPlane: (normal, dist) or None for a degenerate triangle
+fn ttl_build_plane(s0: &V3, s1: &V3, s2: &V3) -> Option<(V3, Real)> {
+    let e0 = sub3(s1, s0);
+    let e1 = sub3(s2, s0);
+    let mut n = cross(&e0, &e1);
+    if !safe_normalize3(&mut n) {
+        return None;
+    }
+    let d = dot3(&n, s0);
+    Some((n, d))
+}
+
+/// MostDeepPoints
+fn ttl_most_deep(points: &LineSet, n: &[Real], d: Real, deep: &mut LineSet) -> Real {
+    let mut cand = [0usize; 8];
+    let mut maxdeep = -INFINITY;
+    deep.n = 0;
+    for i in 0..points.n {
+        let mut dist = dot3(n, &points.p[i]) - d;
+        dist *= -1.0;
+        if dist > maxdeep {
+            maxdeep = dist;
+            deep.n = 1;
+            cand[0] = i;
+        } else if dist + 0.000001 >= maxdeep {
+            deep.n += 1;
+            cand[deep.n - 1] = i;
+        }
+    }
+    for i in 0..deep.n {
+        let p = points.p[cand[i]];
+        deep.p[i][0] = p[0];
+        deep.p[i][1] = p[1];
+        deep.p[i][2] = p[2];
+    }
+    maxdeep
+}
+
+/// ClipPointsByTri (never with the triangle's own plane here)
+fn ttl_clip_by_tri(points: &[V3; 3], tri: &[V3; 3], tn: &[Real]) -> LineSet {
+    let mut set = LineSet::new();
+    set.n = 3;
+    set.p[..3].copy_from_slice(points);
+    for i in 0..3 {
+        // BuildEdgePlane
+        let e0 = sub3(&tri[(i + 1) % 3], &tri[i]);
+        let mut pn = cross(&e0, tn);
+        if safe_normalize3(&mut pn) {
+            let pd = dot3(&pn, &tri[i]);
+            ttl_clip(&pn, pd, &mut set);
+        }
+    }
+    set
+}
+
+/// FindTriangleTriangleCollision: (depth, separating normal)
+fn ttl_tri_tri(tri1: &[V3; 3], tri2: &[V3; 3], deep: &mut LineSet) -> (Real, V3) {
+    let mut maxdeep = INFINITY;
+    let mut mostdir = 0;
+    let mut sep: V3 = [0.0; 4];
+    let mut deep1 = LineSet::new();
+    let mut deep2 = LineSet::new();
+    if let Some((n1, d1)) = ttl_build_plane(&tri1[0], &tri1[1], &tri1[2]) {
+        let c1 = ttl_clip_by_tri(tri2, tri1, &n1);
+        maxdeep = ttl_most_deep(&c1, &n1, d1, &mut deep1);
+        sep = [n1[0], n1[1], n1[2], 0.0];
+    }
+    if let Some((n2, d2)) = ttl_build_plane(&tri2[0], &tri2[1], &tri2[2]) {
+        let c2 = ttl_clip_by_tri(tri1, tri2, &n2);
+        let dist = ttl_most_deep(&c2, &n2, d2, &mut deep2);
+        if dist < maxdeep {
+            maxdeep = dist;
+            mostdir = 1;
+            sep = [n2[0], n2[1], n2[2], 0.0];
+        }
+    }
+    if mostdir == 0 {
+        deep.n = deep1.n;
+        deep.p[..deep1.n].copy_from_slice(&deep1.p[..deep1.n]);
+        for k in 0..3 {
+            sep[k] *= -1.0;
+        }
+    } else {
+        deep.n = deep2.n;
+        deep.p[..deep2.n].copy_from_slice(&deep2.p[..deep2.n]);
+    }
+    (maxdeep, sep)
+}
+
+/// dCollideTTL
+fn collide_trimesh_trimesh(o1: &Prim, o2: &Prim, flags: i32) -> Vec<ContactGeom> {
+    let (Shape::TriMesh(d1), Shape::TriMesh(d2)) = (o1.shape, o2.shape) else { return Vec::new() };
+    let (p1, r1) = (&o1.pr.pos, &o1.pr.r);
+    let (p2, r2) = (&o2.pr.pos, &o2.pr.r);
+    let off2 = sub3(p2, p1);
+    let am = opcode::make_matrix(&[0.0, 0.0, 0.0], r1);
+    let bm = opcode::make_matrix(&off2, r2);
+    let pairs = opcode::TreeCollider::collide(&d1.mesh, &d1.model, &am, &d2.mesh, &d2.model, &bm);
+    let maxc = (flags & NUMC_MASK) as usize;
+    let mut t = Ttl { out: Vec::new(), local: ContactGeom::default(), count: 0, maxc, hash: TtlHash { nodes: vec![([(0, 0); 4], 0); 256] }, g1: o1, g2: o2 };
+    let unimportant = flags & CONTACTS_UNIMPORTANT != 0;
+    for (id1, id2) in pairs {
+        let mut v1 = fetch_triangle(d1, id1 as usize, p1, r1);
+        let mut v2 = fetch_triangle(d2, id2 as usize, p2, r2);
+        for j in 0..3 {
+            v1[j][3] = 1.0;
+            v2[j][3] = 1.0;
+        }
+        // TriTriContacts
+        let mut pts = LineSet::new();
+        let (depth, normal) = ttl_tri_tri(&v1, &v2, &mut pts);
+        if depth >= 0.0 {
+            for k in 0..pts.n {
+                t.push(id1 as i32, id2 as i32, &pts.p[k], &normal, depth);
+                if unimportant && t.count == maxc {
+                    break;
+                }
+            }
+        }
+        if unimportant && t.count == maxc {
+            break;
+        }
+    }
+    t.out.truncate(t.count);
+    t.out
 }

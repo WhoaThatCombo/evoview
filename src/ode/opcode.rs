@@ -535,3 +535,399 @@ impl<'a> RayCollider<'a> {
         }
     }
 }
+
+/// OPCODE's TransformPoint (translation first in the sum)
+#[inline]
+fn tp(s: P3, r: &[[f32; 3]; 3], t: P3) -> P3 {
+    [
+        t[0] + s[0] * r[0][0] + s[1] * r[1][0] + s[2] * r[2][0],
+        t[1] + s[0] * r[0][1] + s[1] * r[1][1] + s[2] * r[2][1],
+        t[2] + s[0] * r[0][2] + s[1] * r[1][2] + s[2] * r[2][2],
+    ]
+}
+#[inline]
+fn fabs(x: f32) -> f32 {
+    f32::from_bits(x.to_bits() & 0x7fff_ffff)
+}
+
+/// AABBTreeCollider on two no-leaf trees, as ODE's trimesh-trimesh sets it
+/// up: no first-contact exit, no temporal coherence, full box-box and
+/// prim-box tests. Collects every overlapping triangle pair.
+pub struct TreeCollider<'a> {
+    mesh0: &'a MeshData,
+    mesh1: &'a MeshData,
+    r0to1: [[f32; 3]; 3],
+    r1to0: [[f32; 3]; 3],
+    t0to1: P3,
+    t1to0: P3,
+    ar: [[f32; 3]; 3],
+    leaf: [P3; 3],
+    leaf_index: u32,
+    pub pairs: Vec<(u32, u32)>,
+}
+
+impl<'a> TreeCollider<'a> {
+    /// AABBTreeCollider::Collide(BVTCache&, world0, world1)
+    pub fn collide(mesh0: &'a MeshData, model0: &Model, world0: &M44, mesh1: &'a MeshData, model1: &Model, world1: &M44) -> Vec<(u32, u32)> {
+        use super::volume::mul44;
+        // InitQuery
+        let inv0 = invert_pr(world0);
+        let inv1 = invert_pr(world1);
+        let w01 = mul44(world0, &inv1);
+        let w10 = mul44(world1, &inv0);
+        let m3 = |m: &M44| [[m[0][0], m[0][1], m[0][2]], [m[1][0], m[1][1], m[1][2]], [m[2][0], m[2][1], m[2][2]]];
+        let r1to0 = m3(&w10);
+        let mut ar = [[0.0f32; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                ar[i][j] = 1e-6f32 + r1to0[i][j].abs();
+            }
+        }
+        let mut c = TreeCollider {
+            mesh0,
+            mesh1,
+            r0to1: m3(&w01),
+            r1to0,
+            t0to1: [w01[3][0], w01[3][1], w01[3][2]],
+            t1to0: [w10[3][0], w10[3][1], w10[3][2]],
+            ar,
+            leaf: [[0.0; 3]; 3],
+            leaf_index: 0,
+            pairs: Vec::new(),
+        };
+        if model0.nodes.is_empty() || model1.nodes.is_empty() {
+            return c.pairs;
+        }
+        c.nodes(&model0.nodes, 0, &model1.nodes, 0);
+        c.pairs
+    }
+
+    #[allow(clippy::needless_range_loop)]
+    fn box_box(&self, ea: P3, ca: P3, eb: P3, cb: P3) -> bool {
+        let r = &self.r1to0;
+        let ar = &self.ar;
+        let tx = (r[0][0] * cb[0] + r[1][0] * cb[1] + r[2][0] * cb[2]) + self.t1to0[0] - ca[0];
+        let t = ea[0] + eb[0] * ar[0][0] + eb[1] * ar[1][0] + eb[2] * ar[2][0];
+        if fabs(tx) > t {
+            return false;
+        }
+        let ty = (r[0][1] * cb[0] + r[1][1] * cb[1] + r[2][1] * cb[2]) + self.t1to0[1] - ca[1];
+        let t = ea[1] + eb[0] * ar[0][1] + eb[1] * ar[1][1] + eb[2] * ar[2][1];
+        if fabs(ty) > t {
+            return false;
+        }
+        let tz = (r[0][2] * cb[0] + r[1][2] * cb[1] + r[2][2] * cb[2]) + self.t1to0[2] - ca[2];
+        let t = ea[2] + eb[0] * ar[0][2] + eb[1] * ar[1][2] + eb[2] * ar[2][2];
+        if fabs(tz) > t {
+            return false;
+        }
+        for i in 0..3 {
+            let t = tx * r[i][0] + ty * r[i][1] + tz * r[i][2];
+            let t2 = ea[0] * ar[i][0] + ea[1] * ar[i][1] + ea[2] * ar[i][2] + eb[i];
+            if fabs(t) > t2 {
+                return false;
+            }
+        }
+        // mFullBoxBoxTest
+        let tests: [(f32, f32); 9] = [
+            (tz * r[0][1] - ty * r[0][2], ea[1] * ar[0][2] + ea[2] * ar[0][1] + eb[1] * ar[2][0] + eb[2] * ar[1][0]),
+            (tz * r[1][1] - ty * r[1][2], ea[1] * ar[1][2] + ea[2] * ar[1][1] + eb[0] * ar[2][0] + eb[2] * ar[0][0]),
+            (tz * r[2][1] - ty * r[2][2], ea[1] * ar[2][2] + ea[2] * ar[2][1] + eb[0] * ar[1][0] + eb[1] * ar[0][0]),
+            (tx * r[0][2] - tz * r[0][0], ea[0] * ar[0][2] + ea[2] * ar[0][0] + eb[1] * ar[2][1] + eb[2] * ar[1][1]),
+            (tx * r[1][2] - tz * r[1][0], ea[0] * ar[1][2] + ea[2] * ar[1][0] + eb[0] * ar[2][1] + eb[2] * ar[0][1]),
+            (tx * r[2][2] - tz * r[2][0], ea[0] * ar[2][2] + ea[2] * ar[2][0] + eb[0] * ar[1][1] + eb[1] * ar[0][1]),
+            (ty * r[0][0] - tx * r[0][1], ea[0] * ar[0][1] + ea[1] * ar[0][0] + eb[1] * ar[2][2] + eb[2] * ar[1][2]),
+            (ty * r[1][0] - tx * r[1][1], ea[0] * ar[1][1] + ea[1] * ar[1][0] + eb[0] * ar[2][2] + eb[2] * ar[0][2]),
+            (ty * r[2][0] - tx * r[2][1], ea[0] * ar[2][1] + ea[1] * ar[2][0] + eb[0] * ar[1][2] + eb[1] * ar[0][2]),
+        ];
+        for (t, t2) in tests {
+            if fabs(t) > t2 {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn tri_box(&self, center: P3, extents: P3) -> bool {
+        let v = |k: usize| sub(self.leaf[k], center);
+        super::volume::tri_box_overlap(v(0), v(1), v(2), extents)
+    }
+
+    fn leaf_from0(&mut self, id: u32) {
+        self.leaf_index = id;
+        let t = self.mesh0.tri(id as usize);
+        for k in 0..3 {
+            self.leaf[k] = tp(t[k], &self.r0to1, self.t0to1);
+        }
+    }
+    fn leaf_from1(&mut self, id: u32) {
+        self.leaf_index = id;
+        let t = self.mesh1.tri(id as usize);
+        for k in 0..3 {
+            self.leaf[k] = tp(t[k], &self.r1to0, self.t1to0);
+        }
+    }
+    /// PrimTestTriIndex
+    fn prim_tri_index(&mut self, id1: u32) {
+        let u = self.mesh1.tri(id1 as usize);
+        if tri_tri_overlap(self.leaf[0], self.leaf[1], self.leaf[2], u[0], u[1], u[2]) {
+            self.pairs.push((self.leaf_index, id1));
+        }
+    }
+    /// PrimTestIndexTri
+    fn prim_index_tri(&mut self, id0: u32) {
+        let u = self.mesh0.tri(id0 as usize);
+        if tri_tri_overlap(self.leaf[0], self.leaf[1], self.leaf[2], u[0], u[1], u[2]) {
+            self.pairs.push((id0, self.leaf_index));
+        }
+    }
+    /// _CollideTriBox (tree 1 against the leaf triangle of tree 0)
+    fn tri_box_node(&mut self, nodes: &[NoLeafNode], b: usize) {
+        let n = nodes[b];
+        if !self.tri_box(n.center, n.extents) {
+            return;
+        }
+        match n.pos {
+            Child::Prim(p) => self.prim_tri_index(p),
+            Child::Node(c) => self.tri_box_node(nodes, c as usize),
+        }
+        match n.neg {
+            Child::Prim(p) => self.prim_tri_index(p),
+            Child::Node(c) => self.tri_box_node(nodes, c as usize),
+        }
+    }
+    /// _CollideBoxTri (tree 0 against the leaf triangle of tree 1)
+    fn box_tri_node(&mut self, nodes: &[NoLeafNode], b: usize) {
+        let n = nodes[b];
+        if !self.tri_box(n.center, n.extents) {
+            return;
+        }
+        match n.pos {
+            Child::Prim(p) => self.prim_index_tri(p),
+            Child::Node(c) => self.box_tri_node(nodes, c as usize),
+        }
+        match n.neg {
+            Child::Prim(p) => self.prim_index_tri(p),
+            Child::Node(c) => self.box_tri_node(nodes, c as usize),
+        }
+    }
+    /// one side of tree 1 (`bc`) against a leaf of tree 0 already loaded
+    fn b_side_vs_leaf(&mut self, n1: &[NoLeafNode], bc: Child) {
+        match bc {
+            Child::Prim(p) => self.prim_tri_index(p),
+            Child::Node(c) => self.tri_box_node(n1, c as usize),
+        }
+    }
+    /// child `ac` of tree 0 (a node) against one side `bc` of tree 1
+    fn a_node_vs_b_side(&mut self, n0: &[NoLeafNode], ac: u32, n1: &[NoLeafNode], bc: Child) {
+        match bc {
+            Child::Prim(p) => {
+                self.leaf_from1(p);
+                self.box_tri_node(n0, ac as usize);
+            }
+            Child::Node(c) => self.nodes(n0, ac as usize, n1, c as usize),
+        }
+    }
+    /// _Collide(AABBNoLeafNode*, AABBNoLeafNode*)
+    fn nodes(&mut self, n0: &[NoLeafNode], a: usize, n1: &[NoLeafNode], b: usize) {
+        let (na, nb) = (n0[a], n1[b]);
+        if !self.box_box(na.extents, na.center, nb.extents, nb.center) {
+            return;
+        }
+        for ac in [na.pos, na.neg] {
+            match ac {
+                Child::Prim(p) => {
+                    self.leaf_from0(p);
+                    self.b_side_vs_leaf(n1, nb.pos);
+                    self.b_side_vs_leaf(n1, nb.neg);
+                }
+                Child::Node(c) => {
+                    self.a_node_vs_b_side(n0, c, n1, nb.pos);
+                    self.a_node_vs_b_side(n0, c, n1, nb.neg);
+                }
+            }
+        }
+    }
+}
+
+/// CoplanarTriTri
+fn coplanar_tri_tri(n: P3, v0: P3, v1: P3, v2: P3, u0: P3, u1: P3, u2: P3) -> bool {
+    let a = [fabs(n[0]), fabs(n[1]), fabs(n[2])];
+    let (i0, i1) = if a[0] > a[1] {
+        if a[0] > a[2] {
+            (1, 2)
+        } else {
+            (0, 1)
+        }
+    } else if a[2] > a[1] {
+        (0, 1)
+    } else {
+        (0, 2)
+    };
+    // EDGE_AGAINST_TRI_EDGES
+    let edge_against = |va: P3, vb: P3| -> bool {
+        let ax = vb[i0] - va[i0];
+        let ay = vb[i1] - va[i1];
+        let edge_edge = |ua: P3, ub: P3| -> bool {
+            let bx = ua[i0] - ub[i0];
+            let by = ua[i1] - ub[i1];
+            let cx = va[i0] - ua[i0];
+            let cy = va[i1] - ua[i1];
+            let f = ay * bx - ax * by;
+            let d = by * cx - bx * cy;
+            if (f > 0.0 && d >= 0.0 && d <= f) || (f < 0.0 && d <= 0.0 && d >= f) {
+                let e = ax * cy - ay * cx;
+                if f > 0.0 {
+                    if e >= 0.0 && e <= f {
+                        return true;
+                    }
+                } else if e <= 0.0 && e >= f {
+                    return true;
+                }
+            }
+            false
+        };
+        edge_edge(u0, u1) || edge_edge(u1, u2) || edge_edge(u2, u0)
+    };
+    if edge_against(v0, v1) || edge_against(v1, v2) || edge_against(v2, v0) {
+        return true;
+    }
+    // POINT_IN_TRI
+    let point_in = |p: P3, t0: P3, t1: P3, t2: P3| -> bool {
+        let mut a = t1[i1] - t0[i1];
+        let mut b = -(t1[i0] - t0[i0]);
+        let mut c = -a * t0[i0] - b * t0[i1];
+        let d0 = a * p[i0] + b * p[i1] + c;
+        a = t2[i1] - t1[i1];
+        b = -(t2[i0] - t1[i0]);
+        c = -a * t1[i0] - b * t1[i1];
+        let d1 = a * p[i0] + b * p[i1] + c;
+        a = t0[i1] - t2[i1];
+        b = -(t0[i0] - t2[i0]);
+        c = -a * t2[i0] - b * t2[i1];
+        let d2 = a * p[i0] + b * p[i1] + c;
+        d0 * d1 > 0.0 && d0 * d2 > 0.0
+    };
+    point_in(v0, u0, u1, u2) || point_in(u0, v0, v1, v2)
+}
+
+/// NEWCOMPUTE_INTERVALS: Some((a, b, c, x0, x1)), or None for coplanar
+#[allow(clippy::too_many_arguments)]
+fn intervals(vv0: f32, vv1: f32, vv2: f32, d0: f32, d1: f32, d2: f32, d0d1: f32, d0d2: f32) -> Option<(f32, f32, f32, f32, f32)> {
+    if d0d1 > 0.0 {
+        Some((vv2, (vv0 - vv2) * d2, (vv1 - vv2) * d2, d2 - d0, d2 - d1))
+    } else if d0d2 > 0.0 {
+        Some((vv1, (vv0 - vv1) * d1, (vv2 - vv1) * d1, d1 - d0, d1 - d2))
+    } else if d1 * d2 > 0.0 || d0 != 0.0 {
+        Some((vv0, (vv1 - vv0) * d0, (vv2 - vv0) * d0, d0 - d1, d0 - d2))
+    } else if d1 != 0.0 {
+        Some((vv1, (vv0 - vv1) * d1, (vv2 - vv1) * d1, d1 - d0, d1 - d2))
+    } else if d2 != 0.0 {
+        Some((vv2, (vv0 - vv2) * d2, (vv1 - vv2) * d2, d2 - d0, d2 - d1))
+    } else {
+        None
+    }
+}
+
+/// AABBTreeCollider::TriTriOverlap (Moller, with OPCODE's epsilon test)
+pub fn tri_tri_overlap(v0: P3, v1: P3, v2: P3, u0: P3, u1: P3, u2: P3) -> bool {
+    let neg = |a: P3| [-a[0], -a[1], -a[2]];
+    let n1 = cross(sub(v1, v0), sub(v2, v0));
+    let d1 = dot(neg(n1), v0);
+    let mut du0 = dot(n1, u0) + d1;
+    let mut du1 = dot(n1, u1) + d1;
+    let mut du2 = dot(n1, u2) + d1;
+    let (absd1, sq1) = (fabs(d1), sqmag(n1));
+    if absd1 >= sq1 {
+        if fabs(du0) <= 0.000001 * absd1 {
+            du0 = 0.0;
+        }
+        if fabs(du1) <= 0.000001 * absd1 {
+            du1 = 0.0;
+        }
+        if fabs(du2) <= 0.000001 * absd1 {
+            du2 = 0.0;
+        }
+    } else {
+        if fabs(du0) <= 0.000001 * fmax(absd1, fmin(sq1, sqmag(u0))) {
+            du0 = 0.0;
+        }
+        if fabs(du1) <= 0.000001 * fmax(absd1, fmin(sq1, sqmag(u1))) {
+            du1 = 0.0;
+        }
+        if fabs(du2) <= 0.000001 * fmax(absd1, fmin(sq1, sqmag(u2))) {
+            du2 = 0.0;
+        }
+    }
+    let du0du1 = du0 * du1;
+    let du0du2 = du0 * du2;
+    if du0du1 > 0.0 && du0du2 > 0.0 {
+        return false;
+    }
+    let n2 = cross(sub(u1, u0), sub(u2, u0));
+    let d2 = dot(neg(n2), u0);
+    let mut dv0 = dot(n2, v0) + d2;
+    let mut dv1 = dot(n2, v1) + d2;
+    let mut dv2 = dot(n2, v2) + d2;
+    let (absd2, sq2) = (fabs(d2), sqmag(n2));
+    if absd2 >= sq2 {
+        if fabs(dv0) <= 0.000001 * absd2 {
+            dv0 = 0.0;
+        }
+        if fabs(dv1) <= 0.000001 * absd2 {
+            dv1 = 0.0;
+        }
+        if fabs(dv2) <= 0.000001 * absd2 {
+            dv2 = 0.0;
+        }
+    } else {
+        if fabs(dv0) <= 0.000001 * fmax(absd2, fmin(sq2, sqmag(v0))) {
+            dv0 = 0.0;
+        }
+        if fabs(dv1) <= 0.000001 * fmax(absd2, fmin(sq2, sqmag(v1))) {
+            dv1 = 0.0;
+        }
+        if fabs(dv2) <= 0.000001 * fmax(absd2, fmin(sq2, sqmag(v2))) {
+            dv2 = 0.0;
+        }
+    }
+    let dv0dv1 = dv0 * dv1;
+    let dv0dv2 = dv0 * dv2;
+    if dv0dv1 > 0.0 && dv0dv2 > 0.0 {
+        return false;
+    }
+    let dd = cross(n1, n2);
+    let mut max = dd[0].abs();
+    let mut index = 0;
+    let bb = dd[1].abs();
+    let cc = dd[2].abs();
+    if bb > max {
+        max = bb;
+        index = 1;
+    }
+    if cc > max {
+        index = 2;
+    }
+    let (vp0, vp1, vp2) = (v0[index], v1[index], v2[index]);
+    let (up0, up1, up2) = (u0[index], u1[index], u2[index]);
+    let Some((a, b, c, x0, x1)) = intervals(vp0, vp1, vp2, dv0, dv1, dv2, dv0dv1, dv0dv2) else {
+        return coplanar_tri_tri(n1, v0, v1, v2, u0, u1, u2);
+    };
+    let Some((d, e, f, y0, y1)) = intervals(up0, up1, up2, du0, du1, du2, du0du1, du0du2) else {
+        return coplanar_tri_tri(n1, v0, v1, v2, u0, u1, u2);
+    };
+    let xx = x0 * x1;
+    let yy = y0 * y1;
+    let xxyy = xx * yy;
+    let mut tmp = a * xxyy;
+    let mut i1 = [tmp + b * x1 * yy, tmp + c * x0 * yy];
+    tmp = d * xxyy;
+    let mut i2 = [tmp + e * xx * y1, tmp + f * xx * y0];
+    if i1[0] > i1[1] {
+        i1.swap(0, 1);
+    }
+    if i2[0] > i2[1] {
+        i2.swap(0, 1);
+    }
+    !(i1[1] < i2[0] || i2[1] < i1[0])
+}

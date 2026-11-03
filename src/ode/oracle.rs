@@ -796,3 +796,56 @@ fn sap_space_matches_ode_0_15_2() {
     let ours = collide_scenario_in(steps, 2);
     compare(&ours, &[&steps.to_string(), "sap"]);
 }
+
+pub fn ttl_scenario(steps: usize) -> String {
+    use super::collision::{TriMeshData, CONTACTS_UNIMPORTANT};
+    let mut out = String::new();
+    let mut w = World::new();
+    let (v, t) = grid();
+    let mut v2 = Vec::new();
+    for j in 0..7 {
+        for i in 0..7 {
+            let (x, z) = ((i as f64 - 3.0) * 0.3, (j as f64 - 3.0) * 0.3);
+            v2.push([x, 0.15 * (x * 2.1).cos() * (z * 1.7).sin(), z]);
+        }
+    }
+    let mut t2 = Vec::new();
+    for j in 0..6u32 {
+        for i in 0..6u32 {
+            let (a, b, c, d) = (j * 7 + i, j * 7 + i + 1, j * 7 + i + 7, j * 7 + i + 8);
+            t2.push([a, c, d]);
+            t2.push([a, d, b]);
+        }
+    }
+    let (_, points, _, otris) = octa(0.5, 0.35, 0.4);
+    let overts: Vec<[f64; 3]> = points.chunks(3).map(|p| [p[0] * 0.8, p[1] * 0.8, p[2] * 0.8]).collect();
+    let a = w.create_trimesh(None, TriMeshData::build(v, t));
+    let b = w.create_trimesh(None, TriMeshData::build(v2, t2));
+    let o = w.create_trimesh(None, TriMeshData::build(overts, otris));
+    for s in 0..steps {
+        let fs = s as f64;
+        let _ = writeln!(out, "S{}", s);
+        w.geom_set_rotation(a, &r_from_axis_and_angle(0.1, 1.0, 0.2, 0.03 * fs));
+        w.geom_set_position(a, 0.005 * fs, -0.1, 0.01 * fs);
+        for q in 0..10 {
+            let fq = q as f64;
+            let (x, z) = (-2.2 + 0.45 * fq + 0.01 * fs, 1.9 - 0.4 * fq);
+            let y = 0.3 * (x * 1.3).sin() * (z * 0.7).cos() + 0.1 * x - 0.1 + 0.08 * (fq + 0.1 * fs).sin();
+            let maxc = (1 + (q as i32 % 5) * 3) | if q % 4 == 3 { CONTACTS_UNIMPORTANT } else { 0 };
+            w.geom_set_rotation(b, &r_from_axis_and_angle(fq.sin(), 1.0, 0.4 * fq.cos(), 0.2 * fq + 0.04 * fs));
+            w.geom_set_position(b, x, y, z);
+            both(&mut w, &mut out, 'A', q, a, b, maxc);
+            w.geom_set_rotation(o, &r_from_axis_and_angle((fq * 0.8).cos(), 0.6, 1.0, 0.5 * fq + 0.03 * fs));
+            w.geom_set_position(o, z, y + 0.05, x);
+            both(&mut w, &mut out, 'O', q, a, o, maxc);
+        }
+    }
+    out
+}
+
+#[test]
+fn trimesh_trimesh_matches_ode_0_15_2() {
+    let steps = oracle_steps().min(200);
+    let ours = ttl_scenario(steps);
+    compare(&ours, &[&steps.to_string(), "ttl"]);
+}
