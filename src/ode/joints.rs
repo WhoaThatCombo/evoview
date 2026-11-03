@@ -334,6 +334,9 @@ pub struct ContactGeom {
     pub pos: V3,
     pub normal: V3,
     pub depth: Real,
+    /// the two geoms (collision.rs GeomId)
+    pub g1: usize,
+    pub g2: usize,
     pub side1: i32,
     pub side2: i32,
 }

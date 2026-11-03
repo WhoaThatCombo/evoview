@@ -23,8 +23,11 @@ static void dump_body(dBodyID b) {
     printf("\n");
 }
 
+static int collide_scenario(int steps);
+
 int main(int argc, char **argv) {
     int steps = argc > 1 ? atoi(argv[1]) : 400;
+    if (argc > 2 && !strcmp(argv[2], "collide")) return collide_scenario(steps);
     dInitODE2(0);
     dRandSetSeed(12345);
     dWorldID w = dWorldCreate();
@@ -239,5 +242,117 @@ int main(int argc, char **argv) {
     }
     dWorldDestroy(w);
     dCloseODE();
+    return 0;
+}
+
+// ---- scenario 2: collision. A pile of boxes, spheres and capsules on a
+// plane in a hash space, the spheres in a nested simple space, an offset
+// capsule, and a ray on a body; contacts from dCollide each step.
+static dWorldID cw;
+static dJointGroupID cgroup;
+static int ray_hits;
+static int maxc = 8;
+static void dump_contacts(dContactGeom *c, int n) {
+    for (int i = 0; i < n; i++) {
+        printf("C");
+        for (int k = 0; k < 3; k++) hex(c[i].pos[k]);
+        for (int k = 0; k < 3; k++) hex(c[i].normal[k]);
+        hex(c[i].depth);
+        printf("\n");
+    }
+}
+static void near_cb(void *, dGeomID o1, dGeomID o2) {
+    if (dGeomIsSpace(o1) || dGeomIsSpace(o2)) {
+        dSpaceCollide2(o1, o2, 0, &near_cb);
+        return;
+    }
+    dContactGeom cg[8];
+    int n = dCollide(o1, o2, maxc, cg, sizeof(dContactGeom));
+    dump_contacts(cg, n);
+    if (dGeomGetClass(o1) == dRayClass || dGeomGetClass(o2) == dRayClass) {
+        ray_hits += n;
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        dContact ct;
+        memset(&ct, 0, sizeof(ct));
+        ct.surface.mode = dContactApprox1 | dContactBounce | dContactSoftCFM;
+        ct.surface.mu = 0.6;
+        ct.surface.bounce = 0.1;
+        ct.surface.bounce_vel = 0.2;
+        ct.surface.soft_cfm = 1e-6;
+        ct.geom = cg[i];
+        dJointID j = dJointCreateContact(cw, cgroup, &ct);
+        dJointAttach(j, dGeomGetBody(o1), dGeomGetBody(o2));
+    }
+}
+static int collide_scenario(int steps) {
+    dInitODE2(0);
+    dRandSetSeed(777);
+    cw = dWorldCreate();
+    dWorldSetGravity(cw, 0, -9.806, 0);
+    dWorldSetQuickStepNumIterations(cw, 20);
+    dWorldSetContactSurfaceLayer(cw, 0.002);
+    cgroup = dJointGroupCreate(0);
+    dSpaceID space = dHashSpaceCreate(0);
+    dHashSpaceSetLevels(space, -4, 6);
+    dSpaceID inner = dSimpleSpaceCreate(space);
+    dCreatePlane(space, 0, 1, 0, 0);
+    dBodyID B[16];
+    int nb = 0;
+    dMass m;
+    dMatrix3 R;
+    for (int i = 0; i < 6; i++) {
+        dBodyID b = dBodyCreate(cw);
+        dMassSetBoxTotal(&m, 2.0 + i, 0.4 + 0.05 * i, 0.3, 0.5);
+        dBodySetMass(b, &m);
+        dBodySetPosition(b, 0.3 * i - 0.8, 0.5 + 0.45 * i, 0.1 * (i % 3));
+        dRFromAxisAndAngle(R, 0.3 * i, 1, 0.2, 0.25 * i);
+        dBodySetRotation(b, R);
+        dBodySetAngularVel(b, 0.2 * i, 0, -0.1 * i);
+        dGeomID g = dCreateBox(space, 0.4 + 0.05 * i, 0.3, 0.5);
+        dGeomSetBody(g, b);
+        B[nb++] = b;
+    }
+    for (int i = 0; i < 4; i++) {
+        dBodyID b = dBodyCreate(cw);
+        dMassSetSphereTotal(&m, 1.0, 0.15 + 0.03 * i);
+        dBodySetMass(b, &m);
+        dBodySetPosition(b, -0.5 + 0.35 * i, 3.2 + 0.3 * i, -0.2 + 0.15 * i);
+        dBodySetLinearVel(b, 0.3, -1, 0.1 * i);
+        dGeomID g = dCreateSphere(inner, 0.15 + 0.03 * i);
+        dGeomSetBody(g, b);
+        B[nb++] = b;
+    }
+    for (int i = 0; i < 3; i++) {
+        dBodyID b = dBodyCreate(cw);
+        dMassSetCapsuleTotal(&m, 1.5, 3, 0.1, 0.5);
+        dBodySetMass(b, &m);
+        dBodySetPosition(b, 0.6 - 0.4 * i, 4.5 + 0.4 * i, 0.3);
+        dRFromAxisAndAngle(R, 1, 0.1 * i, 0, 1.2 + 0.3 * i);
+        dBodySetRotation(b, R);
+        dGeomID g = dCreateCapsule(space, 0.1, 0.5);
+        dGeomSetBody(g, b);
+        if (i == 1) {
+            dGeomSetOffsetPosition(g, 0.05, 0, 0.02);
+            dRFromAxisAndAngle(R, 0, 1, 0, 0.3);
+            dGeomSetOffsetRotation(g, R);
+        }
+        B[nb++] = b;
+    }
+    dGeomID ray = dCreateRay(space, 2.0);
+    dGeomSetBody(ray, B[0]);
+    dGeomSetOffsetRotation(ray, R);
+    for (int s = 0; s < steps; s++) {
+        ray_hits = 0;
+        maxc = s % 3 + 2;
+        printf("S%d\n", s);
+        dSpaceCollide(space, 0, &near_cb);
+        dSpaceCollide(inner, 0, &near_cb);
+        dWorldQuickStep(cw, 0.003);
+        dJointGroupEmpty(cgroup);
+        printf("R%d\n", ray_hits);
+        for (int i = 0; i < nb; i++) dump_body(B[i]);
+    }
     return 0;
 }

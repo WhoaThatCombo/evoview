@@ -307,9 +307,10 @@ pub(crate) fn quick_step_island(w: &mut World, bodies: &[BodyId], joints: &[Join
         b.avel[2] = a[2];
     }
     // ---- stage 6b: integrate positions, clear the force accumulators
-    for &b in bodies {
-        let b = &mut w.bodies[b];
-        step_body(b, h);
+    for &bi in bodies {
+        step_body(&mut w.bodies[bi], h);
+        w.body_geoms_moved(bi);
+        let b = &mut w.bodies[bi];
         b.facc[0] = 0.0;
         b.facc[1] = 0.0;
         b.facc[2] = 0.0;

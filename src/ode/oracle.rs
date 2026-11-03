@@ -219,6 +219,150 @@ pub fn scenario(steps: usize) -> String {
     out
 }
 
+fn dump_contacts(out: &mut String, cs: &[super::joints::ContactGeom]) {
+    for c in cs {
+        out.push('C');
+        for k in 0..3 {
+            hex(out, c.pos[k]);
+        }
+        for k in 0..3 {
+            hex(out, c.normal[k]);
+        }
+        hex(out, c.depth);
+        out.push(char::from(10));
+    }
+}
+
+fn near(w: &mut World, group: GroupId, o1: usize, o2: usize, out: &mut String, ray_hits: &mut usize, maxc: i32) {
+    use super::collision::RAY;
+    if w.geom_is_space(o1) || w.geom_is_space(o2) {
+        for (a, b) in w.space_collide2(o1, o2) {
+            near(w, group, a, b, out, ray_hits, maxc);
+        }
+        return;
+    }
+    let cs = w.collide(o1, o2, maxc);
+    dump_contacts(out, &cs);
+    if w.geom_class(o1) == RAY || w.geom_class(o2) == RAY {
+        *ray_hits += cs.len();
+        return;
+    }
+    for c in &cs {
+        let mut ct = Contact::default();
+        ct.surface.mode = CONTACT_APPROX1 | CONTACT_BOUNCE | CONTACT_SOFT_CFM;
+        ct.surface.mu = 0.6;
+        ct.surface.bounce = 0.1;
+        ct.surface.bounce_vel = 0.2;
+        ct.surface.soft_cfm = 1e-6;
+        ct.geom = *c;
+        let j = w.joint_create_contact(Some(group), &ct);
+        let (b1, b2) = (w.geoms[o1].body, w.geoms[o2].body);
+        w.joint_attach(j, b1, b2);
+    }
+}
+
+pub fn collide_scenario(steps: usize) -> String {
+    let mut out = String::new();
+    rand_set_seed(777);
+    let mut w = World::new();
+    w.set_gravity(0.0, -9.806, 0.0);
+    w.set_quickstep_iterations(20);
+    w.set_contact_surface_layer(0.002);
+    let group = w.joint_group_create();
+    let space = w.hash_space_create(None);
+    w.hash_space_set_levels(space, -4, 6);
+    let inner = w.simple_space_create(Some(space));
+    w.create_plane(Some(space), 0.0, 1.0, 0.0, 0.0);
+    let mut bs = Vec::new();
+    let mut r = IDENTITY_R;
+    for i in 0..6 {
+        let fi = i as f64;
+        let b = w.body_create();
+        w.body_set_mass(b, &Mass::box_total(2.0 + fi, 0.4 + 0.05 * fi, 0.3, 0.5));
+        w.body_set_position(b, 0.3 * fi - 0.8, 0.5 + 0.45 * fi, 0.1 * (i % 3) as f64);
+        r = r_from_axis_and_angle(0.3 * fi, 1.0, 0.2, 0.25 * fi);
+        w.body_set_rotation(b, &r);
+        w.body_set_angular_vel(b, 0.2 * fi, 0.0, -0.1 * fi);
+        let g = w.create_box(Some(space), 0.4 + 0.05 * fi, 0.3, 0.5);
+        w.geom_set_body(g, Some(b));
+        bs.push(b);
+    }
+    for i in 0..4 {
+        let fi = i as f64;
+        let b = w.body_create();
+        w.body_set_mass(b, &Mass::sphere_total(1.0, 0.15 + 0.03 * fi));
+        w.body_set_position(b, -0.5 + 0.35 * fi, 3.2 + 0.3 * fi, -0.2 + 0.15 * fi);
+        w.body_set_linear_vel(b, 0.3, -1.0, 0.1 * fi);
+        let g = w.create_sphere(Some(inner), 0.15 + 0.03 * fi);
+        w.geom_set_body(g, Some(b));
+        bs.push(b);
+    }
+    for i in 0..3 {
+        let fi = i as f64;
+        let b = w.body_create();
+        w.body_set_mass(b, &Mass::capsule_total(1.5, 3, 0.1, 0.5));
+        w.body_set_position(b, 0.6 - 0.4 * fi, 4.5 + 0.4 * fi, 0.3);
+        r = r_from_axis_and_angle(1.0, 0.1 * fi, 0.0, 1.2 + 0.3 * fi);
+        w.body_set_rotation(b, &r);
+        let g = w.create_capsule(Some(space), 0.1, 0.5);
+        w.geom_set_body(g, Some(b));
+        if i == 1 {
+            w.geom_set_offset_position(g, 0.05, 0.0, 0.02);
+            r = r_from_axis_and_angle(0.0, 1.0, 0.0, 0.3);
+            w.geom_set_offset_rotation(g, &r);
+        }
+        bs.push(b);
+    }
+    let ray = w.create_ray(Some(space), 2.0);
+    w.geom_set_body(ray, Some(bs[0]));
+    w.geom_set_offset_rotation(ray, &r);
+    for s in 0..steps {
+        let mut ray_hits = 0;
+        let _ = writeln!(out, "S{}", s);
+        for (a, b) in w.space_collide(space) {
+            near(&mut w, group, a, b, &mut out, &mut ray_hits, (s % 3 + 2) as i32);
+        }
+        for (a, b) in w.space_collide(inner) {
+            near(&mut w, group, a, b, &mut out, &mut ray_hits, (s % 3 + 2) as i32);
+        }
+        w.quick_step(0.003);
+        w.joint_group_empty(group);
+        let _ = writeln!(out, "R{}", ray_hits);
+        for &b in &bs {
+            dump_body(&mut out, w.body(b));
+        }
+    }
+    out
+}
+
+fn compare(ours: &str, args: &[&str]) {
+    let Ok(exe) = std::env::var("ODE_ORACLE") else {
+        eprintln!("ODE_ORACLE not set: ran the scenario only");
+        return;
+    };
+    let o = std::process::Command::new(exe).args(args).output().expect("run ode_oracle");
+    let theirs = String::from_utf8(o.stdout).unwrap();
+    if let Ok(p) = std::env::var("ODE_ORACLE_DUMP") {
+        let _ = std::fs::write(format!("{p}.{}.rs.txt", args.len()), ours);
+        let _ = std::fs::write(format!("{p}.{}.c.txt", args.len()), &theirs);
+    }
+    for (n, (a, b)) in ours.lines().zip(theirs.lines()).enumerate() {
+        assert_eq!(a, b, "first difference at output line {}", n + 1);
+    }
+    assert_eq!(ours.lines().count(), theirs.lines().count());
+}
+
+fn oracle_steps() -> usize {
+    std::env::var("ODE_ORACLE_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(400)
+}
+
+#[test]
+fn collision_matches_ode_0_15_2() {
+    let steps = oracle_steps();
+    let ours = collide_scenario(steps);
+    compare(&ours, &[&steps.to_string(), "collide"]);
+}
+
 #[test]
 fn matches_ode_0_15_2() {
     let steps = std::env::var("ODE_ORACLE_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(400);

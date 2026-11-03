@@ -55,6 +55,8 @@ pub struct Body {
     /// (joint, the body at its other end), most recently attached LAST
     /// (ODE's list head is our tail)
     pub(crate) joints: Vec<(JointId, Option<BodyId>)>,
+    /// geoms on this body, most recently attached LAST (ODE's b->geom head)
+    pub(crate) geoms: Vec<super::collision::GeomId>,
     pub flags: u32,
     pub mass: Mass,
     pub inv_i: M3,
@@ -104,6 +106,8 @@ pub struct WorldParams {
 
 pub struct World {
     pub bodies: Vec<Body>,
+    /// the collision layer's geoms and spaces (collision.rs)
+    pub geoms: Vec<super::collision::Geom>,
     pub joints: Vec<Joint>,
     pub(crate) body_order: Vec<BodyId>,
     pub(crate) joint_order: Vec<JointId>,
@@ -130,6 +134,7 @@ impl World {
     pub fn new() -> World {
         World {
             bodies: Vec::new(),
+            geoms: Vec::new(),
             joints: Vec::new(),
             body_order: Vec::new(),
             joint_order: Vec::new(),
@@ -172,6 +177,7 @@ impl World {
     pub fn body_create(&mut self) -> BodyId {
         let mut b = Body {
             joints: Vec::new(),
+            geoms: Vec::new(),
             flags: 0,
             mass: Mass::parameters(1.0, [0.0; 3], 1.0, 1.0, 1.0, 0.0, 0.0, 0.0),
             inv_i: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -227,8 +233,11 @@ impl World {
         self.body_order.push(id);
         id
     }
-    /// dBodyDestroy (geoms are the caller's)
+    /// dBodyDestroy
     pub fn body_destroy(&mut self, id: BodyId) {
+        for g in self.bodies[id].geoms.clone().into_iter().rev() {
+            self.geom_set_body(g, None);
+        }
         let list = std::mem::take(&mut self.bodies[id].joints);
         for &(j, _) in list.iter().rev() {
             let jt = &mut self.joints[j];
@@ -251,6 +260,7 @@ impl World {
         b.pos[0] = x;
         b.pos[1] = y;
         b.pos[2] = z;
+        self.body_geoms_moved(id);
     }
     /// dBodySetRotation
     pub fn body_set_rotation(&mut self, id: BodyId, r: &M3) {
@@ -259,6 +269,7 @@ impl World {
         orthogonalize_r(&mut b.r);
         b.q = q_from_r(r);
         normalize4(&mut b.q);
+        self.body_geoms_moved(id);
     }
     /// dBodySetQuaternion
     pub fn body_set_quaternion(&mut self, id: BodyId, q: &Quat) {
@@ -266,6 +277,7 @@ impl World {
         b.q = *q;
         normalize4(&mut b.q);
         b.r = r_from_q(&b.q);
+        self.body_geoms_moved(id);
     }
     pub fn body_set_linear_vel(&mut self, id: BodyId, x: Real, y: Real, z: Real) {
         let b = &mut self.bodies[id];

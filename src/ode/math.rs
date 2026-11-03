@@ -729,22 +729,25 @@ impl Mass {
 }
 
 // ---- misc.cpp: the random generator quickstep reorders constraints with.
-// One global seed, as in ODE.
+// ODE keeps one global seed; here it is per thread, so worlds stepped on
+// different threads (and parallel tests) don't disturb each other.
 
-use std::sync::atomic::{AtomicU32, Ordering};
-static SEED: AtomicU32 = AtomicU32::new(0);
+use std::cell::Cell;
+thread_local!(static SEED: Cell<u32> = const { Cell::new(0) });
 
 /// dRand
 pub fn rand() -> u32 {
-    let s = SEED.load(Ordering::Relaxed).wrapping_mul(1664525).wrapping_add(1013904223);
-    SEED.store(s, Ordering::Relaxed);
-    s
+    SEED.with(|s| {
+        let n = s.get().wrapping_mul(1664525).wrapping_add(1013904223);
+        s.set(n);
+        n
+    })
 }
 pub fn rand_get_seed() -> u32 {
-    SEED.load(Ordering::Relaxed)
+    SEED.with(|s| s.get())
 }
-pub fn rand_set_seed(s: u32) {
-    SEED.store(s, Ordering::Relaxed);
+pub fn rand_set_seed(n: u32) {
+    SEED.with(|s| s.set(n));
 }
 /// dRandInt: 0..n
 pub fn rand_int(n: i32) -> i32 {

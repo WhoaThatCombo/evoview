@@ -8,6 +8,7 @@
 #![allow(dead_code)]
 
 pub mod api;
+pub mod collision;
 pub mod joints;
 pub mod math;
 pub mod quickstep;
