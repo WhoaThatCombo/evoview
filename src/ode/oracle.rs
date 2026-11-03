@@ -571,3 +571,201 @@ fn matches_ode_0_15_2() {
     }
     assert_eq!(ours.lines().count(), theirs.lines().count());
 }
+
+fn query(w: &mut World, out: &mut String, tag: char, q: usize, a: usize, b: usize, maxc: i32) {
+    let cs = w.collide(a, b, maxc);
+    let _ = write!(out, "{}{} {}", tag, q, cs.len());
+    let gi = |g: usize| if g < 16 { g as i64 } else { -1 };
+    for c in &cs {
+        let _ = write!(out, " {}/{}/{}/{}", c.side1, c.side2, gi(c.g1), gi(c.g2));
+    }
+    out.push(char::from(10));
+    dump_contacts(out, &cs);
+}
+fn both(w: &mut World, out: &mut String, tag: char, q: usize, a: usize, b: usize, maxc: i32) {
+    query(w, out, tag, q, a, b, maxc);
+    query(w, out, char::from(tag as u8 + 1), q, b, a, maxc);
+}
+
+/// an octahedron with half-axes a, b, c: (planes, points, polygons, tris)
+fn octa(a: f64, b: f64, c: f64) -> (Vec<f64>, Vec<f64>, Vec<u32>, Vec<[u32; 3]>) {
+    let p = [[a, 0.0, 0.0], [-a, 0.0, 0.0], [0.0, b, 0.0], [0.0, -b, 0.0], [0.0, 0.0, c], [0.0, 0.0, -c]];
+    let points: Vec<f64> = p.iter().flatten().copied().collect();
+    let l = (1.0 / (a * a) + 1.0 / (b * b) + 1.0 / (c * c)).sqrt();
+    let (mut planes, mut polys, mut tris) = (Vec::new(), Vec::new(), Vec::new());
+    for sx in [1i32, -1] {
+        for sy in [1i32, -1] {
+            for sz in [1i32, -1] {
+                planes.extend_from_slice(&[sx as f64 / a / l, sy as f64 / b / l, sz as f64 / c / l, 1.0 / l]);
+                let x = if sx > 0 { 0 } else { 1 };
+                let (mut v1, mut v2) = (if sy > 0 { 2 } else { 3 }, if sz > 0 { 4 } else { 5 });
+                if sx * sy * sz < 0 {
+                    std::mem::swap(&mut v1, &mut v2);
+                }
+                polys.extend_from_slice(&[3, x, v1, v2]);
+                tris.push([x, v1, v2]);
+            }
+        }
+    }
+    (planes, points, polys, tris)
+}
+
+pub fn shapes_scenario(steps: usize) -> String {
+    use super::collision::{ConvexData, HeightfieldData, TriMeshData};
+    let mut out = String::new();
+    let mut w = World::new();
+    let (v, t) = grid();
+    let data = TriMeshData::build(v, t);
+    let (planes, points, polys, otris) = octa(0.5, 0.35, 0.4);
+    let overts: Vec<[f64; 3]> = points.chunks(3).map(|p| [p[0] * 0.8, p[1] * 0.8, p[2] * 0.8]).collect();
+    let odata = TriMeshData::build(overts, otris);
+    let cdata = ConvexData::new(planes, points, polys);
+    let mut h = vec![0.0; 9 * 11];
+    for j in 0..11 {
+        for i in 0..9 {
+            h[i + j * 9] = 0.25 * (0.9 * i as f64).sin() * (0.6 * j as f64).cos() + 0.05 * j as f64;
+        }
+    }
+    let hd = HeightfieldData::build(h, 4.0, 5.0, 9, 11, 1.0, 0.0, 0.5, false);
+    let sph = w.create_sphere(None, 0.3);
+    let bx = w.create_box(None, 0.6, 0.3, 0.9);
+    let cap = w.create_capsule(None, 0.2, 0.6);
+    let cyl = w.create_cylinder(None, 0.25, 0.7);
+    let cvx = w.create_convex(None, cdata.clone());
+    let cvx2 = w.create_convex(None, cdata);
+    let ray = w.create_ray(None, 2.5);
+    let pln = w.create_plane(None, 0.0, 1.0, 0.0, 0.0);
+    let mesh = w.create_trimesh(None, data);
+    let om = w.create_trimesh(None, odata);
+    let hfn = w.create_heightfield(None, hd.clone(), false);
+    let hfp = w.create_heightfield(None, hd, true);
+    let tr = w.create_geom_transform(None);
+    let tro = w.create_box(None, 0.5, 0.2, 0.4);
+    w.geom_set_position(tro, 0.1, 0.05, -0.1);
+    w.geom_set_rotation(tro, &r_from_axis_and_angle(1.0, 0.0, 0.0, 0.3));
+    w.geom_transform_set(tr, Some(tro), false);
+    w.geom_set_position(mesh, 0.0, -0.2, 0.0);
+    let objs = [sph, bx, cap, cyl, cvx, ray, om];
+    for s in 0..steps {
+        let fs = s as f64;
+        let _ = writeln!(out, "S{}", s);
+        w.geom_set_rotation(hfp, &r_from_axis_and_angle(0.2, 1.0, 0.1, 0.02 * fs));
+        w.geom_set_position(hfp, 0.3, -0.1 + 0.002 * fs, 0.2);
+        for q in 0..14 {
+            let fq = q as f64;
+            let o = objs[q % 7];
+            let (x, z) = (-1.8 + 0.27 * fq + 0.01 * fs, -2.2 + 0.33 * fq);
+            let y = 0.3 * (fq + 0.05 * fs).sin() + 0.1 + 0.05 * z;
+            let r = r_from_axis_and_angle(fq.sin(), 1.0, fq.cos(), 0.3 * fq + 0.02 * fs);
+            if o == ray {
+                w.geom_ray_set(ray, x, y + 1.0, z, 0.1 * fq.sin(), -1.0, 0.05);
+            } else {
+                w.geom_set_rotation(o, &r);
+                w.geom_set_position(o, x, y, z);
+            }
+            let maxc = 1 + (q as i32 % 5) * 3;
+            both(&mut w, &mut out, 'H', q, hfn, o, maxc);
+            both(&mut w, &mut out, 'J', q, hfp, o, maxc);
+        }
+        for q in 0..10 {
+            let fq = q as f64;
+            w.geom_set_rotation(cyl, &r_from_axis_and_angle((0.7 * fq).cos(), 0.5, (0.3 * fq).sin(), 0.4 * fq + 0.03 * fs));
+            let (x, z) = (-1.0 + 0.2 * fq, 1.0 - 0.15 * fq);
+            let y = 0.15 * (fq * 0.8 + fs * 0.04).sin();
+            w.geom_set_position(cyl, x, y, z);
+            let p = match q % 5 {
+                0 => {
+                    w.geom_set_position(sph, x + 0.25 * (fq + 0.1 * fs).sin(), y + 0.3, z + 0.1);
+                    sph
+                }
+                1 => {
+                    w.geom_set_rotation(bx, &r_from_axis_and_angle(1.0, fq.sin(), 0.2, 0.5 * fq - 0.02 * fs));
+                    w.geom_set_position(bx, x + 0.2, y + 0.35 + 0.1 * (0.05 * fs).cos(), z - 0.1);
+                    bx
+                }
+                2 => {
+                    w.geom_plane_set_params(pln, 0.1 * (fq + 0.1 * fs).sin(), 1.0, 0.1 * fq.cos(), y - 0.2);
+                    pln
+                }
+                3 => {
+                    w.geom_ray_set(ray, x + 0.1 * (0.3 * fs).sin(), y + 1.2, z - 0.05, 0.05 * fq - 0.2, -1.0, 0.1);
+                    ray
+                }
+                _ => {
+                    w.geom_set_position(cyl, x, 0.3 * (x * 1.3).sin() * (z * 0.7).cos() + 0.1 * x - 0.1, z);
+                    mesh
+                }
+            };
+            let maxc = 1 + (q as i32 % 4) * 3;
+            both(&mut w, &mut out, 'Y', q, cyl, p, maxc);
+        }
+        for q in 0..12 {
+            let fq = q as f64;
+            w.geom_set_rotation(cvx, &r_from_axis_and_angle((0.9 * fq).sin(), 1.0, 0.3, 0.35 * fq + 0.025 * fs));
+            let (x, z) = (0.5 - 0.1 * fq, -0.5 + 0.12 * fq);
+            let y = 0.2 * (fq * 0.6 + fs * 0.05).cos();
+            w.geom_set_position(cvx, x, y, z);
+            let p = match q % 6 {
+                0 => {
+                    w.geom_plane_set_params(pln, 0.15 * (fq + 0.07 * fs).cos(), 1.0, 0.1 * fq.sin(), y - 0.25);
+                    pln
+                }
+                1 => {
+                    w.geom_set_position(sph, x + 0.3 * (0.1 * fs + fq).sin(), y + 0.4, z + 0.2 * (0.13 * fs).cos());
+                    sph
+                }
+                2 => {
+                    w.geom_set_rotation(cvx2, &r_from_axis_and_angle(0.3, fq.cos(), 1.0, -0.2 * fq + 0.04 * fs));
+                    w.geom_set_position(cvx2, x + 0.3 + 0.2 * (0.06 * fs).sin(), y + 0.35, z - 0.15);
+                    cvx2
+                }
+                3 => {
+                    w.geom_ray_set(ray, x - 1.2, y + 0.05 * (0.2 * fs).sin(), z + 0.1, 1.0, -0.02 * fq, 0.1);
+                    ray
+                }
+                4 => {
+                    w.geom_set_position(bx, x + 0.2, y + 0.3, z);
+                    bx
+                }
+                _ => mesh,
+            };
+            let maxc = 1 + (q as i32 % 4) * 3;
+            both(&mut w, &mut out, 'V', q, cvx, p, maxc);
+        }
+        for q in 0..8 {
+            let fq = q as f64;
+            w.geom_set_rotation(tr, &r_from_axis_and_angle(0.5, 1.0, fq.sin(), 0.3 * fq + 0.03 * fs));
+            let (x, z, y) = (-0.3 + 0.1 * fq, 0.2 * fq.sin(), 0.1 * (fq + 0.05 * fs).cos());
+            w.geom_set_position(tr, x, y, z);
+            w.geom_transform_set(tr, Some(tro), q & 1 != 0);
+            let p = match q % 4 {
+                0 => {
+                    w.geom_set_position(sph, x + 0.2, y + 0.3, z + 0.1 * (0.1 * fs).sin());
+                    sph
+                }
+                1 => {
+                    w.geom_plane_set_params(pln, 0.0, 1.0, 0.1 * (0.05 * fs).sin(), y - 0.1);
+                    pln
+                }
+                2 => {
+                    w.geom_set_position(cvx, x, y + 0.45, z + 0.1);
+                    cvx
+                }
+                _ => {
+                    w.geom_set_position(cyl, x - 0.1, y + 0.3, z);
+                    cyl
+                }
+            };
+            let maxc = 1 + (q as i32 % 4) * 3;
+            both(&mut w, &mut out, 'T', q, tr, p, maxc);
+        }
+    }
+    out
+}
+
+#[test]
+fn shapes_match_ode_0_15_2() {
+    let steps = oracle_steps().min(150);
+    let ours = shapes_scenario(steps);
+    compare(&ours, &[&steps.to_string(), "shapes"]);
+}

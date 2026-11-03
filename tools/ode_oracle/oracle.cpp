@@ -25,11 +25,13 @@ static void dump_body(dBodyID b) {
 
 static int collide_scenario(int steps);
 static int trimesh_scenario(int steps);
+static int shapes_scenario(int steps);
 
 int main(int argc, char **argv) {
     int steps = argc > 1 ? atoi(argv[1]) : 400;
     if (argc > 2 && !strcmp(argv[2], "collide")) return collide_scenario(steps);
     if (argc > 2 && !strcmp(argv[2], "trimesh")) return trimesh_scenario(steps);
+    if (argc > 2 && !strcmp(argv[2], "shapes")) return shapes_scenario(steps);
     dInitODE2(0);
     dRandSetSeed(12345);
     dWorldID w = dWorldCreate();
@@ -501,6 +503,182 @@ static int trimesh_scenario(int steps) {
             n = dCollide(pln, mesh, maxc, cg, sizeof(dContactGeom));
             printf("N%d %d\n", q, n);
             dump_contacts(cg, n);
+        }
+    }
+    return 0;
+}
+
+// ---- scenario 4: the other shapes. Heightfields (placeable and not),
+// cylinders, convexes and a geom transform, queried with dCollide both
+// ways against every partner they have a collider for.
+static dGeomID SG[16];
+static int nsg;
+static int gi(dGeomID g) {
+    for (int i = 0; i < nsg; i++)
+        if (SG[i] == g) return i;
+    return -1;
+}
+static void query(char tag, int q, dGeomID a, dGeomID b, int maxc) {
+    dContactGeom cg[16];
+    // convex-convex leaves side1/side2 as it found them: start from -1
+    for (int i = 0; i < 16; i++) cg[i].side1 = cg[i].side2 = -1;
+    int n = dCollide(a, b, maxc, cg, sizeof(dContactGeom));
+    printf("%c%d %d", tag, q, n);
+    for (int i = 0; i < n; i++) printf(" %d/%d/%d/%d", cg[i].side1, cg[i].side2, gi(cg[i].g1), gi(cg[i].g2));
+    printf("\n");
+    dump_contacts(cg, n);
+}
+static void both(char tag, int q, dGeomID a, dGeomID b, int maxc) {
+    query(tag, q, a, b, maxc);
+    query(tag + 1, q, b, a, maxc);
+}
+// an octahedron with half-axes a, b, c
+static void octa(double a, double b, double c, double *planes, double *points, unsigned *polys, dTriIndex *tris) {
+    double p[6][3] = {{a, 0, 0}, {-a, 0, 0}, {0, b, 0}, {0, -b, 0}, {0, 0, c}, {0, 0, -c}};
+    for (int i = 0; i < 6; i++)
+        for (int k = 0; k < 3; k++) points[i * 3 + k] = p[i][k];
+    double l = sqrt(1 / (a * a) + 1 / (b * b) + 1 / (c * c));
+    int f = 0;
+    for (int sx = 1; sx >= -1; sx -= 2)
+        for (int sy = 1; sy >= -1; sy -= 2)
+            for (int sz = 1; sz >= -1; sz -= 2) {
+                planes[f * 4 + 0] = sx / a / l;
+                planes[f * 4 + 1] = sy / b / l;
+                planes[f * 4 + 2] = sz / c / l;
+                planes[f * 4 + 3] = 1 / l;
+                int X = sx > 0 ? 0 : 1, Y = sy > 0 ? 2 : 3, Z = sz > 0 ? 4 : 5;
+                int v1 = Y, v2 = Z;
+                if (sx * sy * sz < 0) { v1 = Z; v2 = Y; }
+                polys[f * 4] = 3;
+                polys[f * 4 + 1] = X;
+                polys[f * 4 + 2] = v1;
+                polys[f * 4 + 3] = v2;
+                tris[f * 3] = X;
+                tris[f * 3 + 1] = v1;
+                tris[f * 3 + 2] = v2;
+                f++;
+            }
+}
+static double hf_h[9 * 11];
+static double cv_planes[32], cv_points[18], om_verts[18];
+static unsigned cv_polys[32];
+static dTriIndex om_tris[24];
+static int shapes_scenario(int steps) {
+    dInitODE2(0);
+    build_grid();
+    dTriMeshDataID data = dGeomTriMeshDataCreate();
+    dGeomTriMeshDataBuildDouble(data, tm_verts, 3 * sizeof(double), 13 * 13, tm_idx, 12 * 12 * 6, 3 * sizeof(dTriIndex));
+    octa(0.5, 0.35, 0.4, cv_planes, cv_points, cv_polys, om_tris);
+    for (int i = 0; i < 18; i++) om_verts[i] = cv_points[i] * 0.8;
+    dTriMeshDataID odata = dGeomTriMeshDataCreate();
+    dGeomTriMeshDataBuildDouble(odata, om_verts, 3 * sizeof(double), 6, om_tris, 24, 3 * sizeof(dTriIndex));
+    for (int j = 0; j < 11; j++)
+        for (int i = 0; i < 9; i++) hf_h[i + j * 9] = 0.25 * sin(0.9 * i) * cos(0.6 * j) + 0.05 * j;
+    dHeightfieldDataID hd = dGeomHeightfieldDataCreate();
+    dGeomHeightfieldDataBuildDouble(hd, hf_h, 1, 4.0, 5.0, 9, 11, 1.0, 0.0, 0.5, 0);
+    dGeomID sph = SG[nsg++] = dCreateSphere(0, 0.3);
+    dGeomID bx = SG[nsg++] = dCreateBox(0, 0.6, 0.3, 0.9);
+    dGeomID cap = SG[nsg++] = dCreateCapsule(0, 0.2, 0.6);
+    dGeomID cyl = SG[nsg++] = dCreateCylinder(0, 0.25, 0.7);
+    dGeomID cvx = SG[nsg++] = dCreateConvex(0, cv_planes, 8, cv_points, 6, cv_polys);
+    dGeomID cvx2 = SG[nsg++] = dCreateConvex(0, cv_planes, 8, cv_points, 6, cv_polys);
+    dGeomID ray = SG[nsg++] = dCreateRay(0, 2.5);
+    dGeomID pln = SG[nsg++] = dCreatePlane(0, 0, 1, 0, 0);
+    dGeomID mesh = SG[nsg++] = dCreateTriMesh(0, data, 0, 0, 0);
+    dGeomID om = SG[nsg++] = dCreateTriMesh(0, odata, 0, 0, 0);
+    dGeomID hfn = SG[nsg++] = dCreateHeightfield(0, hd, 0);
+    dGeomID hfp = SG[nsg++] = dCreateHeightfield(0, hd, 1);
+    dGeomID tr = SG[nsg++] = dCreateGeomTransform(0);
+    dGeomID tro = SG[nsg++] = dCreateBox(0, 0.5, 0.2, 0.4);
+    dMatrix3 R;
+    dGeomSetPosition(tro, 0.1, 0.05, -0.1);
+    dRFromAxisAndAngle(R, 1, 0, 0, 0.3);
+    dGeomSetRotation(tro, R);
+    dGeomTransformSetGeom(tr, tro);
+    dGeomSetPosition(mesh, 0, -0.2, 0);
+    dGeomID objs[7] = {sph, bx, cap, cyl, cvx, ray, om};
+    for (int s = 0; s < steps; s++) {
+        printf("S%d\n", s);
+        dRFromAxisAndAngle(R, 0.2, 1, 0.1, 0.02 * s);
+        dGeomSetRotation(hfp, R);
+        dGeomSetPosition(hfp, 0.3, -0.1 + 0.002 * s, 0.2);
+        for (int q = 0; q < 14; q++) {
+            dGeomID o = objs[q % 7];
+            double x = -1.8 + 0.27 * q + 0.01 * s, z = -2.2 + 0.33 * q;
+            double y = 0.3 * sin(q + 0.05 * s) + 0.1 + 0.05 * z;
+            dRFromAxisAndAngle(R, sin(q), 1, cos(q), 0.3 * q + 0.02 * s);
+            if (o == ray) dGeomRaySet(ray, x, y + 1, z, 0.1 * sin(q), -1, 0.05);
+            else {
+                dGeomSetRotation(o, R);
+                dGeomSetPosition(o, x, y, z);
+            }
+            int maxc = 1 + (q % 5) * 3;
+            both('H', q, hfn, o, maxc);
+            both('J', q, hfp, o, maxc);
+        }
+        for (int q = 0; q < 10; q++) {
+            dRFromAxisAndAngle(R, cos(0.7 * q), 0.5, sin(0.3 * q), 0.4 * q + 0.03 * s);
+            dGeomSetRotation(cyl, R);
+            double x = -1 + 0.2 * q, z = 1 - 0.15 * q;
+            double y = 0.15 * sin(q * 0.8 + s * 0.04);
+            dGeomSetPosition(cyl, x, y, z);
+            dGeomID p = 0;
+            switch (q % 5) {
+            case 0: p = sph; dGeomSetPosition(sph, x + 0.25 * sin(q + 0.1 * s), y + 0.3, z + 0.1); break;
+            case 1:
+                p = bx;
+                dRFromAxisAndAngle(R, 1, sin(q), 0.2, 0.5 * q - 0.02 * s);
+                dGeomSetRotation(bx, R);
+                dGeomSetPosition(bx, x + 0.2, y + 0.35 + 0.1 * cos(0.05 * s), z - 0.1);
+                break;
+            case 2: p = pln; dGeomPlaneSetParams(pln, 0.1 * sin(q + 0.1 * s), 1, 0.1 * cos(q), y - 0.2); break;
+            case 3:
+                p = ray;
+                dGeomRaySet(ray, x + 0.1 * sin(0.3 * s), y + 1.2, z - 0.05, 0.05 * q - 0.2, -1, 0.1);
+                break;
+            case 4: p = mesh; dGeomSetPosition(cyl, x, 0.3 * sin(x * 1.3) * cos(z * 0.7) + 0.1 * x - 0.1, z); break;
+            }
+            int maxc = 1 + (q % 4) * 3;
+            both('Y', q, cyl, p, maxc);
+        }
+        for (int q = 0; q < 12; q++) {
+            dRFromAxisAndAngle(R, sin(0.9 * q), 1, 0.3, 0.35 * q + 0.025 * s);
+            dGeomSetRotation(cvx, R);
+            double x = 0.5 - 0.1 * q, z = -0.5 + 0.12 * q;
+            double y = 0.2 * cos(q * 0.6 + s * 0.05);
+            dGeomSetPosition(cvx, x, y, z);
+            dGeomID p = 0;
+            switch (q % 6) {
+            case 0: p = pln; dGeomPlaneSetParams(pln, 0.15 * cos(q + 0.07 * s), 1, 0.1 * sin(q), y - 0.25); break;
+            case 1: p = sph; dGeomSetPosition(sph, x + 0.3 * sin(0.1 * s + q), y + 0.4, z + 0.2 * cos(0.13 * s)); break;
+            case 2:
+                p = cvx2;
+                dRFromAxisAndAngle(R, 0.3, cos(q), 1, -0.2 * q + 0.04 * s);
+                dGeomSetRotation(cvx2, R);
+                dGeomSetPosition(cvx2, x + 0.3 + 0.2 * sin(0.06 * s), y + 0.35, z - 0.15);
+                break;
+            case 3: p = ray; dGeomRaySet(ray, x - 1.2, y + 0.05 * sin(0.2 * s), z + 0.1, 1, -0.02 * q, 0.1); break;
+            case 4: p = bx; dGeomSetPosition(bx, x + 0.2, y + 0.3, z); break;
+            case 5: p = mesh; break;
+            }
+            int maxc = 1 + (q % 4) * 3;
+            both('V', q, cvx, p, maxc);
+        }
+        for (int q = 0; q < 8; q++) {
+            dRFromAxisAndAngle(R, 0.5, 1, sin(q), 0.3 * q + 0.03 * s);
+            dGeomSetRotation(tr, R);
+            double x = -0.3 + 0.1 * q, z = 0.2 * sin(q), y = 0.1 * cos(q + 0.05 * s);
+            dGeomSetPosition(tr, x, y, z);
+            dGeomTransformSetInfo(tr, q & 1);
+            dGeomID p = 0;
+            switch (q % 4) {
+            case 0: p = sph; dGeomSetPosition(sph, x + 0.2, y + 0.3, z + 0.1 * sin(0.1 * s)); break;
+            case 1: p = pln; dGeomPlaneSetParams(pln, 0, 1, 0.1 * sin(0.05 * s), y - 0.1); break;
+            case 2: p = cvx; dGeomSetPosition(cvx, x, y + 0.45, z + 0.1); break;
+            case 3: p = cyl; dGeomSetPosition(cyl, x - 0.1, y + 0.3, z); break;
+            }
+            int maxc = 1 + (q % 4) * 3;
+            both('T', q, tr, p, maxc);
         }
     }
     return 0;
