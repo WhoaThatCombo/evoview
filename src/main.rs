@@ -133,6 +133,7 @@ mod evophys;
 mod rigcar;
 mod collide;
 mod mp;
+mod ode;
 
 use std::path::PathBuf;
 
