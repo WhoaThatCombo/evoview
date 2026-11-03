@@ -131,6 +131,7 @@ mod ffb;
 mod wheel;
 mod evophys;
 mod rigcar;
+mod rigode;
 mod collide;
 mod mp;
 mod ode;

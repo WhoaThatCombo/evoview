@@ -19,7 +19,9 @@
 //! moves along the body's up axis with motion ratio 1 (EVOVIEW_RIG_MR), not
 //! the ODE wishbone links; tyre in-plane forces act on the body at a roll
 //! centre a fixed height above the contact patch; the clutch slips only to
-//! launch; ODE's constraint solver is replaced by explicit forces.
+//! launch; ODE's constraint solver is replaced by explicit forces - unless
+//! EVOVIEW_RIG_ODE=1, which integrates the chassis and hubs as ODE bodies
+//! on slider joints with the game's world settings (rigode.rs).
 
 use crate::carphys::Assists;
 use crate::evophys::{Brakes, Coilover, Diff};
@@ -219,6 +221,8 @@ pub struct RigCar {
     pub steer_ratio: f32,
     rc_height: f32,
     phys: crate::carphys::Physics,
+    /// EVOVIEW_RIG_ODE=1: the bodies integrated by ODE (rigode.rs)
+    ode: Option<Box<crate::rigode::OdeRig>>,
 }
 
 fn rate_curve(c: &[(f32, f32)], x: f32) -> f32 {
@@ -420,6 +424,7 @@ impl RigCar {
             steer_ratio: if p.steer_ratio.abs() > 1.0 { p.steer_ratio.abs() } else { 15.0 },
             rc_height: std::env::var("EVOVIEW_RIG_RC").ok().and_then(|v| v.parse().ok()).unwrap_or(0.06),
             phys: p.clone(),
+            ode: crate::rigode::OdeRig::enabled().then(|| Box::new(crate::rigode::OdeRig::new(mass, inertia, m_unsprung, &centres, cg_local))),
         }
     }
 
@@ -1062,8 +1067,13 @@ impl RigCar {
         let t_axle = t_gear * ratio * 0.9;
 
         // ---- per corner: hub, tyre contact, forces
-        let mut f_body = Vec3::new(0.0, -self.mass * G, 0.0);
+        // with ODE the world's gravity pulls the chassis and the hubs
+        let ode_on = self.ode.is_some();
+        let mut f_body = if ode_on { Vec3::ZERO } else { Vec3::new(0.0, -self.mass * G, 0.0) };
         let mut t_body = Vec3::ZERO;
+        // ODE: each hub's own force and torque (about the hub)
+        let mut f_hub = [Vec3::ZERO; 4];
+        let mut t_hub = [Vec3::ZERO; 4];
         let apply = |f_body: &mut Vec3, t_body: &mut Vec3, f: Vec3, at: Vec3, cg: Vec3| {
             *f_body += f;
             *t_body += (at - cg).cross(f);
@@ -1314,10 +1324,18 @@ impl RigCar {
                     }
                     // the part along the hub's slide goes to the hub; the rest
                     // straight into the body at the roll centre
-                    let along = f.dot(up);
-                    f_hub_u += along;
-                    let rest = f - up * along;
-                    apply(&mut f_body, &mut t_body, rest, contact + n * self.rc_height, self.cg);
+                    if ode_on {
+                        // all of it on the hub; the slider hands the
+                        // off-axis part to the chassis
+                        let at = contact + n * self.rc_height;
+                        f_hub[k] += f;
+                        t_hub[k] += (at - hub).cross(f);
+                    } else {
+                        let along = f.dot(up);
+                        f_hub_u += along;
+                        let rest = f - up * along;
+                        apply(&mut f_body, &mut t_body, rest, contact + n * self.rc_height, self.cg);
+                    }
 
                     // wheel spin: drive - Fx R - brake, implicit in kx
                     let iw = t.inertia + ie * shares[k] * if shares[k] > 0.0 { 1.0 } else { 0.0 };
@@ -1355,6 +1373,15 @@ impl RigCar {
             // acceleration (the frame it slides in), damper implicit
             // the hub's own velocity along the strut, against the anchor's
             // (body translation + rotation): damper implicit between them
+            if ode_on {
+                // spring, stops and damper between hub and chassis, the
+                // same total the explicit path's body sees (susp + c xv)
+                let fs = susp[k] + c_eff[k] * self.c[k].xv;
+                f_hub[k] -= up * fs;
+                apply(&mut f_body, &mut t_body, up * fs, anchor_w, self.cg);
+                self.c[k].angle += self.c[k].omega * dt;
+                continue;
+            }
             let mu = self.m_unsprung[ax];
             let va = (self.v + self.w.cross(anchor_w - self.cg)).dot(up);
             let u = va + self.c[k].xv;
@@ -1402,6 +1429,32 @@ impl RigCar {
         }
         self.body_ground(ground);
 
+        if let Some(mut ode) = self.ode.take() {
+            let frame = crate::rigode::Frame {
+                cg: self.cg,
+                q: self.q,
+                v: self.v,
+                w: self.w,
+                cg_local: self.cg_local,
+                anchor: &self.anchor,
+                x_static: &self.x_static,
+                x: self.c.map(|c| c.x),
+                xv: self.c.map(|c| c.xv),
+                f_body,
+                t_body,
+                f_hub,
+                t_hub,
+            };
+            let (cg, q, v, w, hubs) = ode.step(&frame, dt);
+            self.ode = Some(ode);
+            self.acc_prev = (v - self.v) / dt;
+            (self.cg, self.q, self.v, self.w) = (cg, q, v, w);
+            for k in 0..4 {
+                self.c[k].x = hubs[k].x;
+                self.c[k].xv = hubs[k].xv;
+            }
+            return;
+        }
         // ---- body integration (semi-implicit Euler)
         let acc = f_body / self.mass;
         self.v += acc * dt;
