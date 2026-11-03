@@ -14,7 +14,8 @@
 //! changes against the explicit integrator: the hubs carry their full
 //! weight and tyre force, and the slider constraint - not a roll-centre
 //! shortcut - hands the off-axis part to the chassis; ODE integrates the
-//! bodies (gyroscopic term included). Still not the game's wishbone links.
+//! bodies (gyroscopic term included). The game's own wishbone rods are
+//! rigwish.rs (EVOVIEW_RIG_ODE=links).
 
 use crate::ode::{self, BodyId, Mass, World};
 use glam::{Mat3, Quat, Vec3};
@@ -25,9 +26,23 @@ pub struct OdeRig {
     hub: [BodyId; 4],
 }
 
-/// float values the game stores as doubles (0x3fe3333340000000 etc.)
-const ERP: f64 = 0.6f32 as f64;
-const CFM: f64 = 1e-7f32 as f64;
+/// float values the game stores as doubles (0x3fe3333340000000 etc.); the
+/// suspension joints get the same pair (FUN_142435fc0)
+pub const ERP: f64 = 0.6f32 as f64;
+pub const CFM: f64 = 1e-7f32 as f64;
+
+/// A world with the game's settings.
+pub fn evo_world() -> World {
+    let mut w = World::new();
+    w.set_gravity(0.0, -9.806, 0.0);
+    w.set_erp(ERP);
+    w.set_cfm(CFM);
+    w.set_quickstep_iterations(30);
+    w.set_quickstep_w(1.4);
+    w.set_contact_max_correcting_vel(3.0);
+    w.set_contact_surface_layer(0.0);
+    w
+}
 
 fn d3(v: Vec3) -> [f64; 3] {
     [v.x as f64, v.y as f64, v.z as f64]
@@ -60,20 +75,13 @@ pub struct Frame<'a> {
 
 impl OdeRig {
     pub fn enabled() -> bool {
-        std::env::var("EVOVIEW_RIG_ODE").map_or(false, |v| v != "0")
+        std::env::var("EVOVIEW_RIG_ODE").map_or(false, |v| v != "0" && v != "links")
     }
 
     /// `inertia`: the chassis' principal moments (body axes); hubs of
     /// `m_unsprung` kg at the mesh-space `anchor`s.
     pub fn new(mass: f32, inertia: Vec3, m_unsprung: [f32; 2], anchor: &[Vec3; 4], cg_local: Vec3) -> OdeRig {
-        let mut w = World::new();
-        w.set_gravity(0.0, -9.806, 0.0);
-        w.set_erp(ERP);
-        w.set_cfm(CFM);
-        w.set_quickstep_iterations(30);
-        w.set_quickstep_w(1.4);
-        w.set_contact_max_correcting_vel(3.0);
-        w.set_contact_surface_layer(0.0);
+        let mut w = evo_world();
         let body = w.body_create();
         let mut m = Mass { mass: mass as f64, ..Default::default() };
         m.i[0] = inertia.x as f64;

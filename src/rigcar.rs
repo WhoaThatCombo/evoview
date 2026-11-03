@@ -21,7 +21,9 @@
 //! centre a fixed height above the contact patch; the clutch slips only to
 //! launch; ODE's constraint solver is replaced by explicit forces - unless
 //! EVOVIEW_RIG_ODE=1, which integrates the chassis and hubs as ODE bodies
-//! on slider joints with the game's world settings (rigode.rs).
+//! on slider joints with the game's world settings (rigode.rs);
+//! EVOVIEW_RIG_ODE=links builds the double wishbones the game's way, five
+//! DBall rods a corner (rigwish.rs).
 
 use crate::carphys::Assists;
 use crate::evophys::{Brakes, Coilover, Diff};
@@ -223,6 +225,8 @@ pub struct RigCar {
     phys: crate::carphys::Physics,
     /// EVOVIEW_RIG_ODE=1: the bodies integrated by ODE (rigode.rs)
     ode: Option<Box<crate::rigode::OdeRig>>,
+    /// EVOVIEW_RIG_ODE=links: the wishbones as ODE rods (rigwish.rs)
+    links: Option<Box<crate::rigwish::Links>>,
 }
 
 fn rate_curve(c: &[(f32, f32)], x: f32) -> f32 {
@@ -425,6 +429,15 @@ impl RigCar {
             rc_height: std::env::var("EVOVIEW_RIG_RC").ok().and_then(|v| v.parse().ok()).unwrap_or(0.06),
             phys: p.clone(),
             ode: crate::rigode::OdeRig::enabled().then(|| Box::new(crate::rigode::OdeRig::new(mass, inertia, m_unsprung, &centres, cg_local))),
+            links: crate::rigwish::Links::enabled()
+                .then(|| {
+                    let l = crate::rigwish::Links::new(mass, inertia, m_unsprung, [&p.geo[0], &p.geo[1]], &centres, cg_local, x_static, mr);
+                    if l.is_none() {
+                        println!("RIG links: not double wishbones front and rear ({:?} / {:?}): the explicit integrator", p.geo[0].kind, p.geo[1].kind);
+                    }
+                    l.map(Box::new)
+                })
+                .flatten(),
         }
     }
 
@@ -1068,7 +1081,29 @@ impl RigCar {
 
         // ---- per corner: hub, tyre contact, forces
         // with ODE the world's gravity pulls the chassis and the hubs
-        let ode_on = self.ode.is_some();
+        // the wishbones' state: the hubs where the rods hold them, the
+        // spring travel from the linkage
+        let kin = self.links.as_mut().map(|l| {
+            l.sync(self.cg, self.q, self.v, self.w);
+            l.kin()
+        });
+        if let Some(kin) = kin.as_ref() {
+            // EVOVIEW_RIG_LINKLOG=1: each hub's yaw / camber in the chassis
+            // frame (deg) against the asked steer, every 0.25 s
+            if std::env::var_os("EVOVIEW_RIG_LINKLOG").is_some() && (self.t / 0.25).floor() != ((self.t - dt) / 0.25).floor() {
+                let rt = Mat3::from_quat(self.q).transpose();
+                let a: Vec<String> = kin.iter().map(|kn| {
+                    let (f, l) = (rt * (kn.rot * Vec3::Z), rt * (kn.rot * Vec3::X));
+                    format!("yaw {:+.2} cam {:+.2}", f.x.atan2(f.z).to_degrees(), l.y.asin().to_degrees())
+                }).collect();
+                println!("LINK t {:.2} steer {:+.2} | {}", self.t, self.steer.to_degrees(), a.join(" | "));
+            }
+            for k in 0..4 {
+                self.c[k].x = kin[k].travel;
+                self.c[k].xv = kin[k].rate;
+            }
+        }
+        let ode_on = self.ode.is_some() || kin.is_some();
         let mut f_body = if ode_on { Vec3::ZERO } else { Vec3::new(0.0, -self.mass * G, 0.0) };
         let mut t_body = Vec3::ZERO;
         // ODE: each hub's own force and torque (about the hub)
@@ -1128,11 +1163,12 @@ impl RigCar {
         let mut mz_front = 0.0;
         for k in 0..4 {
             let ax = k / 2;
-            let anchor_w = o + r * self.anchor[k];
+            let kn = kin.as_ref().map(|kk| kk[k]);
+            let anchor_w = kn.map_or(o + r * self.anchor[k], |kn| kn.href);
             let rel = self.c[k].x - self.x_static[k];
-            let hub = anchor_w + up * rel;
+            let hub = kn.map_or(anchor_w + up * rel, |kn| kn.hub);
             self.c[k].hub = hub;
-            let hub_v = self.v + self.w.cross(hub - self.cg) + up * self.c[k].xv;
+            let hub_v = kn.map_or(self.v + self.w.cross(hub - self.cg) + up * self.c[k].xv, |kn| kn.v);
             let Some(mut t) = self.tyre[ax] else { continue };
             // a blown tyre rolls on its rim (the game's radius getter lerps
             // to rimRadius as the tyre's +0x458 goes to 0)
@@ -1204,11 +1240,13 @@ impl RigCar {
                     let toe_k = self.toe[ax] + self.toe_gain[ax] * (self.c[k].x - self.x_static[k]);
                     let toe = if k % 2 == 1 { -toe_k } else { toe_k };
                     let steer = if ax == 0 { self.steer } else { 0.0 } + toe;
-                    let heading = Quat::from_axis_angle(up, steer) * fw;
+                    // with the rods the hub's own nose: steer, toe and bump
+                    // steer are the linkage's
+                    let heading = kn.map_or(Quat::from_axis_angle(up, steer) * fw, |kn| kn.rot * Vec3::Z);
                     let wf = (heading - n * heading.dot(n)).normalize_or_zero();
                     let wl = n.cross(wf);
                     let contact = hub - n * dist;
-                    let vc = self.v + self.w.cross(contact - self.cg);
+                    let vc = kn.map_or(self.v + self.w.cross(contact - self.cg), |kn| kn.v + kn.w.cross(contact - kn.hub));
                     let (vl, vt) = (vc.dot(wf), vc.dot(wl));
                     let re = (t.radius - defl * 0.3).max(0.1);
                     let den = vl.abs().max(2.0);
@@ -1252,8 +1290,10 @@ impl RigCar {
                     // tilts both tops toward the low side (the tyre frame's
                     // lateral axis is the car's left: a top leaning inward
                     // is + on the right, - on the left)
-                    let cb = self.camber[ax] + self.camber_gain[ax] * (self.c[k].x - self.x_static[k]);
-                    let roll = (r * Vec3::X).dot(n).clamp(-1.0, 1.0).asin();
+                    // the rods tilt the hub itself: then only the static camber
+                    let cb = self.camber[ax] + if kn.is_some() { 0.0 } else { self.camber_gain[ax] * (self.c[k].x - self.x_static[k]) };
+                    let lat = kn.map_or(r * Vec3::X, |kn| kn.rot * Vec3::X);
+                    let roll = lat.dot(n).clamp(-1.0, 1.0).asin();
                     let camber = if k % 2 == 1 { cb } else { -cb } - roll;
                     // the compound's thermal performance curve
                     let mut temp = f32::NAN;
@@ -1308,9 +1348,14 @@ impl RigCar {
                         // hub's steering axis (caster trail, scrub, kingpin
                         // inclination) plus its aligning moment; the plain Mz
                         // without the geometry
-                        mz_front += match self.kingpin[k] {
-                            Some((pt, dir)) => {
-                                let (a, kd) = (hub + r * pt, (r * dir).normalize_or_zero());
+                        let kp = match (kn, self.kingpin[k]) {
+                            // the rods' steering axis, lower ball up to the upper
+                            (Some(kn), _) => Some(kn.kp),
+                            (None, Some((pt, dir))) => Some((hub + r * pt, (r * dir).normalize_or_zero())),
+                            _ => None,
+                        };
+                        mz_front += match kp {
+                            Some((a, kd)) => {
                                 // the game's (tyre step 0x1421820b0 -> hub
                                 // addForceAtPos flag 1, 0x14222cd40): only
                                 // the road-plane force Fx + Fy at the contact,
@@ -1327,7 +1372,8 @@ impl RigCar {
                     if ode_on {
                         // all of it on the hub; the slider hands the
                         // off-axis part to the chassis
-                        let at = contact + n * self.rc_height;
+                        // (the rods: at the patch itself, no roll centre)
+                        let at = if kn.is_some() { contact } else { contact + n * self.rc_height };
                         f_hub[k] += f;
                         t_hub[k] += (at - hub).cross(f);
                     } else {
@@ -1373,9 +1419,25 @@ impl RigCar {
             // acceleration (the frame it slides in), damper implicit
             // the hub's own velocity along the strut, against the anchor's
             // (body translation + rotation): damper implicit between them
+            if let Some(kn) = kn {
+                // the spring on its own line (susp holds the spring and the
+                // stops; the main damper is c_eff, as on the explicit path);
+                // the hub takes its share at the ball, the arm's body pivot
+                // the rest
+                let fs = (susp[k] + c_eff[k] * self.c[k].xv) * kn.per_wheel;
+                let fh = -kn.axis * fs * kn.hub_share;
+                f_hub[k] += fh;
+                t_hub[k] += (kn.bottom - hub).cross(fh);
+                apply(&mut f_body, &mut t_body, kn.axis * fs, kn.top, self.cg);
+                if kn.hub_share < 1.0 {
+                    apply(&mut f_body, &mut t_body, -kn.axis * fs * (1.0 - kn.hub_share), kn.pivot, self.cg);
+                }
+                self.c[k].angle += self.c[k].omega * dt;
+                continue;
+            }
             if ode_on {
-                // spring, stops and damper between hub and chassis, the
-                // same total the explicit path's body sees (susp + c xv)
+                // spring and stops (susp) plus the main damper (c xv)
+                // between hub and chassis, as the explicit path's body sees
                 let fs = susp[k] + c_eff[k] * self.c[k].xv;
                 f_hub[k] -= up * fs;
                 apply(&mut f_body, &mut t_body, up * fs, anchor_w, self.cg);
@@ -1429,6 +1491,17 @@ impl RigCar {
         }
         self.body_ground(ground);
 
+        if let Some(mut l) = self.links.take() {
+            // the rack: steer on the fronts, the setup's toe on all four
+            // (toe-in turns a left wheel's nose right)
+            let ang = [0usize, 1, 2, 3].map(|k| if k < 2 { self.steer } else { 0.0 } + if k % 2 == 1 { -self.toe[k / 2] } else { self.toe[k / 2] });
+            l.set_wheel_angles(ang);
+            let (cg, q, v, w) = l.step(f_body, t_body, &f_hub, &t_hub, dt);
+            self.links = Some(l);
+            self.acc_prev = (v - self.v) / dt;
+            (self.cg, self.q, self.v, self.w) = (cg, q, v, w);
+            return;
+        }
         if let Some(mut ode) = self.ode.take() {
             let frame = crate::rigode::Frame {
                 cg: self.cg,

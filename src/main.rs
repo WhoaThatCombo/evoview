@@ -132,6 +132,7 @@ mod wheel;
 mod evophys;
 mod rigcar;
 mod rigode;
+mod rigwish;
 mod collide;
 mod mp;
 mod ode;
