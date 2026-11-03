@@ -10,6 +10,7 @@
 pub mod api;
 pub mod collision;
 pub mod joints;
+pub mod joints2;
 pub mod math;
 pub mod opcode;
 pub mod quickstep;

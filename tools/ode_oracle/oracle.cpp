@@ -29,6 +29,7 @@ static int space_kind;
 static int trimesh_scenario(int steps);
 static int shapes_scenario(int steps);
 static int ttl_scenario(int steps);
+static int joints_scenario(int steps);
 
 int main(int argc, char **argv) {
     int steps = argc > 1 ? atoi(argv[1]) : 400;
@@ -36,6 +37,7 @@ int main(int argc, char **argv) {
     if (argc > 2 && !strcmp(argv[2], "trimesh")) return trimesh_scenario(steps);
     if (argc > 2 && !strcmp(argv[2], "shapes")) return shapes_scenario(steps);
     if (argc > 2 && !strcmp(argv[2], "ttl")) return ttl_scenario(steps);
+    if (argc > 2 && !strcmp(argv[2], "joints")) return joints_scenario(steps);
     if (argc > 2 && !strcmp(argv[2], "quadtree")) { space_kind = 1; return collide_scenario(steps); }
     if (argc > 2 && !strcmp(argv[2], "sap")) { space_kind = 2; return collide_scenario(steps); }
     dInitODE2(0);
@@ -751,6 +753,188 @@ static int ttl_scenario(int steps) {
             dGeomSetPosition(O, z, y + 0.05, x);
             both('O', q, A, O, maxc);
         }
+    }
+    return 0;
+}
+
+// ---- scenario 6: the other joints. One world with a hinge2 wheel, a
+// universal, PR (reversed onto the world), PU, piston, plane2d, lmotor,
+// dhinge, two transmissions and a null joint; limits, motors and bounce;
+// bodies and joint readouts each step.
+static dBodyID jb[16];
+static int njb;
+static dBodyID jbody(dWorldID w, double x, double y, double z, double m, double lx, double ly, double lz) {
+    dBodyID b = dBodyCreate(w);
+    dMass ms;
+    dMassSetBoxTotal(&ms, m, lx, ly, lz);
+    dBodySetMass(b, &ms);
+    dBodySetPosition(b, x, y, z);
+    jb[njb++] = b;
+    return b;
+}
+static int joints_scenario(int steps) {
+    dInitODE2(0);
+    dRandSetSeed(4242);
+    dWorldID w = dWorldCreate();
+    dWorldSetGravity(w, 0, -9.81, 0);
+    dWorldSetERP(w, 0.2);
+    dWorldSetCFM(w, 1e-6);
+    dWorldSetQuickStepNumIterations(w, 30);
+    dMatrix3 R;
+    dBodyID A = jbody(w, 0, 2, 0, 5, 2, 0.5, 1);
+    dRFromAxisAndAngle(R, 0.2, 1, 0.1, 0.3);
+    dBodySetRotation(A, R);
+    dJointID ball = dJointCreateBall(w, 0);
+    dJointAttach(ball, A, 0);
+    dJointSetBallAnchor(ball, -0.8, 2.3, 0.1);
+    dBodyID W = jbody(w, 1.1, 1.8, 0.6, 1, 0.4, 0.4, 0.2);
+    dJointID h2 = dJointCreateHinge2(w, 0);
+    dJointAttach(h2, A, W);
+    dJointSetHinge2Anchor(h2, 1.1, 1.8, 0.6);
+    dJointSetHinge2Axis1(h2, 0, 1, 0.1);
+    dJointSetHinge2Axis2(h2, 0, 0, 1);
+    dJointSetHinge2Param(h2, dParamSuspensionERP, 0.4);
+    dJointSetHinge2Param(h2, dParamSuspensionCFM, 0.02);
+    dJointSetHinge2Param(h2, dParamLoStop, -0.3);
+    dJointSetHinge2Param(h2, dParamHiStop, 0.3);
+    dJointSetHinge2Param(h2, dParamVel, 0.5);
+    dJointSetHinge2Param(h2, dParamFMax, 1);
+    dJointSetHinge2Param(h2, dParamVel2, 5);
+    dJointSetHinge2Param(h2, dParamFMax2, 2);
+    dBodyID U = jbody(w, -1.2, 1.5, -0.4, 1.5, 0.3, 0.8, 0.3);
+    dJointID uj = dJointCreateUniversal(w, 0);
+    dJointAttach(uj, A, U);
+    dJointSetUniversalAnchor(uj, -1.1, 1.9, -0.3);
+    dJointSetUniversalAxis1(uj, 1, 0, 0.2);
+    dJointSetUniversalAxis2(uj, 0, 0.1, 1);
+    dJointSetUniversalParam(uj, dParamLoStop, -0.5);
+    dJointSetUniversalParam(uj, dParamHiStop, 0.5);
+    dJointSetUniversalParam(uj, dParamBounce, 0.3);
+    dJointSetUniversalParam(uj, dParamVel2, -1);
+    dJointSetUniversalParam(uj, dParamFMax2, 0.5);
+    dBodyID P = jbody(w, 3, 1, 0, 2, 0.5, 0.5, 0.5);
+    dRFromAxisAndAngle(R, 1, 0, 0.3, 0.4);
+    dBodySetRotation(P, R);
+    dJointID pr = dJointCreatePR(w, 0);
+    dJointAttach(pr, 0, P);
+    dJointSetPRAnchor(pr, 3, 1.2, 0);
+    dJointSetPRAxis1(pr, 0, 1, 0);
+    dJointSetPRAxis2(pr, 1, 0, 0.1);
+    dJointSetPRParam(pr, dParamLoStop, -0.2);
+    dJointSetPRParam(pr, dParamHiStop, 0.3);
+    dJointSetPRParam(pr, dParamBounce, 0.4);
+    dJointSetPRParam(pr, dParamVel2, 2);
+    dJointSetPRParam(pr, dParamFMax2, 1);
+    dBodyID Q = jbody(w, -1.3, 0.8, -0.5, 1, 0.3, 0.3, 0.6);
+    dJointID pu = dJointCreatePU(w, 0);
+    dJointAttach(pu, U, Q);
+    dJointSetPUAnchor(pu, -1.25, 1.1, -0.45);
+    dJointSetPUAxis1(pu, 1, 0, 0);
+    dJointSetPUAxis2(pu, 0, 0.2, 1);
+    dJointSetPUAxis3(pu, 0, 1, 0.1);
+    dJointSetPUParam(pu, dParamLoStop3, -0.1);
+    dJointSetPUParam(pu, dParamHiStop3, 0.1);
+    dJointSetPUParam(pu, dParamBounce3, 0.2);
+    dJointSetPUParam(pu, dParamLoStop, -0.4);
+    dJointSetPUParam(pu, dParamHiStop, 0.4);
+    dJointSetPUParam(pu, dParamVel2, 0.7);
+    dJointSetPUParam(pu, dParamFMax2, 0.3);
+    dBodyID S = jbody(w, -3, 1.5, 0.5, 1.2, 0.4, 0.4, 0.4);
+    dJointID ps = dJointCreatePiston(w, 0);
+    dJointAttach(ps, S, 0);
+    dJointSetPistonAnchor(ps, -3, 1.5, 0.5);
+    dJointSetPistonAxis(ps, 0.1, 1, 0);
+    dJointSetPistonParam(ps, dParamLoStop, -0.5);
+    dJointSetPistonParam(ps, dParamHiStop, 0.5);
+    dJointSetPistonParam(ps, dParamVel2, 3);
+    dJointSetPistonParam(ps, dParamFMax2, 1);
+    dBodyID T = jbody(w, 0, 0.5, 4, 1, 0.5, 0.5, 0.5);
+    dJointID p2 = dJointCreatePlane2D(w, 0);
+    dJointAttach(p2, T, 0);
+    dJointSetPlane2DXParam(p2, dParamVel, 1);
+    dJointSetPlane2DXParam(p2, dParamFMax, 5);
+    dJointSetPlane2DAngleParam(p2, dParamVel, 2);
+    dJointSetPlane2DAngleParam(p2, dParamFMax, 1);
+    dBodyID L = jbody(w, 4, 3, -2, 2, 0.3, 0.3, 0.3);
+    dRFromAxisAndAngle(R, 0, 0, 1, 0.5);
+    dBodySetRotation(L, R);
+    dJointID lm = dJointCreateLMotor(w, 0);
+    dJointAttach(lm, L, 0);
+    dJointSetLMotorNumAxes(lm, 2);
+    dJointSetLMotorAxis(lm, 0, 0, 1, 0, 0);
+    dJointSetLMotorAxis(lm, 1, 1, 0, 1, 0);
+    dJointSetLMotorParam(lm, dParamVel, 0.5);
+    dJointSetLMotorParam(lm, dParamFMax, 3);
+    dJointSetLMotorParam(lm, dParamVel2, 0);
+    dJointSetLMotorParam(lm, dParamFMax2, 30);
+    dBodyID D1 = jbody(w, -4, 4, -3, 1, 0.3, 0.3, 0.3);
+    dBodyID D2 = jbody(w, -4.5, 3.2, -3, 1, 0.3, 0.3, 0.3);
+    dBodySetLinearVel(D2, 0.5, 0, 0.3);
+    dJointID dh = dJointCreateDHinge(w, 0);
+    dJointAttach(dh, D1, D2);
+    dJointSetDHingeAxis(dh, 0, 0.3, 1);
+    dJointSetDHingeAnchor1(dh, -4, 4, -3);
+    dJointSetDHingeAnchor2(dh, -4.5, 3.2, -3);
+    dJointSetDHingeParam(dh, dParamERP, 0.3);
+    dJointID dhw = dJointCreateBall(w, 0);
+    dJointAttach(dhw, D1, 0);
+    dJointSetBallAnchor(dhw, -4, 4.2, -3);
+    dBodyID G[3];
+    double gx[3] = {2, 2.9, 5};
+    for (int i = 0; i < 3; i++) {
+        G[i] = jbody(w, gx[i], 5, 3, 1 + i, 0.6, 0.6, 0.1);
+        dJointID h = dJointCreateHinge(w, 0);
+        dJointAttach(h, G[i], 0);
+        dJointSetHingeAnchor(h, gx[i], 5, 3);
+        dJointSetHingeAxis(h, 0, 0, 1);
+        if (i == 0) {
+            dJointSetHingeParam(h, dParamVel, 3);
+            dJointSetHingeParam(h, dParamFMax, 10);
+        }
+    }
+    dJointID tr1 = dJointCreateTransmission(w, 0);
+    dJointAttach(tr1, G[0], G[1]);
+    dJointSetTransmissionMode(tr1, dTransmissionParallelAxes);
+    dJointSetTransmissionRatio(tr1, 2);
+    dJointSetTransmissionAnchor1(tr1, 2, 5, 3);
+    dJointSetTransmissionAnchor2(tr1, 2.9, 5, 3);
+    dJointSetTransmissionAxis(tr1, 0, 0, 1);
+    dJointID tr2 = dJointCreateTransmission(w, 0);
+    dJointAttach(tr2, G[0], G[2]);
+    dJointSetTransmissionMode(tr2, dTransmissionChainDrive);
+    dJointSetTransmissionRadius1(tr2, 0.3);
+    dJointSetTransmissionRadius2(tr2, 0.5);
+    dJointSetTransmissionBacklash(tr2, 0.02);
+    dJointSetTransmissionAnchor1(tr2, 2, 5, 3);
+    dJointSetTransmissionAnchor2(tr2, 5, 5, 3);
+    dJointSetTransmissionAxis(tr2, 0, 0, 1);
+    dJointID nj = dJointCreateNull(w, 0);
+    dJointAttach(nj, G[1], G[2]);
+    for (int s = 0; s < steps; s++) {
+        dWorldQuickStep(w, 0.005);
+        printf("S%d\n", s);
+        for (int i = 0; i < njb; i++) dump_body(jb[i]);
+        dReal a1, a2;
+        printf("J");
+        hex(dJointGetHinge2Angle1(h2));
+        hex(dJointGetHinge2Angle2(h2));
+        dJointGetUniversalAngles(uj, &a1, &a2);
+        hex(a1);
+        hex(a2);
+        hex(dJointGetPRPosition(pr));
+        hex(dJointGetPRAngle(pr));
+        hex(dJointGetPUPosition(pu));
+        dJointGetPUAngles(pu, &a1, &a2);
+        hex(a1);
+        hex(a2);
+        hex(dJointGetPistonPosition(ps));
+        hex(dJointGetPistonAngle(ps));
+        hex(dJointGetTransmissionAngle1(tr1));
+        hex(dJointGetTransmissionAngle2(tr2));
+        dVector3 cp;
+        dJointGetTransmissionContactPoint1(tr2, cp);
+        for (int k = 0; k < 3; k++) hex(cp[k]);
+        printf("\n");
     }
     return 0;
 }

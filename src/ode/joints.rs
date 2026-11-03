@@ -4,6 +4,7 @@
 //! getInfo2 writes rows of 16 reals, the QuickStep Jacobian layout:
 //! J1 (lin xyz, ang xyz) | rhs cfm | J2 (lin, ang) | lo hi.
 
+use super::joints2::*;
 use super::math::*;
 use super::world::{Body, BodyId, WorldParams};
 
@@ -52,6 +53,16 @@ pub enum JointType {
     Fixed,
     AMotor,
     DBall,
+    Hinge2,
+    Universal,
+    Pr,
+    Pu,
+    Piston,
+    Plane2D,
+    LMotor,
+    DHinge,
+    Transmission,
+    Null,
 }
 
 /// dxJointLimitMotor
@@ -241,12 +252,12 @@ impl LimitMotor {
     }
 }
 
-fn add_force(b: &mut Body, x: Real, y: Real, z: Real) {
+pub(crate) fn add_force(b: &mut Body, x: Real, y: Real, z: Real) {
     b.facc[0] += x;
     b.facc[1] += y;
     b.facc[2] += z;
 }
-fn add_torque(b: &mut Body, x: Real, y: Real, z: Real) {
+pub(crate) fn add_torque(b: &mut Body, x: Real, y: Real, z: Real) {
     b.tacc[0] += x;
     b.tacc[1] += y;
     b.tacc[2] += z;
@@ -380,6 +391,16 @@ pub enum JointKind {
     DBall(DBall),
     Contact(ContactJoint),
     AMotor(AMotor),
+    Hinge2(Hinge2),
+    Universal(Universal),
+    Pr(Pr),
+    Pu(Pu),
+    Piston(Piston),
+    Plane2D(Plane2D),
+    LMotor(LMotor),
+    DHinge(DHinge),
+    Transmission(Transmission),
+    Null,
 }
 impl JointKind {
     pub fn type_of(&self) -> JointType {
@@ -391,6 +412,16 @@ impl JointKind {
             JointKind::DBall(_) => JointType::DBall,
             JointKind::Contact(_) => JointType::Contact,
             JointKind::AMotor(_) => JointType::AMotor,
+            JointKind::Hinge2(_) => JointType::Hinge2,
+            JointKind::Universal(_) => JointType::Universal,
+            JointKind::Pr(_) => JointType::Pr,
+            JointKind::Pu(_) => JointType::Pu,
+            JointKind::Piston(_) => JointType::Piston,
+            JointKind::Plane2D(_) => JointType::Plane2D,
+            JointKind::LMotor(_) => JointType::LMotor,
+            JointKind::DHinge(_) => JointType::DHinge,
+            JointKind::Transmission(_) => JointType::Transmission,
+            JointKind::Null => JointType::Null,
         }
     }
 }
@@ -443,6 +474,7 @@ impl Joint {
             JointKind::DBall(j) => j.target_distance = dball_distance(node, bodies, j),
             _ => {}
         }
+        self.set_relative_values2(bodies);
     }
 
     pub(crate) fn info1(&mut self, bodies: &[Body]) -> Info1 {
@@ -564,6 +596,16 @@ impl Joint {
                 }
                 Info1 { m, nub: 0 }
             }
+            JointKind::Hinge2(j) => j.info1(node, bodies),
+            JointKind::Universal(j) => j.info1(node, bodies),
+            JointKind::Pr(j) => j.info1(node, reverse, bodies),
+            JointKind::Pu(j) => j.info1(node, reverse, bodies),
+            JointKind::Piston(j) => j.info1(node, reverse, bodies),
+            JointKind::Plane2D(j) => j.info1(),
+            JointKind::LMotor(j) => j.info1(),
+            JointKind::DHinge(_) => Info1 { m: 4, nub: 4 },
+            JointKind::Transmission(j) => j.info1(),
+            JointKind::Null => Info1 { m: 0, nub: 0 },
         }
     }
 
@@ -673,44 +715,18 @@ impl Joint {
                     rows[r * ROW + CFM] = j.cfm;
                 }
             }
-            JointKind::DBall(j) => {
-                let b0 = &bodies[node[0].unwrap()];
-                let ga1 = b0.rel_point_pos(j.anchor1[0], j.anchor1[1], j.anchor1[2]);
-                let ga2 = match node[1] {
-                    Some(b1) => bodies[b1].rel_point_pos(j.anchor2[0], j.anchor2[1], j.anchor2[2]),
-                    None => v3(j.anchor2[0], j.anchor2[1], j.anchor2[2]),
-                };
-                let mut q = sub3(&ga1, &ga2);
-                const MIN_LENGTH: Real = 1e-12;
-                if length3(&q) < MIN_LENGTH {
-                    let v1 = b0.point_vel(ga1[0], ga1[1], ga1[2]);
-                    let v2 = match node[1] {
-                        Some(b1) => bodies[b1].point_vel(ga2[0], ga2[1], ga2[2]),
-                        None => [0.0; 4],
-                    };
-                    q = sub3(&v1, &v2);
-                    if length3(&q) < MIN_LENGTH {
-                        q = v3(1.0, 0.0, 0.0);
-                    }
-                }
-                normalize3(&mut q);
-                put3(rows, J1, &q);
-                let rel_a1 = b0.vector_to_world(j.anchor1[0], j.anchor1[1], j.anchor1[2]);
-                let mut a1m = [0.0; 12];
-                set_cross_matrix_minus(&mut a1m, &rel_a1, 4);
-                put3(rows, J1 + JA, &mul1_331(&a1m, &q));
-                if let Some(b1) = node[1] {
-                    put3(rows, J2, &neg3(&q));
-                    let rel_a2 = bodies[b1].vector_to_world(j.anchor2[0], j.anchor2[1], j.anchor2[2]);
-                    let mut a2m = [0.0; 12];
-                    set_cross_matrix_plus(&mut a2m, &rel_a2, 4);
-                    put3(rows, J2 + JA, &mul1_331(&a2m, &q));
-                }
-                let k = fps * j.erp;
-                rows[RHS] = k * (j.target_distance - distance3(&ga1, &ga2));
-                rows[CFM] = j.cfm;
-            }
+            JointKind::DBall(j) => dball_info2(j, node, bodies, fps, rows),
             JointKind::Contact(c) => contact_info2(c, node, reverse, bodies, w, fps, erp, rows, findex),
+            JointKind::Hinge2(j) => j.info2(node, bodies, fps, erp, rows),
+            JointKind::Universal(j) => j.info2(node, bodies, fps, erp, rows),
+            JointKind::Pr(j) => j.info2(node, reverse, bodies, fps, erp, rows),
+            JointKind::Pu(j) => j.info2(node, reverse, bodies, fps, erp, rows),
+            JointKind::Piston(j) => j.info2(node, reverse, bodies, fps, erp, rows),
+            JointKind::Plane2D(j) => j.info2(node, bodies, fps, erp, rows),
+            JointKind::LMotor(j) => j.info2(node, bodies, fps, rows),
+            JointKind::DHinge(j) => j.info2(node, bodies, fps, rows),
+            JointKind::Transmission(j) => j.info2(node, bodies, fps, rows),
+            JointKind::Null => {}
             JointKind::AMotor(a) => {
                 let ax = amotor_global_axes(a, node, reverse, bodies);
                 let mut axp = ax;
@@ -743,11 +759,55 @@ impl Joint {
                 }
             }
             JointKind::AMotor(a) => a.num as u32,
+            JointKind::Hinge2(_) | JointKind::Universal(_) | JointKind::Pr(_) | JointKind::Pu(_) | JointKind::Piston(_) | JointKind::Plane2D(_) => 6,
+            JointKind::LMotor(l) => l.num as u32,
+            JointKind::DHinge(_) => 4,
+            JointKind::Transmission(_) => 1,
+            JointKind::Null => 0,
         }
     }
 }
 
-fn put3(rows: &mut [Real], at: usize, v: &[Real]) {
+/// dxJointDBall::getInfo2
+pub(crate) fn dball_info2(j: &DBall, node: [Option<BodyId>; 2], bodies: &[Body], fps: Real, rows: &mut [Real]) {
+    let b0 = &bodies[node[0].unwrap()];
+    let ga1 = b0.rel_point_pos(j.anchor1[0], j.anchor1[1], j.anchor1[2]);
+    let ga2 = match node[1] {
+        Some(b1) => bodies[b1].rel_point_pos(j.anchor2[0], j.anchor2[1], j.anchor2[2]),
+        None => v3(j.anchor2[0], j.anchor2[1], j.anchor2[2]),
+    };
+    let mut q = sub3(&ga1, &ga2);
+    const MIN_LENGTH: Real = 1e-12;
+    if length3(&q) < MIN_LENGTH {
+        let v1 = b0.point_vel(ga1[0], ga1[1], ga1[2]);
+        let v2 = match node[1] {
+            Some(b1) => bodies[b1].point_vel(ga2[0], ga2[1], ga2[2]),
+            None => [0.0; 4],
+        };
+        q = sub3(&v1, &v2);
+        if length3(&q) < MIN_LENGTH {
+            q = v3(1.0, 0.0, 0.0);
+        }
+    }
+    normalize3(&mut q);
+    put3(rows, J1, &q);
+    let rel_a1 = b0.vector_to_world(j.anchor1[0], j.anchor1[1], j.anchor1[2]);
+    let mut a1m = [0.0; 12];
+    set_cross_matrix_minus(&mut a1m, &rel_a1, 4);
+    put3(rows, J1 + JA, &mul1_331(&a1m, &q));
+    if let Some(b1) = node[1] {
+        put3(rows, J2, &neg3(&q));
+        let rel_a2 = bodies[b1].vector_to_world(j.anchor2[0], j.anchor2[1], j.anchor2[2]);
+        let mut a2m = [0.0; 12];
+        set_cross_matrix_plus(&mut a2m, &rel_a2, 4);
+        put3(rows, J2 + JA, &mul1_331(&a2m, &q));
+    }
+    let k = fps * j.erp;
+    rows[RHS] = k * (j.target_distance - distance3(&ga1, &ga2));
+    rows[CFM] = j.cfm;
+}
+
+pub(crate) fn put3(rows: &mut [Real], at: usize, v: &[Real]) {
     rows[at] = v[0];
     rows[at + 1] = v[1];
     rows[at + 2] = v[2];
@@ -879,7 +939,7 @@ fn contact_info2(c: &ContactJoint, node: [Option<BodyId>; 2], reverse: bool, bod
 // ---- joint.cpp helpers
 
 /// setBall: three rows holding anchor1 (body 1) on anchor2 (body 2 / world)
-fn set_ball(node: [Option<BodyId>; 2], bodies: &[Body], fps: Real, erp: Real, rows: &mut [Real], anchor1: &V3, anchor2: &V3) {
+pub(crate) fn set_ball(node: [Option<BodyId>; 2], bodies: &[Body], fps: Real, erp: Real, rows: &mut [Real], anchor1: &V3, anchor2: &V3) {
     rows[J1] = 1.0;
     rows[ROW + J1 + 1] = 1.0;
     rows[2 * ROW + J1 + 2] = 1.0;
@@ -1041,7 +1101,7 @@ pub(crate) fn slider_offset(node: [Option<BodyId>; 2], bodies: &[Body], old: V3)
     }
 }
 /// dxJointDBall::updateTargetDistance
-fn dball_distance(node: [Option<BodyId>; 2], bodies: &[Body], j: &DBall) -> Real {
+pub(crate) fn dball_distance(node: [Option<BodyId>; 2], bodies: &[Body], j: &DBall) -> Real {
     let p1 = match node[0] {
         Some(b) => bodies[b].rel_point_pos(j.anchor1[0], j.anchor1[1], j.anchor1[2]),
         None => j.anchor1,
@@ -1053,7 +1113,7 @@ fn dball_distance(node: [Option<BodyId>; 2], bodies: &[Body], j: &DBall) -> Real
     distance3(&p1, &p2)
 }
 /// getHingeAngleFromRelativeQuat
-fn hinge_angle_from_rel(qrel: &Quat, axis: &V3) -> Real {
+pub(crate) fn hinge_angle_from_rel(qrel: &Quat, axis: &V3) -> Real {
     let cost2 = qrel[0];
     let sint2 = (qrel[1] * qrel[1] + qrel[2] * qrel[2] + qrel[3] * qrel[3]).sqrt();
     let mut theta = if dot3(&qrel[1..], axis) >= 0.0 { 2.0 * sint2.atan2(cost2) } else { 2.0 * sint2.atan2(-cost2) };

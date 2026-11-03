@@ -849,3 +849,173 @@ fn trimesh_trimesh_matches_ode_0_15_2() {
     let ours = ttl_scenario(steps);
     compare(&ours, &[&steps.to_string(), "ttl"]);
 }
+
+#[allow(clippy::too_many_arguments)]
+fn jbody(w: &mut World, bs: &mut Vec<usize>, x: f64, y: f64, z: f64, m: f64, lx: f64, ly: f64, lz: f64) -> usize {
+    let b = w.body_create();
+    w.body_set_mass(b, &Mass::box_total(m, lx, ly, lz));
+    w.body_set_position(b, x, y, z);
+    bs.push(b);
+    b
+}
+
+pub fn joints_scenario(steps: usize) -> String {
+    use super::joints2::*;
+    const G2: i32 = PARAM_GROUP;
+    const G3: i32 = 2 * PARAM_GROUP;
+    let mut out = String::new();
+    rand_set_seed(4242);
+    let mut w = World::new();
+    w.set_gravity(0.0, -9.81, 0.0);
+    w.set_erp(0.2);
+    w.set_cfm(1e-6);
+    w.set_quickstep_iterations(30);
+    let mut bs = Vec::new();
+    let a = jbody(&mut w, &mut bs, 0.0, 2.0, 0.0, 5.0, 2.0, 0.5, 1.0);
+    w.body_set_rotation(a, &r_from_axis_and_angle(0.2, 1.0, 0.1, 0.3));
+    let ball = w.joint_create_ball(None);
+    w.joint_attach(ball, Some(a), None);
+    w.joint_set_ball_anchor(ball, -0.8, 2.3, 0.1);
+    let wh = jbody(&mut w, &mut bs, 1.1, 1.8, 0.6, 1.0, 0.4, 0.4, 0.2);
+    let h2 = w.joint_create_hinge2(None);
+    w.joint_attach(h2, Some(a), Some(wh));
+    w.joint_set_anchor2(h2, 1.1, 1.8, 0.6);
+    w.joint_set_hinge2_axis(h2, false, 0.0, 1.0, 0.1);
+    w.joint_set_hinge2_axis(h2, true, 0.0, 0.0, 1.0);
+    for (p, v) in [(PARAM_SUSPENSION_ERP, 0.4), (PARAM_SUSPENSION_CFM, 0.02), (PARAM_LO_STOP, -0.3), (PARAM_HI_STOP, 0.3), (PARAM_VEL, 0.5), (PARAM_FMAX, 1.0), (G2 | PARAM_VEL, 5.0), (G2 | PARAM_FMAX, 2.0)] {
+        w.joint_set_param2(h2, p, v);
+    }
+    let u = jbody(&mut w, &mut bs, -1.2, 1.5, -0.4, 1.5, 0.3, 0.8, 0.3);
+    let uj = w.joint_create_universal(None);
+    w.joint_attach(uj, Some(a), Some(u));
+    w.joint_set_anchor2(uj, -1.1, 1.9, -0.3);
+    w.joint_set_universal_axis(uj, 0, 1.0, 0.0, 0.2);
+    w.joint_set_universal_axis(uj, 1, 0.0, 0.1, 1.0);
+    for (p, v) in [(PARAM_LO_STOP, -0.5), (PARAM_HI_STOP, 0.5), (PARAM_BOUNCE, 0.3), (G2 | PARAM_VEL, -1.0), (G2 | PARAM_FMAX, 0.5)] {
+        w.joint_set_param2(uj, p, v);
+    }
+    let p = jbody(&mut w, &mut bs, 3.0, 1.0, 0.0, 2.0, 0.5, 0.5, 0.5);
+    w.body_set_rotation(p, &r_from_axis_and_angle(1.0, 0.0, 0.3, 0.4));
+    let pr = w.joint_create_pr(None);
+    w.joint_attach(pr, None, Some(p));
+    w.joint_set_anchor2(pr, 3.0, 1.2, 0.0);
+    w.joint_set_pr_axis(pr, false, 0.0, 1.0, 0.0);
+    w.joint_set_pr_axis(pr, true, 1.0, 0.0, 0.1);
+    for (k, v) in [(PARAM_LO_STOP, -0.2), (PARAM_HI_STOP, 0.3), (PARAM_BOUNCE, 0.4), (G2 | PARAM_VEL, 2.0), (G2 | PARAM_FMAX, 1.0)] {
+        w.joint_set_param2(pr, k, v);
+    }
+    let q = jbody(&mut w, &mut bs, -1.3, 0.8, -0.5, 1.0, 0.3, 0.3, 0.6);
+    let pu = w.joint_create_pu(None);
+    w.joint_attach(pu, Some(u), Some(q));
+    w.joint_set_anchor2(pu, -1.25, 1.1, -0.45);
+    w.joint_set_universal_axis(pu, 0, 1.0, 0.0, 0.0);
+    w.joint_set_universal_axis(pu, 1, 0.0, 0.2, 1.0);
+    w.joint_set_universal_axis(pu, 2, 0.0, 1.0, 0.1);
+    for (k, v) in [(G3 | PARAM_LO_STOP, -0.1), (G3 | PARAM_HI_STOP, 0.1), (G3 | PARAM_BOUNCE, 0.2), (PARAM_LO_STOP, -0.4), (PARAM_HI_STOP, 0.4), (G2 | PARAM_VEL, 0.7), (G2 | PARAM_FMAX, 0.3)] {
+        w.joint_set_param2(pu, k, v);
+    }
+    let s = jbody(&mut w, &mut bs, -3.0, 1.5, 0.5, 1.2, 0.4, 0.4, 0.4);
+    let ps = w.joint_create_piston(None);
+    w.joint_attach(ps, Some(s), None);
+    w.joint_set_anchor2(ps, -3.0, 1.5, 0.5);
+    w.joint_set_piston_axis(ps, 0.1, 1.0, 0.0);
+    for (k, v) in [(PARAM_LO_STOP, -0.5), (PARAM_HI_STOP, 0.5), (G2 | PARAM_VEL, 3.0), (G2 | PARAM_FMAX, 1.0)] {
+        w.joint_set_param2(ps, k, v);
+    }
+    let t = jbody(&mut w, &mut bs, 0.0, 0.5, 4.0, 1.0, 0.5, 0.5, 0.5);
+    let p2 = w.joint_create_plane2d(None);
+    w.joint_attach(p2, Some(t), None);
+    for (k, v) in [(PARAM_VEL, 1.0), (PARAM_FMAX, 5.0), (G3 | PARAM_VEL, 2.0), (G3 | PARAM_FMAX, 1.0)] {
+        w.joint_set_param2(p2, k, v);
+    }
+    let l = jbody(&mut w, &mut bs, 4.0, 3.0, -2.0, 2.0, 0.3, 0.3, 0.3);
+    w.body_set_rotation(l, &r_from_axis_and_angle(0.0, 0.0, 1.0, 0.5));
+    let lm = w.joint_create_lmotor(None);
+    w.joint_attach(lm, Some(l), None);
+    w.joint_set_lmotor_num_axes(lm, 2);
+    w.joint_set_lmotor_axis(lm, 0, 0, 1.0, 0.0, 0.0);
+    w.joint_set_lmotor_axis(lm, 1, 1, 0.0, 1.0, 0.0);
+    for (k, v) in [(PARAM_VEL, 0.5), (PARAM_FMAX, 3.0), (G2 | PARAM_VEL, 0.0), (G2 | PARAM_FMAX, 30.0)] {
+        w.joint_set_param2(lm, k, v);
+    }
+    let d1 = jbody(&mut w, &mut bs, -4.0, 4.0, -3.0, 1.0, 0.3, 0.3, 0.3);
+    let d2 = jbody(&mut w, &mut bs, -4.5, 3.2, -3.0, 1.0, 0.3, 0.3, 0.3);
+    w.body_set_linear_vel(d2, 0.5, 0.0, 0.3);
+    let dh = w.joint_create_dhinge(None);
+    w.joint_attach(dh, Some(d1), Some(d2));
+    w.joint_set_dhinge_axis(dh, 0.0, 0.3, 1.0);
+    w.joint_set_dhinge_anchor(dh, false, -4.0, 4.0, -3.0);
+    w.joint_set_dhinge_anchor(dh, true, -4.5, 3.2, -3.0);
+    w.joint_set_param2(dh, PARAM_ERP, 0.3);
+    let dhw = w.joint_create_ball(None);
+    w.joint_attach(dhw, Some(d1), None);
+    w.joint_set_ball_anchor(dhw, -4.0, 4.2, -3.0);
+    let gx = [2.0, 2.9, 5.0];
+    let mut g = [0usize; 3];
+    for i in 0..3 {
+        g[i] = jbody(&mut w, &mut bs, gx[i], 5.0, 3.0, 1.0 + i as f64, 0.6, 0.6, 0.1);
+        let h = w.joint_create_hinge(None);
+        w.joint_attach(h, Some(g[i]), None);
+        w.joint_set_hinge_anchor(h, gx[i], 5.0, 3.0);
+        w.joint_set_hinge_axis(h, 0.0, 0.0, 1.0);
+        if i == 0 {
+            w.joint_set_hinge_param(h, PARAM_VEL, 3.0);
+            w.joint_set_hinge_param(h, PARAM_FMAX, 10.0);
+        }
+    }
+    let tr1 = w.joint_create_transmission(None);
+    w.joint_attach(tr1, Some(g[0]), Some(g[1]));
+    w.joint_set_transmission(tr1, TRANSMISSION_PARALLEL_AXES, 2.0, [0.0, 0.0], 0.0);
+    w.joint_set_transmission_anchor(tr1, 0, 2.0, 5.0, 3.0);
+    w.joint_set_transmission_anchor(tr1, 1, 2.9, 5.0, 3.0);
+    w.joint_set_transmission_axis(tr1, 2, 0.0, 0.0, 1.0);
+    let tr2 = w.joint_create_transmission(None);
+    w.joint_attach(tr2, Some(g[0]), Some(g[2]));
+    w.joint_set_transmission(tr2, TRANSMISSION_CHAIN_DRIVE, 1.0, [0.3, 0.5], 0.02);
+    w.joint_set_transmission_anchor(tr2, 0, 2.0, 5.0, 3.0);
+    w.joint_set_transmission_anchor(tr2, 1, 5.0, 5.0, 3.0);
+    w.joint_set_transmission_axis(tr2, 2, 0.0, 0.0, 1.0);
+    let nj = w.joint_create_null(None);
+    w.joint_attach(nj, Some(g[1]), Some(g[2]));
+    for st in 0..steps {
+        w.quick_step(0.005);
+        let _ = writeln!(out, "S{}", st);
+        for &b in &bs {
+            dump_body(&mut out, &w.bodies[b]);
+        }
+        out.push('J');
+        let (u1, u2) = w.joint_get_universal_angles(uj);
+        let (pu1, pu2) = w.joint_get_universal_angles(pu);
+        let (phase, contacts) = w.joint_get_transmission_state(tr2).unwrap();
+        let (phase1, _) = w.joint_get_transmission_state(tr1).unwrap();
+        for v in [
+            w.joint_get_hinge2_angle1(h2),
+            w.joint_get_hinge2_angle2(h2),
+            u1,
+            u2,
+            w.joint_get_position2(pr),
+            w.joint_get_angle2(pr),
+            w.joint_get_position2(pu),
+            pu1,
+            pu2,
+            w.joint_get_position2(ps),
+            w.joint_get_angle2(ps),
+            phase1[0],
+            phase[1],
+            contacts[0][0],
+            contacts[0][1],
+            contacts[0][2],
+        ] {
+            hex(&mut out, v);
+        }
+        out.push(char::from(10));
+    }
+    out
+}
+
+#[test]
+fn joints_match_ode_0_15_2() {
+    let steps = oracle_steps();
+    let ours = joints_scenario(steps);
+    compare(&ours, &[&steps.to_string(), "joints"]);
+}
