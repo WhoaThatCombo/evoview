@@ -8,7 +8,9 @@
 
 use super::joints::ContactGeom;
 use super::math::*;
+use super::opcode;
 use super::world::{BodyId, World};
+use std::sync::Arc;
 
 pub type GeomId = usize;
 
@@ -69,7 +71,47 @@ pub enum Shape {
     Capsule { radius: Real, lz: Real },
     Plane { p: [Real; 4] },
     Ray { length: Real },
+    TriMesh(Arc<TriMeshData>),
     Space(Space),
+}
+
+/// dxTriMeshData: the mesh, its OPCODE tree and its model-space AABB
+pub struct TriMeshData {
+    pub mesh: opcode::MeshData,
+    pub model: opcode::Model,
+    pub aabb_center: V3,
+    pub aabb_extents: V3,
+}
+impl std::fmt::Debug for TriMeshData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TriMeshData({} tris)", self.mesh.tris.len())
+    }
+}
+impl TriMeshData {
+    /// dGeomTriMeshDataBuild{Single,Double}: float data passes through
+    /// exactly, double data is kept for the AABB and rounded for OPCODE
+    pub fn build(verts: Vec<[f64; 3]>, tris: Vec<[u32; 3]>) -> Arc<TriMeshData> {
+        let mesh = opcode::MeshData { verts, tris };
+        let model = opcode::Model::build(&mesh);
+        let mut mx = [-INFINITY; 3];
+        let mut mn = [INFINITY; 3];
+        for v in &mesh.verts {
+            for a in 0..3 {
+                if v[a] > mx[a] {
+                    mx[a] = v[a];
+                }
+                if v[a] < mn[a] {
+                    mn[a] = v[a];
+                }
+            }
+        }
+        let mut c = add3(&mn, &mx);
+        c[0] *= 0.5;
+        c[1] *= 0.5;
+        c[2] *= 0.5;
+        let e = sub3(&mx, &c);
+        Arc::new(TriMeshData { mesh, model, aabb_center: c, aabb_extents: e })
+    }
 }
 impl Shape {
     fn class(&self) -> usize {
@@ -79,6 +121,7 @@ impl Shape {
             Shape::Capsule { .. } => CAPSULE,
             Shape::Plane { .. } => PLANE,
             Shape::Ray { .. } => RAY,
+            Shape::TriMesh(_) => TRIMESH,
             Shape::Space(s) => match s.kind {
                 SpaceKind::Simple => SIMPLE_SPACE,
                 SpaceKind::Hash { .. } => HASH_SPACE,
@@ -165,6 +208,24 @@ impl World {
     /// dCreateRay (along the geom's local z)
     pub fn create_ray(&mut self, space: Option<GeomId>, length: Real) -> GeomId {
         self.geom_new(Shape::Ray { length }, space, true)
+    }
+    /// dCreateTriMesh
+    pub fn create_trimesh(&mut self, space: Option<GeomId>, data: Arc<TriMeshData>) -> GeomId {
+        self.geom_new(Shape::TriMesh(data), space, true)
+    }
+    /// dGeomRaySetParams / dGeomRaySetClosestHit
+    pub fn geom_ray_set_params(&mut self, g: GeomId, first_contact: bool, backface_cull: bool, closest_hit: bool) {
+        let f = &mut self.geoms[g].gflags;
+        *f &= !(RAY_FIRSTCONTACT | RAY_BACKFACECULL | RAY_CLOSEST_HIT);
+        if first_contact {
+            *f |= RAY_FIRSTCONTACT;
+        }
+        if backface_cull {
+            *f |= RAY_BACKFACECULL;
+        }
+        if closest_hit {
+            *f |= RAY_CLOSEST_HIT;
+        }
     }
     /// dSimpleSpaceCreate
     pub fn simple_space_create(&mut self, space: Option<GeomId>) -> GeomId {
@@ -801,6 +862,15 @@ fn shape_aabb(shape: &Shape, pr: &PosR) -> [Real; 6] {
             }
             a
         }
+        Shape::TriMesh(d) => {
+            // dxTriMesh::computeAABB
+            let c = mul0_331(r, &d.aabb_center);
+            let e = &d.aabb_extents;
+            let xr = (r[0] * e[0]).abs() + (r[1] * e[1]).abs() + (r[2] * e[2]).abs();
+            let yr = (r[4] * e[0]).abs() + (r[5] * e[1]).abs() + (r[6] * e[2]).abs();
+            let zr = (r[8] * e[0]).abs() + (r[9] * e[1]).abs() + (r[10] * e[2]).abs();
+            [c[0] + pos[0] - xr, c[0] + pos[0] + xr, c[1] + pos[1] - yr, c[1] + pos[1] + yr, c[2] + pos[2] - zr, c[2] + pos[2] + zr]
+        }
         Shape::Space(_) => [0.0; 6],
     }
 }
@@ -851,7 +921,7 @@ type ColliderFn = fn(&Prim, &Prim, i32) -> Vec<ContactGeom>;
 /// dInitColliders' table: (reverse, function) for a class pair
 fn collider(c1: usize, c2: usize) -> Option<(bool, ColliderFn)> {
     // registration order, first wins (setCollider)
-    let table: [(usize, usize, ColliderFn); 13] = [
+    let table: [(usize, usize, ColliderFn); 15] = [
         (SPHERE, SPHERE, collide_sphere_sphere),
         (SPHERE, BOX, collide_sphere_box),
         (SPHERE, PLANE, collide_sphere_plane),
@@ -865,6 +935,8 @@ fn collider(c1: usize, c2: usize) -> Option<(bool, ColliderFn)> {
         (RAY, BOX, collide_ray_box),
         (RAY, CAPSULE, collide_ray_capsule),
         (RAY, PLANE, collide_ray_plane),
+        (TRIMESH, SPHERE, collide_sphere_trimesh),
+        (TRIMESH, RAY, collide_ray_trimesh),
     ];
     let _ = NUM_CLASSES;
     for &(i, j, f) in &table {
@@ -2007,4 +2079,272 @@ fn collide_ray_plane(o1: &Prim, o2: &Prim, _flags: i32) -> Vec<ContactGeom> {
     c.normal = [nsign * p[0], nsign * p[1], nsign * p[2], 0.0];
     c.depth = alpha;
     vec![c]
+}
+
+// ---- trimesh colliders (collision_trimesh_*.cpp)
+
+fn mesh_of<'a>(s: &'a Shape) -> &'a TriMeshData {
+    match s {
+        Shape::TriMesh(d) => d,
+        _ => panic!("not a trimesh"),
+    }
+}
+
+/// dxTriMesh::fetchMeshTriangle: a triangle in world space (vertices pass
+/// through OPCODE's float fetch first)
+pub fn fetch_triangle(d: &TriMeshData, index: usize, pos: &[Real], r: &[Real]) -> [V3; 3] {
+    let t = d.mesh.tri(index);
+    let mut out = [[0.0; 4]; 3];
+    for i in 0..3 {
+        let v = [t[i][0] as Real, t[i][1] as Real, t[i][2] as Real, 0.0];
+        let w = mul0_331(r, &v);
+        out[i] = add3(&w, pos);
+    }
+    out
+}
+
+/// dCollideRTL
+fn collide_ray_trimesh(o1: &Prim, o2: &Prim, flags: i32) -> Vec<ContactGeom> {
+    let d = mesh_of(o1.shape);
+    let length = ray_len(o2.shape);
+    let mut col = opcode::RayCollider::new(&d.mesh);
+    col.first_contact = o2.flags & RAY_FIRSTCONTACT != 0;
+    col.closest_hit = o2.flags & RAY_CLOSEST_HIT != 0;
+    col.culling = o2.flags & RAY_BACKFACECULL != 0;
+    col.max_dist = length as f32;
+    let (tlpos, tlrot) = (&o1.pr.pos, &o1.pr.r);
+    let mesh_matrix = opcode::make_matrix(&[0.0; 3], tlrot);
+    let origin = o2.pr.pos;
+    let dir = [o2.pr.r[2], o2.pr.r[6], o2.pr.r[10]];
+    let off = sub3(&origin, tlpos);
+    col.collide([off[0] as f32, off[1] as f32, off[2] as f32], [dir[0] as f32, dir[1] as f32, dir[2] as f32], &d.model, &mesh_matrix);
+    let mut out = Vec::new();
+    for f in &col.faces {
+        let tri = f.face_id as usize;
+        let dv = fetch_triangle(d, tri, tlpos, tlrot);
+        let vu = sub3(&dv[1], &dv[0]);
+        let vv = sub3(&dv[2], &dv[0]);
+        let mut n = cross(&vv, &vu);
+        if safe_normalize3(&mut n) {
+            let t = f.distance as Real;
+            let mut c = ContactGeom { g1: o1.id, g2: o2.id, side1: tri as i32, side2: -1, ..Default::default() };
+            c.normal = n;
+            c.pos = [origin[0] + dir[0] * t, origin[1] + dir[1] * t, origin[2] + dir[2] * t, 0.0];
+            c.depth = t;
+            out.push(c);
+            if out.len() as i32 >= flags & NUMC_MASK {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// GetContactData (collision_trimesh_sphere.cpp): sphere vs triangle by
+/// Eberly's closest point; returns (depth, u, v) when within the radius
+fn sphere_tri_contact(center: &[Real], radius: Real, origin: &[Real], e0: &[Real], e1: &[Real]) -> Option<(Real, Real, Real)> {
+    let diff = [origin[0] - center[0], origin[1] - center[1], origin[2] - center[2]];
+    let a00 = dot3(e0, e0);
+    let a01 = dot3(e0, e1);
+    let a11 = dot3(e1, e1);
+    let b0 = dot3(&diff, e0);
+    let b1 = dot3(&diff, e1);
+    let c = dot3(&diff, &diff);
+    let det = (a00 * a11 - a01 * a01).abs();
+    let mut u = a01 * b1 - a11 * b0;
+    let mut v = a01 * b0 - a00 * b1;
+    let dist_sq;
+    if u + v <= det {
+        if u < 0.0 {
+            if v < 0.0 {
+                if b0 < 0.0 {
+                    v = 0.0;
+                    if -b0 >= a00 {
+                        u = 1.0;
+                        dist_sq = a00 + 2.0 * b0 + c;
+                    } else {
+                        u = -b0 / a00;
+                        dist_sq = b0 * u + c;
+                    }
+                } else {
+                    u = 0.0;
+                    if b1 >= 0.0 {
+                        v = 0.0;
+                        dist_sq = c;
+                    } else if -b1 >= a11 {
+                        v = 1.0;
+                        dist_sq = a11 + 2.0 * b1 + c;
+                    } else {
+                        v = -b1 / a11;
+                        dist_sq = b1 * v + c;
+                    }
+                }
+            } else {
+                u = 0.0;
+                if b1 >= 0.0 {
+                    v = 0.0;
+                    dist_sq = c;
+                } else if -b1 >= a11 {
+                    v = 1.0;
+                    dist_sq = a11 + 2.0 * b1 + c;
+                } else {
+                    v = -b1 / a11;
+                    dist_sq = b1 * v + c;
+                }
+            }
+        } else if v < 0.0 {
+            v = 0.0;
+            if b0 >= 0.0 {
+                u = 0.0;
+                dist_sq = c;
+            } else if -b0 >= a00 {
+                u = 1.0;
+                dist_sq = a00 + 2.0 * b0 + c;
+            } else {
+                u = -b0 / a00;
+                dist_sq = b0 * u + c;
+            }
+        } else if det == 0.0 {
+            u = 0.0;
+            v = 0.0;
+            dist_sq = f32::MAX as Real;
+        } else {
+            let inv = 1.0 / det;
+            u *= inv;
+            v *= inv;
+            dist_sq = u * (a00 * u + a01 * v + 2.0 * b0) + v * (a01 * u + a11 * v + 2.0 * b1) + c;
+        }
+    } else if u < 0.0 {
+        let t0 = a01 + b0;
+        let t1 = a11 + b1;
+        if t1 > t0 {
+            let num = t1 - t0;
+            let den = a00 - 2.0 * a01 + a11;
+            if num >= den {
+                u = 1.0;
+                v = 0.0;
+                dist_sq = a00 + 2.0 * b0 + c;
+            } else {
+                u = num / den;
+                v = 1.0 - u;
+                dist_sq = u * (a00 * u + a01 * v + 2.0 * b0) + v * (a01 * u + a11 * v + 2.0 * b1) + c;
+            }
+        } else {
+            u = 0.0;
+            if t1 <= 0.0 {
+                v = 1.0;
+                dist_sq = a11 + 2.0 * b1 + c;
+            } else if b1 >= 0.0 {
+                v = 0.0;
+                dist_sq = c;
+            } else {
+                v = -b1 / a11;
+                dist_sq = b1 * v + c;
+            }
+        }
+    } else if v < 0.0 {
+        let t0 = a01 + b1;
+        let t1 = a00 + b0;
+        if t1 > t0 {
+            let num = t1 - t0;
+            let den = a00 - 2.0 * a01 + a11;
+            if num >= den {
+                v = 1.0;
+                u = 0.0;
+                dist_sq = a11 + 2.0 * b1 + c;
+            } else {
+                v = num / den;
+                u = 1.0 - v;
+                dist_sq = u * (a00 * u + a01 * v + 2.0 * b0) + v * (a01 * u + a11 * v + 2.0 * b1) + c;
+            }
+        } else {
+            v = 0.0;
+            if t1 <= 0.0 {
+                u = 1.0;
+                dist_sq = a00 + 2.0 * b0 + c;
+            } else if b0 >= 0.0 {
+                u = 0.0;
+                dist_sq = c;
+            } else {
+                u = -b0 / a00;
+                dist_sq = b0 * u + c;
+            }
+        }
+    } else {
+        let num = a11 + b1 - a01 - b0;
+        if num <= 0.0 {
+            u = 0.0;
+            v = 1.0;
+            dist_sq = a11 + 2.0 * b1 + c;
+        } else {
+            let den = a00 - 2.0 * a01 + a11;
+            if num >= den {
+                u = 1.0;
+                v = 0.0;
+                dist_sq = a00 + 2.0 * b0 + c;
+            } else {
+                u = num / den;
+                v = 1.0 - u;
+                dist_sq = u * (a00 * u + a01 * v + 2.0 * b0) + v * (a01 * u + a11 * v + 2.0 * b1) + c;
+            }
+        }
+    }
+    let dist = dist_sq.abs().sqrt();
+    if dist <= radius {
+        Some((radius - dist, u, v))
+    } else {
+        None
+    }
+}
+
+/// dCollideSTL (contacts not merged: MERGE_NORMALS__SPHERE_DEFAULT)
+fn collide_sphere_trimesh(o1: &Prim, o2: &Prim, flags: i32) -> Vec<ContactGeom> {
+    use super::volume::{SphereVol, VolumeQuery};
+    let d = mesh_of(o1.shape);
+    let (tlpos, tlrot) = (&o1.pr.pos, &o1.pr.r);
+    let mesh_matrix = opcode::make_matrix(&[0.0; 3], tlrot);
+    let position = o2.pr.pos;
+    let radius = radius_of(o2.shape);
+    let off = sub3(&position, tlpos);
+    let vol = SphereVol::new([off[0] as f32, off[1] as f32, off[2] as f32], radius as f32, &mesh_matrix);
+    let mut q = VolumeQuery::new(vol, &d.mesh);
+    q.run(&d.model);
+    let mut out = Vec::new();
+    if !q.contact {
+        return out;
+    }
+    for &tri in &q.touched {
+        if out.len() as i32 == flags & NUMC_MASK {
+            break;
+        }
+        let dv = fetch_triangle(d, tri as usize, tlpos, tlrot);
+        let (v0, v1, v2) = (&dv[0], &dv[1], &dv[2]);
+        let vu = sub3(v1, v0);
+        let vv = sub3(v2, v0);
+        let mut plane = cross(&vu, &vv);
+        if !safe_normalize3(&mut plane) {
+            continue;
+        }
+        let side = dot3(&plane, &position) - dot3(&plane, v0);
+        if side < 0.0 {
+            continue;
+        }
+        let Some((depth, u, v)) = sphere_tri_contact(&position, radius, v0, &vu, &vv) else { continue };
+        if depth < 0.0 {
+            continue;
+        }
+        let w = 1.0 - u - v;
+        let cp = [(v0[0] * w) + (v1[0] * u) + (v2[0] * v), (v0[1] * w) + (v1[1] * u) + (v2[1] * v), (v0[2] * w) + (v1[2] * u) + (v2[2] * v), 0.0];
+        let dir = sub3(&position, &cp);
+        let dir_proj = dot3(&dir, &plane) / dot3(&dir, &dir).sqrt();
+        if dir_proj < 0.0 {
+            continue;
+        }
+        let mut c = ContactGeom { g1: o1.id, g2: o2.id, side1: tri as i32, side2: -1, ..Default::default() };
+        c.pos = cp;
+        c.normal = [-plane[0], -plane[1], -plane[2], 0.0];
+        c.depth = depth * dir_proj;
+        out.push(c);
+    }
+    out
 }

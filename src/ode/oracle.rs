@@ -335,6 +335,126 @@ pub fn collide_scenario(steps: usize) -> String {
     out
 }
 
+fn grid() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+    let mut v = Vec::new();
+    for j in 0..13 {
+        for i in 0..13 {
+            let x = (i as f64 - 6.0) * 0.5;
+            let z = (j as f64 - 6.0) * 0.5;
+            v.push([x, 0.3 * (x * 1.3).sin() * (z * 0.7).cos() + 0.1 * x, z]);
+        }
+    }
+    let mut t = Vec::new();
+    for j in 0..12u32 {
+        for i in 0..12u32 {
+            let a = j * 13 + i;
+            let (b, c) = (a + 1, a + 13);
+            let d = c + 1;
+            if (i + j) & 1 != 0 {
+                t.push([a, c, b]);
+                t.push([b, c, d]);
+            } else {
+                t.push([a, c, d]);
+                t.push([a, d, b]);
+            }
+        }
+    }
+    (v, t)
+}
+
+pub fn trimesh_scenario(steps: usize) -> String {
+    use super::collision::TriMeshData;
+    let mut out = String::new();
+    let mut w = World::new();
+    let (v, t) = grid();
+    let data = TriMeshData::build(v, t);
+    let space = w.simple_space_create(None);
+    let mesh = w.create_trimesh(Some(space), data);
+    let ray = w.create_ray(Some(space), 1.0);
+    let sph = w.create_sphere(Some(space), 0.3);
+    for s in 0..steps {
+        let fs = s as f64;
+        let _ = writeln!(out, "S{}", s);
+        let r = r_from_axis_and_angle(0.1, 1.0, 0.2, 0.05 * fs);
+        w.geom_set_rotation(mesh, &r);
+        w.geom_set_position(mesh, 0.01 * fs, -0.2 + 0.003 * fs, 0.02 * fs);
+        let aabb = w.geom_aabb(mesh);
+        for k in aabb {
+            hex(&mut out, k);
+        }
+        out.push(char::from(10));
+        for ri in 0..24 {
+            let fr = ri as f64;
+            let (mut ox, oz) = (-2.7 + 0.23 * fr + 0.01 * fs, 2.5 - 0.21 * fr);
+            let (mut dx, mut dz) = (0.2 * (fr * 0.7).sin(), 0.15 * (fr * 1.1).cos());
+            let mut oy = if ri % 5 == 4 { -1.5 } else { 1.5 };
+            let mut dy = if ri % 5 == 4 { 1.0 } else { -1.0 };
+            if ri % 7 == 3 {
+                dx = 1.0;
+                dy = -0.05;
+                dz = 0.3;
+                oy = 0.1;
+                ox = -3.5;
+            }
+            let len = if ri % 3 == 0 { 1e30 } else { 1.6 + 0.4 * (ri % 4) as f64 };
+            if let super::collision::Shape::Ray { length } = &mut w.geoms[ray].shape {
+                *length = len;
+            }
+            w.geom_moved(ray);
+            let first = (ri >> 1) & 1 != 0;
+            w.geom_ray_set_params(ray, first, (ri >> 2) & 1 != 0, ri % 6 == 5 && !first);
+            if ri % 7 == 3 {
+                if let super::collision::Shape::Ray { length } = &mut w.geoms[ray].shape {
+                    *length = if ri == 17 { 4.5 } else { 1e30 };
+                }
+                w.geom_moved(ray);
+                w.geom_ray_set_params(ray, false, false, false);
+            }
+            w.geom_ray_set(ray, ox, oy, oz, dx, dy, dz);
+            let maxc = 1 + (ri % 4) * 3;
+            for (tag, a, b) in [('A', ray, mesh), ('B', mesh, ray)] {
+                let cs = w.collide(a, b, maxc);
+                let _ = write!(out, "{}{} {}", tag, ri, cs.len());
+                for c in &cs {
+                    let _ = write!(out, " {}/{}", c.side1, c.side2);
+                }
+                out.push(char::from(10));
+                dump_contacts(&mut out, &cs);
+            }
+        }
+        for q in 0..20 {
+            let fq = q as f64;
+            let x = -2.6 + 0.27 * fq;
+            let z = 2.2 - 0.23 * fq + 0.005 * fs;
+            let y = 0.25 * (fq * 0.9 + fs * 0.05).sin() + 0.05 * x;
+            if let super::collision::Shape::Sphere { radius } = &mut w.geoms[sph].shape {
+                *radius = 0.15 + 0.05 * (q % 6) as f64;
+            }
+            w.geom_moved(sph);
+            w.geom_set_position(sph, x, y, z);
+            let maxc = 1 + (q % 5) * 3;
+            let cs = w.collide(sph, mesh, maxc);
+            let _ = write!(out, "P{} {}", q, cs.len());
+            for c in &cs {
+                let _ = write!(out, " {}/{}", c.side1, c.side2);
+            }
+            out.push(char::from(10));
+            dump_contacts(&mut out, &cs);
+            let cs = w.collide(mesh, sph, maxc);
+            let _ = writeln!(out, "Q{} {}", q, cs.len());
+            dump_contacts(&mut out, &cs);
+        }
+    }
+    out
+}
+
+#[test]
+fn trimesh_matches_ode_0_15_2() {
+    let steps = oracle_steps().min(100);
+    let ours = trimesh_scenario(steps);
+    compare(&ours, &[&steps.to_string(), "trimesh"]);
+}
+
 fn compare(ours: &str, args: &[&str]) {
     let Ok(exe) = std::env::var("ODE_ORACLE") else {
         eprintln!("ODE_ORACLE not set: ran the scenario only");

@@ -11,7 +11,9 @@ pub mod api;
 pub mod collision;
 pub mod joints;
 pub mod math;
+pub mod opcode;
 pub mod quickstep;
+pub mod volume;
 pub mod world;
 #[cfg(test)]
 mod oracle;

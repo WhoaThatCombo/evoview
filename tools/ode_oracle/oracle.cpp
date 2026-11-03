@@ -24,10 +24,12 @@ static void dump_body(dBodyID b) {
 }
 
 static int collide_scenario(int steps);
+static int trimesh_scenario(int steps);
 
 int main(int argc, char **argv) {
     int steps = argc > 1 ? atoi(argv[1]) : 400;
     if (argc > 2 && !strcmp(argv[2], "collide")) return collide_scenario(steps);
+    if (argc > 2 && !strcmp(argv[2], "trimesh")) return trimesh_scenario(steps);
     dInitODE2(0);
     dRandSetSeed(12345);
     dWorldID w = dWorldCreate();
@@ -353,6 +355,99 @@ static int collide_scenario(int steps) {
         dJointGroupEmpty(cgroup);
         printf("R%d\n", ray_hits);
         for (int i = 0; i < nb; i++) dump_body(B[i]);
+    }
+    return 0;
+}
+
+// ---- scenario 3: trimesh queries. A bumpy grid mesh (double data) that
+// turns a little each step, probed by a fan of rays with every flag mix.
+static double tm_verts[13 * 13 * 3];
+static dTriIndex tm_idx[12 * 12 * 6];
+static void build_grid() {
+    int k = 0;
+    for (int j = 0; j < 13; j++)
+        for (int i = 0; i < 13; i++) {
+            double x = (i - 6) * 0.5, z = (j - 6) * 0.5;
+            tm_verts[k++] = x;
+            tm_verts[k++] = 0.3 * sin(x * 1.3) * cos(z * 0.7) + 0.1 * x;
+            tm_verts[k++] = z;
+        }
+    k = 0;
+    for (int j = 0; j < 12; j++)
+        for (int i = 0; i < 12; i++) {
+            int a = j * 13 + i, b = a + 1, c = a + 13, d = c + 1;
+            if ((i + j) & 1) {
+                tm_idx[k++] = a; tm_idx[k++] = c; tm_idx[k++] = b;
+                tm_idx[k++] = b; tm_idx[k++] = c; tm_idx[k++] = d;
+            } else {
+                tm_idx[k++] = a; tm_idx[k++] = c; tm_idx[k++] = d;
+                tm_idx[k++] = a; tm_idx[k++] = d; tm_idx[k++] = b;
+            }
+        }
+}
+static int trimesh_scenario(int steps) {
+    dInitODE2(0);
+    build_grid();
+    dTriMeshDataID data = dGeomTriMeshDataCreate();
+    dGeomTriMeshDataBuildDouble(data, tm_verts, 3 * sizeof(double), 13 * 13, tm_idx, 12 * 12 * 6, 3 * sizeof(dTriIndex));
+    dSpaceID space = dSimpleSpaceCreate(0);
+    dGeomID mesh = dCreateTriMesh(space, data, 0, 0, 0);
+    dGeomID ray = dCreateRay(space, 1.0);
+    dGeomID sph = dCreateSphere(space, 0.3);
+    dMatrix3 R;
+    for (int s = 0; s < steps; s++) {
+        printf("S%d\n", s);
+        dRFromAxisAndAngle(R, 0.1, 1, 0.2, 0.05 * s);
+        dGeomSetRotation(mesh, R);
+        dGeomSetPosition(mesh, 0.01 * s, -0.2 + 0.003 * s, 0.02 * s);
+        dReal aabb[6];
+        dGeomGetAABB(mesh, aabb);
+        for (int k = 0; k < 6; k++) hex(aabb[k]);
+        printf("\n");
+        for (int r = 0; r < 24; r++) {
+            double ox = -2.7 + 0.23 * r + 0.01 * s, oz = 2.5 - 0.21 * r;
+            double dx = 0.2 * sin(r * 0.7), dz = 0.15 * cos(r * 1.1);
+            double oy = (r % 5 == 4) ? -1.5 : 1.5;
+            double dy = (r % 5 == 4) ? 1.0 : -1.0;
+            if (r % 7 == 3) { dx = 1.0; dy = -0.05; dz = 0.3; oy = 0.1; ox = -3.5; }
+            dGeomRaySetLength(ray, (r % 3 == 0) ? 1e30 : 1.6 + 0.4 * (r % 4));
+            dGeomRaySetParams(ray, (r >> 1) & 1, (r >> 2) & 1);
+            dGeomRaySetClosestHit(ray, (r % 6 == 5) && !((r >> 1) & 1));
+            if (r % 7 == 3) {
+                dGeomRaySetLength(ray, r == 17 ? 4.5 : 1e30);
+                dGeomRaySetParams(ray, 0, 0);
+                dGeomRaySetClosestHit(ray, 0);
+            }
+            dGeomRaySet(ray, ox, oy, oz, dx, dy, dz);
+            int maxc = 1 + (r % 4) * 3;
+            dContactGeom cg[16];
+            int n = dCollide(ray, mesh, maxc, cg, sizeof(dContactGeom));
+            printf("A%d %d", r, n);
+            for (int i = 0; i < n; i++) printf(" %d/%d", cg[i].side1, cg[i].side2);
+            printf("\n");
+            dump_contacts(cg, n);
+            n = dCollide(mesh, ray, maxc, cg, sizeof(dContactGeom));
+            printf("B%d %d", r, n);
+            for (int i = 0; i < n; i++) printf(" %d/%d", cg[i].side1, cg[i].side2);
+            printf("\n");
+            dump_contacts(cg, n);
+        }
+        for (int q = 0; q < 20; q++) {
+            double x = -2.6 + 0.27 * q, z = 2.2 - 0.23 * q + 0.005 * s;
+            double y = 0.25 * sin(q * 0.9 + s * 0.05) + 0.05 * x;
+            dGeomSphereSetRadius(sph, 0.15 + 0.05 * (q % 6));
+            dGeomSetPosition(sph, x, y, z);
+            int maxc = 1 + (q % 5) * 3;
+            dContactGeom cg[16];
+            int n = dCollide(sph, mesh, maxc, cg, sizeof(dContactGeom));
+            printf("P%d %d", q, n);
+            for (int i = 0; i < n; i++) printf(" %d/%d", cg[i].side1, cg[i].side2);
+            printf("\n");
+            dump_contacts(cg, n);
+            n = dCollide(mesh, sph, maxc, cg, sizeof(dContactGeom));
+            printf("Q%d %d\n", q, n);
+            dump_contacts(cg, n);
+        }
     }
     return 0;
 }
