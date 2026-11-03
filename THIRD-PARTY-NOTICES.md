@@ -50,7 +50,9 @@ cargo metadata --format-version 1 --all-features
 ## Ported source
 
 - Open Dynamics Engine 0.15.2 (`src/ode/`): a Rust translation of ODE's maths,
-  bodies, joints, QuickStep stepper, spaces and colliders, used under ODE's BSD-style licence (ODE is
+  bodies, joints, QuickStep stepper, spaces and colliders, and of the parts of
+  OPCODE 1.3 (Copyright (C) 2001 Pierre Terdiman; distributed with ODE under ODE's
+  licence terms) that ODE's trimesh colliders use, used under ODE's BSD-style licence (ODE is
   dual-licensed LGPL / BSD; the BSD terms are the ones taken here):
 
 ```text

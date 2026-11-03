@@ -213,6 +213,14 @@ impl World {
     pub fn create_trimesh(&mut self, space: Option<GeomId>, data: Arc<TriMeshData>) -> GeomId {
         self.geom_new(Shape::TriMesh(data), space, true)
     }
+    /// dGeomPlaneSetParams
+    pub fn geom_plane_set_params(&mut self, g: GeomId, a: Real, b: Real, c: Real, d: Real) {
+        if let Shape::Plane { p } = &mut self.geoms[g].shape {
+            *p = [a, b, c, d];
+            plane_unit_normal(p);
+        }
+        self.geom_moved(g);
+    }
     /// dGeomRaySetParams / dGeomRaySetClosestHit
     pub fn geom_ray_set_params(&mut self, g: GeomId, first_contact: bool, backface_cull: bool, closest_hit: bool) {
         let f = &mut self.geoms[g].gflags;
@@ -921,7 +929,7 @@ type ColliderFn = fn(&Prim, &Prim, i32) -> Vec<ContactGeom>;
 /// dInitColliders' table: (reverse, function) for a class pair
 fn collider(c1: usize, c2: usize) -> Option<(bool, ColliderFn)> {
     // registration order, first wins (setCollider)
-    let table: [(usize, usize, ColliderFn); 17] = [
+    let table: [(usize, usize, ColliderFn); 18] = [
         (SPHERE, SPHERE, collide_sphere_sphere),
         (SPHERE, BOX, collide_sphere_box),
         (SPHERE, PLANE, collide_sphere_plane),
@@ -938,6 +946,7 @@ fn collider(c1: usize, c2: usize) -> Option<(bool, ColliderFn)> {
         (TRIMESH, SPHERE, collide_sphere_trimesh),
         (TRIMESH, BOX, collide_box_trimesh),
         (TRIMESH, CAPSULE, collide_capsule_trimesh),
+        (TRIMESH, PLANE, collide_trimesh_plane),
         (TRIMESH, RAY, collide_ray_trimesh),
     ];
     let _ = NUM_CLASSES;
@@ -3124,6 +3133,39 @@ fn collide_capsule_trimesh(o1: &Prim, o2: &Prim, flags: i32) -> Vec<ContactGeom>
         }
         if lc.keep {
             out.push(ContactGeom { pos: lc.pos, normal: lc.normal, depth: lc.depth, g1: o1.id, g2: o2.id, side1: lc.tri, side2: -1 });
+        }
+    }
+    out
+}
+
+/// dCollideTrimeshPlane: every vertex (each once) below the plane
+fn collide_trimesh_plane(o1: &Prim, o2: &Prim, flags: i32) -> Vec<ContactGeom> {
+    let d = mesh_of(o1.shape);
+    let Shape::Plane { p } = o2.shape else { return Vec::new() };
+    let (pos, r) = (&o1.pr.pos, &o1.pr.r);
+    let maxc = (flags & NUMC_MASK) as usize;
+    let mut used = vec![false; d.mesh.verts.len()];
+    let mut out = Vec::new();
+    for (t, tri) in d.mesh.tris.iter().enumerate() {
+        let fv = d.mesh.tri(t);
+        for v in 0..3 {
+            let idx = tri[v] as usize;
+            if used[idx] {
+                continue;
+            }
+            used[idx] = true;
+            let iv = [fv[v][0] as Real, fv[v][1] as Real, fv[v][2] as Real, 0.0];
+            let mut vx = mul0_331(r, &iv);
+            vx[0] += pos[0];
+            vx[1] += pos[1];
+            vx[2] += pos[2];
+            let alpha = p[3] - dot3(p, &vx);
+            if alpha > 0.0 {
+                out.push(ContactGeom { pos: vx, normal: [p[0], p[1], p[2], 0.0], depth: alpha, g1: o1.id, g2: o2.id, side1: t as i32, side2: -1 });
+                if out.len() >= maxc {
+                    return out;
+                }
+            }
         }
     }
     out

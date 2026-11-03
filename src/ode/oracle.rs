@@ -374,6 +374,7 @@ pub fn trimesh_scenario(steps: usize) -> String {
     let sph = w.create_sphere(Some(space), 0.3);
     let bx = w.create_box(Some(space), 0.6, 0.3, 0.9);
     let cap = w.create_capsule(Some(space), 0.2, 0.6);
+    let pln = w.create_plane(None, 0.0, 1.0, 0.0, 0.0);
     for s in 0..steps {
         let fs = s as f64;
         let _ = writeln!(out, "S{}", s);
@@ -495,6 +496,21 @@ pub fn trimesh_scenario(steps: usize) -> String {
             dump_contacts(&mut out, &cs);
             let cs = w.collide(mesh, cap, maxc);
             let _ = writeln!(out, "L{} {}", q, cs.len());
+            dump_contacts(&mut out, &cs);
+        }
+        for q in 0..4 {
+            let fq = q as f64;
+            w.geom_plane_set_params(pln, 0.1 * (fq + fs * 0.1).sin(), 1.0, 0.2 * (fq * 2.0).cos(), -0.15 + 0.1 * fq);
+            let maxc = 2 + q * 3;
+            let cs = w.collide(mesh, pln, maxc);
+            let _ = write!(out, "M{} {}", q, cs.len());
+            for c in &cs {
+                let _ = write!(out, " {}/{}", c.side1, c.side2);
+            }
+            out.push(char::from(10));
+            dump_contacts(&mut out, &cs);
+            let cs = w.collide(pln, mesh, maxc);
+            let _ = writeln!(out, "N{} {}", q, cs.len());
             dump_contacts(&mut out, &cs);
         }
     }

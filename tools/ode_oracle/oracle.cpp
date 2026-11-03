@@ -396,6 +396,7 @@ static int trimesh_scenario(int steps) {
     dGeomID sph = dCreateSphere(space, 0.3);
     dGeomID bx = dCreateBox(space, 0.6, 0.3, 0.9);
     dGeomID cap = dCreateCapsule(space, 0.2, 0.6);
+    dGeomID pln = dCreatePlane(0, 0, 1, 0, 0);
     dMatrix3 R;
     for (int s = 0; s < steps; s++) {
         printf("S%d\n", s);
@@ -486,6 +487,19 @@ static int trimesh_scenario(int steps) {
             dump_contacts(cg, n);
             n = dCollide(mesh, cap, maxc, cg, sizeof(dContactGeom));
             printf("L%d %d\n", q, n);
+            dump_contacts(cg, n);
+        }
+        for (int q = 0; q < 4; q++) {
+            dGeomPlaneSetParams(pln, 0.1 * sin(q + s * 0.1), 1.0, 0.2 * cos(q * 2.0), -0.15 + 0.1 * q);
+            int maxc = 2 + q * 3;
+            dContactGeom cg[16];
+            int n = dCollide(mesh, pln, maxc, cg, sizeof(dContactGeom));
+            printf("M%d %d", q, n);
+            for (int i = 0; i < n; i++) printf(" %d/%d", cg[i].side1, cg[i].side2);
+            printf("\n");
+            dump_contacts(cg, n);
+            n = dCollide(pln, mesh, maxc, cg, sizeof(dContactGeom));
+            printf("N%d %d\n", q, n);
             dump_contacts(cg, n);
         }
     }
