@@ -262,6 +262,11 @@ fn near(w: &mut World, group: GroupId, o1: usize, o2: usize, out: &mut String, r
 }
 
 pub fn collide_scenario(steps: usize) -> String {
+    collide_scenario_in(steps, 0)
+}
+
+/// `space_kind`: 0 hash, 1 quadtree, 2 sweep and prune
+pub fn collide_scenario_in(steps: usize, space_kind: i32) -> String {
     let mut out = String::new();
     rand_set_seed(777);
     let mut w = World::new();
@@ -269,8 +274,16 @@ pub fn collide_scenario(steps: usize) -> String {
     w.set_quickstep_iterations(20);
     w.set_contact_surface_layer(0.002);
     let group = w.joint_group_create();
-    let space = w.hash_space_create(None);
-    w.hash_space_set_levels(space, -4, 6);
+    let space = match space_kind {
+        1 => w.quadtree_space_create(None, [0.0, 2.0, 0.0], [4.0, 4.0, 4.0], 4),
+        // dSAP_AXES_XZY
+        2 => w.sap_space_create(None, 2 << 2 | 1 << 4),
+        _ => {
+            let s = w.hash_space_create(None);
+            w.hash_space_set_levels(s, -4, 6);
+            s
+        }
+    };
     let inner = w.simple_space_create(Some(space));
     w.create_plane(Some(space), 0.0, 1.0, 0.0, 0.0);
     let mut bs = Vec::new();
@@ -768,4 +781,18 @@ fn shapes_match_ode_0_15_2() {
     let steps = oracle_steps().min(150);
     let ours = shapes_scenario(steps);
     compare(&ours, &[&steps.to_string(), "shapes"]);
+}
+
+#[test]
+fn quadtree_space_matches_ode_0_15_2() {
+    let steps = oracle_steps();
+    let ours = collide_scenario_in(steps, 1);
+    compare(&ours, &[&steps.to_string(), "quadtree"]);
+}
+
+#[test]
+fn sap_space_matches_ode_0_15_2() {
+    let steps = oracle_steps();
+    let ours = collide_scenario_in(steps, 2);
+    compare(&ours, &[&steps.to_string(), "sap"]);
 }

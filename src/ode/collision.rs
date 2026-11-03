@@ -1356,7 +1356,7 @@ impl World {
 
 impl RadixSort {
     fn ranks2(&self) -> usize {
-        self.size + self.size - self.primary
+        self.size - self.primary
     }
     /// RaixSortContext::RadixSort: indices of `input` in ascending order,
     /// reusing (and checking) the previous call's ranks

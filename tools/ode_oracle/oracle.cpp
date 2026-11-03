@@ -24,6 +24,8 @@ static void dump_body(dBodyID b) {
 }
 
 static int collide_scenario(int steps);
+// the collision scenario's top space: 0 hash, 1 quadtree, 2 sweep and prune
+static int space_kind;
 static int trimesh_scenario(int steps);
 static int shapes_scenario(int steps);
 
@@ -32,6 +34,8 @@ int main(int argc, char **argv) {
     if (argc > 2 && !strcmp(argv[2], "collide")) return collide_scenario(steps);
     if (argc > 2 && !strcmp(argv[2], "trimesh")) return trimesh_scenario(steps);
     if (argc > 2 && !strcmp(argv[2], "shapes")) return shapes_scenario(steps);
+    if (argc > 2 && !strcmp(argv[2], "quadtree")) { space_kind = 1; return collide_scenario(steps); }
+    if (argc > 2 && !strcmp(argv[2], "sap")) { space_kind = 2; return collide_scenario(steps); }
     dInitODE2(0);
     dRandSetSeed(12345);
     dWorldID w = dWorldCreate();
@@ -298,8 +302,16 @@ static int collide_scenario(int steps) {
     dWorldSetQuickStepNumIterations(cw, 20);
     dWorldSetContactSurfaceLayer(cw, 0.002);
     cgroup = dJointGroupCreate(0);
-    dSpaceID space = dHashSpaceCreate(0);
-    dHashSpaceSetLevels(space, -4, 6);
+    dSpaceID space;
+    if (space_kind == 1) {
+        dVector3 c = {0, 2, 0}, e = {4, 4, 4};
+        space = dQuadTreeSpaceCreate(0, c, e, 4);
+    } else if (space_kind == 2) {
+        space = dSweepAndPruneSpaceCreate(0, dSAP_AXES_XZY);
+    } else {
+        space = dHashSpaceCreate(0);
+        dHashSpaceSetLevels(space, -4, 6);
+    }
     dSpaceID inner = dSimpleSpaceCreate(space);
     dCreatePlane(space, 0, 1, 0, 0);
     dBodyID B[16];
