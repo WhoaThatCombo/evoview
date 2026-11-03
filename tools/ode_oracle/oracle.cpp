@@ -395,6 +395,7 @@ static int trimesh_scenario(int steps) {
     dGeomID ray = dCreateRay(space, 1.0);
     dGeomID sph = dCreateSphere(space, 0.3);
     dGeomID bx = dCreateBox(space, 0.6, 0.3, 0.9);
+    dGeomID cap = dCreateCapsule(space, 0.2, 0.6);
     dMatrix3 R;
     for (int s = 0; s < steps; s++) {
         printf("S%d\n", s);
@@ -466,6 +467,25 @@ static int trimesh_scenario(int steps) {
             dump_contacts(cg, n);
             n = dCollide(mesh, bx, maxc, cg, sizeof(dContactGeom));
             printf("Y%d %d\n", q, n);
+            dump_contacts(cg, n);
+        }
+        for (int q = 0; q < 16; q++) {
+            double x = -2.5 + 0.33 * q, z = -2.1 + 0.26 * q - 0.004 * s;
+            double y = 0.22 * cos(q * 1.1 + s * 0.05) + 0.05 * x;
+            dGeomCapsuleSetParams(cap, 0.1 + 0.05 * (q % 4), 0.3 + 0.25 * (q % 3));
+            dMatrix3 RC;
+            dRFromAxisAndAngle(RC, cos(q * 0.7), 0.4, sin(q * 0.2), 0.5 * q + 0.02 * s);
+            dGeomSetRotation(cap, RC);
+            dGeomSetPosition(cap, x, y, z);
+            int maxc = 1 + (q % 5) * 3;
+            dContactGeom cg[16];
+            int n = dCollide(cap, mesh, maxc | ((q % 6 == 5) ? CONTACTS_UNIMPORTANT : 0), cg, sizeof(dContactGeom));
+            printf("K%d %d", q, n);
+            for (int i = 0; i < n; i++) printf(" %d/%d", cg[i].side1, cg[i].side2);
+            printf("\n");
+            dump_contacts(cg, n);
+            n = dCollide(mesh, cap, maxc, cg, sizeof(dContactGeom));
+            printf("L%d %d\n", q, n);
             dump_contacts(cg, n);
         }
     }

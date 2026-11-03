@@ -921,7 +921,7 @@ type ColliderFn = fn(&Prim, &Prim, i32) -> Vec<ContactGeom>;
 /// dInitColliders' table: (reverse, function) for a class pair
 fn collider(c1: usize, c2: usize) -> Option<(bool, ColliderFn)> {
     // registration order, first wins (setCollider)
-    let table: [(usize, usize, ColliderFn); 16] = [
+    let table: [(usize, usize, ColliderFn); 17] = [
         (SPHERE, SPHERE, collide_sphere_sphere),
         (SPHERE, BOX, collide_sphere_box),
         (SPHERE, PLANE, collide_sphere_plane),
@@ -937,6 +937,7 @@ fn collider(c1: usize, c2: usize) -> Option<(bool, ColliderFn)> {
         (RAY, PLANE, collide_ray_plane),
         (TRIMESH, SPHERE, collide_sphere_trimesh),
         (TRIMESH, BOX, collide_box_trimesh),
+        (TRIMESH, CAPSULE, collide_capsule_trimesh),
         (TRIMESH, RAY, collide_ray_trimesh),
     ];
     let _ = NUM_CLASSES;
@@ -2802,4 +2803,328 @@ fn collide_box_trimesh(o1: &Prim, o2: &Prim, flags: i32) -> Vec<ContactGeom> {
         }
     }
     c.contacts
+}
+
+// ---- dCollideCCTL (collision_trimesh_ccylinder.cpp)
+
+#[derive(Clone, Copy)]
+struct LocalContact {
+    pos: V3,
+    normal: V3,
+    depth: Real,
+    tri: i32,
+    keep: bool,
+}
+
+/// sTrimeshCapsuleColliderData (no edge/vertex use flags: every feature
+/// is tested, as ODE does for meshes that were not preprocessed)
+struct Cctl {
+    pos: V3,
+    axis: V3,
+    radius: Real,
+    size: Real,
+    e0: V3,
+    e1: V3,
+    e2: V3,
+    normal: V3,
+    best_depth: Real,
+    best_center: Real,
+    best_rt: Real,
+    best_axis: i32,
+    n: V3,
+    v0: V3,
+    v1: V3,
+    v2: V3,
+    flags: i32,
+    local: Vec<LocalContact>,
+}
+
+/// _cldClipEdgeToPlane
+fn clip_edge_to_plane(p0: &mut V3, p1: &mut V3, pl: &[Real; 4]) -> bool {
+    let d0 = plane_dist(p0, pl);
+    let d1 = plane_dist(p1, pl);
+    if d0 < 0.0 && d1 < 0.0 {
+        false
+    } else if d0 > 0.0 && d1 > 0.0 {
+        true
+    } else if (d0 > 0.0 && d1 < 0.0) || (d0 < 0.0 && d1 > 0.0) {
+        let ip = [
+            p0[0] - (p0[0] - p1[0]) * d0 / (d0 - d1),
+            p0[1] - (p0[1] - p1[1]) * d0 / (d0 - d1),
+            p0[2] - (p0[2] - p1[2]) * d0 / (d0 - d1),
+            0.0,
+        ];
+        if d0 < 0.0 {
+            p0[0] = ip[0];
+            p0[1] = ip[1];
+            p0[2] = ip[2];
+        } else {
+            p1[0] = ip[0];
+            p1[1] = ip[1];
+            p1[2] = ip[2];
+        }
+        true
+    } else {
+        true
+    }
+}
+
+/// _CalculateAxis: ((v1 - v2) x v3) x v4
+fn calculate_axis(v1: &V3, v2: &V3, v3: &V3, v4: &V3) -> V3 {
+    let t1 = sub3(v1, v2);
+    let t2 = cross(&t1, v3);
+    cross(&t2, v4)
+}
+
+impl Cctl {
+    fn half_len(&self) -> Real {
+        self.size * 0.5 - self.radius
+    }
+    /// _cldTestAxis
+    fn test_axis(&mut self, axis: &mut V3, iaxis: i32, no_flip: bool) -> bool {
+        let fl = length3(axis);
+        if fl < 1e-5 {
+            return true;
+        }
+        normalize3(axis);
+        let frc = dot3(&self.axis, axis).abs() * (self.size * 0.5 - self.radius) + self.radius;
+        let afv = [dot3(&self.v0, axis), dot3(&self.v1, axis), dot3(&self.v2, axis)];
+        let mut fmin = f64::MAX;
+        let mut fmax = -f64::MAX;
+        for &a in &afv {
+            if a < fmin {
+                fmin = a;
+            }
+            if a > fmax {
+                fmax = a;
+            }
+        }
+        let center = (fmin + fmax) * 0.5;
+        let tri_r = (fmax - fmin) * 0.5;
+        if center.abs() > frc + tri_r {
+            return false;
+        }
+        let depth = center.abs() - (frc + tri_r);
+        if depth > self.best_depth {
+            self.best_depth = depth;
+            self.best_center = center;
+            self.best_rt = tri_r;
+            self.normal = [axis[0], axis[1], axis[2], 0.0];
+            self.best_axis = iaxis;
+            if center < 0.0 && !no_flip {
+                self.normal = neg3(&self.normal);
+                self.best_center = -center;
+            }
+        }
+        true
+    }
+
+    /// _cldTestSeparatingAxesOfCapsule
+    fn separating_axes(&mut self, v0: &V3, v1: &V3, v2: &V3) -> bool {
+        let h = self.half_len();
+        let (p, a) = (self.pos, self.axis);
+        let cp0 = [p[0] + a[0] * h, p[1] + a[1] * h, p[2] + a[2] * h, 0.0];
+        let cp1 = [p[0] - a[0] * h, p[1] - a[1] * h, p[2] - a[2] * h, 0.0];
+        self.best_axis = 0;
+        self.best_depth = -f64::MAX;
+        let eps = 1e-6f32 as Real;
+        self.v0 = sub3(v0, &p);
+        self.v1 = sub3(v1, &p);
+        self.v2 = sub3(v2, &p);
+        let mut ax = neg3(&self.n);
+        if !self.test_axis(&mut ax, 1, true) {
+            return false;
+        }
+        let (e0, e1, e2) = (self.e0, self.e1, self.e2);
+        let mut cands: Vec<V3> = Vec::with_capacity(18);
+        cands.push(cross(&a, &e0));
+        cands.push(cross(&a, &e1));
+        cands.push(cross(&a, &e2));
+        cands.push(calculate_axis(&cp0, v0, &e0, &e0));
+        cands.push(calculate_axis(&cp0, v1, &e1, &e1));
+        cands.push(calculate_axis(&cp0, v2, &e2, &e2));
+        cands.push(calculate_axis(&cp1, v0, &e0, &e0));
+        cands.push(calculate_axis(&cp1, v1, &e1, &e1));
+        cands.push(calculate_axis(&cp1, v2, &e2, &e2));
+        cands.push(calculate_axis(v0, &cp0, &a, &a));
+        cands.push(calculate_axis(v1, &cp0, &a, &a));
+        cands.push(calculate_axis(v2, &cp0, &a, &a));
+        cands.push(sub3(v0, &cp0));
+        cands.push(sub3(v1, &cp0));
+        cands.push(sub3(v2, &cp0));
+        cands.push(sub3(v0, &cp1));
+        cands.push(sub3(v1, &cp1));
+        cands.push(sub3(v2, &cp1));
+        for (k, mut ax) in cands.into_iter().enumerate() {
+            if length_sq3(&ax) > eps && !self.test_axis(&mut ax, 2 + k as i32, false) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// _cldTestOneTriangleVSCapsule
+    fn test_triangle(&mut self, v0: &V3, v1: &V3, v2: &V3, tri: i32) {
+        let first_new = self.local.len();
+        self.test_triangle_inner(v0, v1, v2);
+        for c in &mut self.local[first_new..] {
+            c.tri = tri;
+        }
+    }
+    fn test_triangle_inner(&mut self, v0: &V3, v1: &V3, v2: &V3) {
+        self.e0 = sub3(v1, v0);
+        self.e1 = sub3(v2, v1);
+        self.e2 = sub3(v0, v2);
+        let minus_e0 = sub3(v0, v1);
+        self.n = cross(&self.e1, &minus_e0);
+        if !safe_normalize3(&mut self.n) {
+            return;
+        }
+        let pl_d = -dot3(v0, &self.n);
+        let tri_plane = mk_plane(&self.n, pl_d);
+        let dist = plane_dist(&self.pos, &tri_plane);
+        if dist < 0.0 {
+            return;
+        }
+        let (p0, p1, p2) = (*v0, *v1, *v2);
+        if !self.separating_axes(&p0, &p1, &p2) {
+            return;
+        }
+        if self.best_axis == 0 {
+            return;
+        }
+        let h = self.half_len();
+        let (p, a, nrm, r) = (self.pos, self.axis, self.normal, self.radius);
+        let ct = [p[0] + nrm[0] * r, p[1] + nrm[1] * r, p[2] + nrm[2] * r, 0.0];
+        let mut ep0 = [ct[0] + a[0] * h, ct[1] + a[1] * h, ct[2] + a[2] * h, 0.0];
+        let mut ep1 = [ct[0] - a[0] * h, ct[1] - a[1] * h, ct[2] - a[2] * h, 0.0];
+        for k in 0..3 {
+            ep0[k] -= p0[k];
+        }
+        for k in 0..3 {
+            ep1[k] -= p0[k];
+        }
+        let mn = neg3(&self.n);
+        if !clip_edge_to_plane(&mut ep0, &mut ep1, &mk_plane(&mn, 0.0)) {
+            return;
+        }
+        let t = cross(&self.n, &self.e0);
+        if !clip_edge_to_plane(&mut ep0, &mut ep1, &mk_plane(&t, 1e-5)) {
+            return;
+        }
+        let t = cross(&self.n, &self.e1);
+        if !clip_edge_to_plane(&mut ep0, &mut ep1, &mk_plane(&t, -(dot3(&self.e0, &t) - 1e-5))) {
+            return;
+        }
+        let t = cross(&self.n, &self.e2);
+        if !clip_edge_to_plane(&mut ep0, &mut ep1, &mk_plane(&t, 1e-5)) {
+            return;
+        }
+        for k in 0..3 {
+            ep0[k] += p0[k];
+        }
+        for k in 0..3 {
+            ep1[k] += p0[k];
+        }
+        let t = sub3(&ep0, &p);
+        let mut d0 = dot3(&t, &nrm) - (self.best_center - self.best_rt);
+        let t = sub3(&ep1, &p);
+        let mut d1 = dot3(&t, &nrm) - (self.best_center - self.best_rt);
+        if d0 < 0.0 {
+            d0 = 0.0;
+        }
+        if d1 < 0.0 {
+            d1 = 0.0;
+        }
+        let maxc = (self.flags & NUMC_MASK) as usize;
+        self.local.push(LocalContact { pos: ep0, normal: nrm, depth: d0, tri: 0, keep: true });
+        if self.local.len() < maxc {
+            self.local.push(LocalContact { pos: ep1, normal: nrm, depth: d1, tri: 0, keep: true });
+        }
+    }
+}
+
+/// _IsNearContacts
+fn near_contacts(c1: &LocalContact, c2: &LocalContact) -> bool {
+    let e = 0.0001;
+    let d = sub3(&c1.pos, &c2.pos);
+    let pos_near = d[0].abs() < e && d[1].abs() < e && d[2].abs() < e;
+    let d = sub3(&c1.normal, &c2.normal);
+    let same_dir = d[0].abs() < e && d[1].abs() < e && d[2].abs() < e;
+    pos_near && same_dir
+}
+
+fn collide_capsule_trimesh(o1: &Prim, o2: &Prim, flags: i32) -> Vec<ContactGeom> {
+    use super::volume::{ObbVol, VolumeQuery};
+    let d = mesh_of(o1.shape);
+    let Shape::Capsule { radius, lz } = *o2.shape else { return Vec::new() };
+    let (mesh_pos, mesh_rot) = (&o1.pr.pos, &o1.pr.r);
+    let (cpos, crot) = (&o2.pr.pos, &o2.pr.r);
+    let mut c = Cctl {
+        pos: *cpos,
+        axis: [crot[2], crot[6], crot[10], 0.0],
+        radius,
+        size: lz + 2.0 * radius,
+        e0: [0.0; 4],
+        e1: [0.0; 4],
+        e2: [0.0; 4],
+        normal: [0.0; 4],
+        best_depth: -f64::MAX,
+        best_center: 0.0,
+        best_rt: 0.0,
+        best_axis: 0,
+        n: [0.0; 4],
+        v0: [0.0; 4],
+        v1: [0.0; 4],
+        v2: [0.0; 4],
+        flags,
+        local: Vec::new(),
+    };
+    let mesh_matrix = opcode::make_matrix(&[0.0; 3], mesh_rot);
+    let off = sub3(cpos, mesh_pos);
+    let half_axis = c.size * 0.5;
+    let r = crot;
+    let rot = [[r[0] as f32, r[4] as f32, r[8] as f32], [r[1] as f32, r[5] as f32, r[9] as f32], [r[2] as f32, r[6] as f32, r[10] as f32]];
+    let vol = ObbVol::new([off[0] as f32, off[1] as f32, off[2] as f32], [radius as f32, radius as f32, half_axis as f32], rot, &mesh_matrix);
+    let mut q = VolumeQuery::new(vol, &d.mesh);
+    q.run(&d.model);
+    if !q.contact || q.touched.is_empty() {
+        return Vec::new();
+    }
+    let maxc = (flags & NUMC_MASK) as usize;
+    for &tri in &q.touched {
+        let dv = fetch_triangle(d, tri as usize, mesh_pos, mesh_rot);
+        c.test_triangle(&dv[0], &dv[1], &dv[2], tri as i32);
+        if c.local.len() >= maxc {
+            break;
+        }
+    }
+    let mut out = Vec::new();
+    if c.local.is_empty() {
+        return out;
+    }
+    // _ProcessLocalContacts
+    let n = c.local.len();
+    if n > 1 && flags & CONTACTS_UNIMPORTANT == 0 {
+        for i in 0..n.saturating_sub(1) {
+            for j in i + 1..n {
+                if near_contacts(&c.local[i], &c.local[j]) {
+                    if c.local[j].depth > c.local[i].depth {
+                        c.local[i].keep = false;
+                    } else {
+                        c.local[j].keep = false;
+                    }
+                }
+            }
+        }
+    }
+    for lc in &c.local {
+        if out.len() >= maxc {
+            break;
+        }
+        if lc.keep {
+            out.push(ContactGeom { pos: lc.pos, normal: lc.normal, depth: lc.depth, g1: o1.id, g2: o2.id, side1: lc.tri, side2: -1 });
+        }
+    }
+    out
 }
