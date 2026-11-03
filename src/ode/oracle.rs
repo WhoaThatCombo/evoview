@@ -372,6 +372,7 @@ pub fn trimesh_scenario(steps: usize) -> String {
     let mesh = w.create_trimesh(Some(space), data);
     let ray = w.create_ray(Some(space), 1.0);
     let sph = w.create_sphere(Some(space), 0.3);
+    let bx = w.create_box(Some(space), 0.6, 0.3, 0.9);
     for s in 0..steps {
         let fs = s as f64;
         let _ = writeln!(out, "S{}", s);
@@ -442,6 +443,31 @@ pub fn trimesh_scenario(steps: usize) -> String {
             dump_contacts(&mut out, &cs);
             let cs = w.collide(mesh, sph, maxc);
             let _ = writeln!(out, "Q{} {}", q, cs.len());
+            dump_contacts(&mut out, &cs);
+        }
+        for q in 0..16 {
+            let fq = q as f64;
+            let x = -2.4 + 0.31 * fq;
+            let z = 2.0 - 0.27 * fq + 0.004 * fs;
+            let y = 0.2 * (fq * 1.3 + fs * 0.04).sin() + 0.05 * x;
+            if let super::collision::Shape::Box { side } = &mut w.geoms[bx].shape {
+                *side = [0.3 + 0.15 * (q % 4) as f64, 0.2 + 0.1 * (q % 3) as f64, 0.4 + 0.2 * (q % 5) as f64, 0.0];
+            }
+            w.geom_moved(bx);
+            let rb = r_from_axis_and_angle((fq * 0.5).sin(), 1.0, (fq * 0.3).cos(), 0.4 * fq + 0.03 * fs);
+            w.geom_set_rotation(bx, &rb);
+            w.geom_set_position(bx, x, y, z);
+            let maxc = 1 + (q % 5) * 3;
+            let unimp = if q % 7 == 6 { super::collision::CONTACTS_UNIMPORTANT } else { 0 };
+            let cs = w.collide(bx, mesh, maxc | unimp);
+            let _ = write!(out, "X{} {}", q, cs.len());
+            for c in &cs {
+                let _ = write!(out, " {}/{}", c.side1, c.side2);
+            }
+            out.push(char::from(10));
+            dump_contacts(&mut out, &cs);
+            let cs = w.collide(mesh, bx, maxc);
+            let _ = writeln!(out, "Y{} {}", q, cs.len());
             dump_contacts(&mut out, &cs);
         }
     }

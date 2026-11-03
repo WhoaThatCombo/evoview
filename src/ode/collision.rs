@@ -921,7 +921,7 @@ type ColliderFn = fn(&Prim, &Prim, i32) -> Vec<ContactGeom>;
 /// dInitColliders' table: (reverse, function) for a class pair
 fn collider(c1: usize, c2: usize) -> Option<(bool, ColliderFn)> {
     // registration order, first wins (setCollider)
-    let table: [(usize, usize, ColliderFn); 15] = [
+    let table: [(usize, usize, ColliderFn); 16] = [
         (SPHERE, SPHERE, collide_sphere_sphere),
         (SPHERE, BOX, collide_sphere_box),
         (SPHERE, PLANE, collide_sphere_plane),
@@ -936,6 +936,7 @@ fn collider(c1: usize, c2: usize) -> Option<(bool, ColliderFn)> {
         (RAY, CAPSULE, collide_ray_capsule),
         (RAY, PLANE, collide_ray_plane),
         (TRIMESH, SPHERE, collide_sphere_trimesh),
+        (TRIMESH, BOX, collide_box_trimesh),
         (TRIMESH, RAY, collide_ray_trimesh),
     ];
     let _ = NUM_CLASSES;
@@ -2347,4 +2348,458 @@ fn collide_sphere_trimesh(o1: &Prim, o2: &Prim, flags: i32) -> Vec<ContactGeom> 
         out.push(c);
     }
     out
+}
+
+// ---- dCollideBTL (collision_trimesh_box.cpp)
+
+/// sTrimeshBoxColliderData
+struct Btl {
+    rot: M3,
+    pos: V3,
+    half: V3,
+    best_normal: V3,
+    best_depth: Real,
+    best_axis: i32,
+    e0: V3,
+    e1: V3,
+    e2: V3,
+    n: V3,
+    flags: i32,
+    g1: GeomId,
+    g2: GeomId,
+    contacts: Vec<ContactGeom>,
+}
+
+/// dPointPlaneDistance
+fn plane_dist(p: &[Real], pl: &[Real; 4]) -> Real {
+    pl[0] * p[0] + pl[1] * p[1] + pl[2] * p[2] + pl[3]
+}
+fn mk_plane(n: &[Real], d: Real) -> [Real; 4] {
+    [n[0], n[1], n[2], d]
+}
+
+/// _cldClipPolyToPlane
+fn clip_poly_to_plane(input: &[V3], out: &mut Vec<V3>, pl: &[Real; 4]) {
+    out.clear();
+    let n = input.len();
+    if n == 0 {
+        return;
+    }
+    let mut i0 = n - 1;
+    for i1 in 0..n {
+        let d0 = plane_dist(&input[i0], pl);
+        let d1 = plane_dist(&input[i1], pl);
+        if d0 >= 0.0 {
+            out.push([input[i0][0], input[i0][1], input[i0][2], 0.0]);
+        }
+        if (d0 > 0.0 && d1 < 0.0) || (d0 < 0.0 && d1 > 0.0) {
+            let a = &input[i0];
+            let b = &input[i1];
+            out.push([
+                a[0] - (a[0] - b[0]) * d0 / (d0 - d1),
+                a[1] - (a[1] - b[1]) * d0 / (d0 - d1),
+                a[2] - (a[2] - b[2]) * d0 / (d0 - d1),
+                0.0,
+            ]);
+        }
+        i0 = i1;
+    }
+}
+
+impl Btl {
+    fn test_normal(&mut self, fp0: Real, fr: Real, n: &V3, axis: i32) -> bool {
+        let depth = fr + fp0;
+        if depth < 0.0 {
+            return false;
+        }
+        let len = length3(n);
+        if len > 0.0 {
+            let inv = 1.0 / len;
+            let depth = depth * inv;
+            if depth < self.best_depth {
+                self.best_normal = [-n[0] * inv, -n[1] * inv, -n[2] * inv, 0.0];
+                self.best_axis = axis;
+                self.best_depth = depth;
+            }
+        }
+        true
+    }
+    fn test_face(&mut self, fp0: Real, fp1: Real, fp2: Real, fr: Real, n: &mut V3, axis: i32) -> bool {
+        let fmin = if fp0 < fp1 {
+            if fp0 < fp2 {
+                fp0
+            } else {
+                fp2
+            }
+        } else if fp1 < fp2 {
+            fp1
+        } else {
+            fp2
+        };
+        let fmax = if fp0 > fp1 {
+            if fp0 > fp2 {
+                fp0
+            } else {
+                fp2
+            }
+        } else if fp1 > fp2 {
+            fp1
+        } else {
+            fp2
+        };
+        let dmin = fr - fmin;
+        let dmax = fmax + fr;
+        if dmin < 0.0 || dmax < 0.0 {
+            return false;
+        }
+        let depth;
+        if dmin > dmax {
+            depth = dmax;
+            *n = neg3(n);
+        } else {
+            depth = dmin;
+        }
+        if depth < self.best_depth {
+            self.best_normal = [n[0], n[1], n[2], 0.0];
+            self.best_axis = axis;
+            self.best_depth = depth;
+        }
+        true
+    }
+    fn test_edge(&mut self, fp0: Real, fp1: Real, fr: Real, n: &mut V3, axis: i32) -> bool {
+        let m = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+        if m <= f64::EPSILON {
+            return true;
+        }
+        let (fmin, fmax) = if fp0 < fp1 { (fp0, fp1) } else { (fp1, fp0) };
+        let dmin = fr - fmin;
+        let dmax = fmax + fr;
+        if dmin < 0.0 || dmax < 0.0 {
+            return false;
+        }
+        let mut depth;
+        if dmin > dmax {
+            depth = dmax;
+            *n = neg3(n);
+        } else {
+            depth = dmin;
+        }
+        let len = length3(n);
+        if len > 0.0 {
+            let inv = 1.0 / len;
+            depth *= inv;
+            if depth * 1.5 < self.best_depth {
+                self.best_normal = [n[0] * inv, n[1] * inv, n[2] * inv, 0.0];
+                self.best_axis = axis;
+                self.best_depth = depth;
+            }
+        }
+        true
+    }
+
+    /// _cldTestSeparatingAxes
+    fn separating_axes(&mut self, v0: &V3, v1: &V3, v2: &V3) -> bool {
+        self.best_axis = 0;
+        self.best_depth = f64::MAX;
+        self.e0 = sub3(v1, v0);
+        self.e1 = sub3(v2, v0);
+        self.e2 = sub3(&self.e1, &self.e0);
+        self.n = cross(&self.e0, &self.e1);
+        let nlen = length3(&self.n);
+        if nlen == 0.0 {
+            return false;
+        }
+        let a0 = get_column3(&self.rot, 0);
+        let a1 = get_column3(&self.rot, 1);
+        let a2 = get_column3(&self.rot, 2);
+        let (fa0, fa1, fa2) = (self.half[0], self.half[1], self.half[2]);
+        let vd = sub3(v0, &self.pos);
+        let (e0, e1, e2, n) = (self.e0, self.e1, self.e2, self.n);
+
+        let vl = n;
+        let fp0 = dot3(&vl, &vd);
+        let fr = fa0 * dot3(&n, &a0).abs() + fa1 * dot3(&n, &a1).abs() + fa2 * dot3(&n, &a2).abs();
+        if !self.test_normal(fp0, fr, &vl, 1) {
+            return false;
+        }
+        for (k, (a, fr)) in [(a0, fa0), (a1, fa1), (a2, fa2)].into_iter().enumerate() {
+            let mut vl = a;
+            let fp0 = dot3(&vl, &vd);
+            let fp1 = fp0 + dot3(&a, &e0);
+            let fp2 = fp0 + dot3(&a, &e1);
+            if !self.test_face(fp0, fp1, fp2, fr, &mut vl, 2 + k as i32) {
+                return false;
+            }
+        }
+        // edges: box axis x triangle edge
+        let edge_tests: [(V3, V3, Real, Real, V3, V3); 3] = [(a0, a1, fa1, fa2, a2, a1), (a1, a0, fa0, fa2, a2, a0), (a2, a0, fa0, fa1, a1, a0)];
+        let mut axis = 5;
+        for &(a, _, fx, fy, pa, pb) in &edge_tests {
+            // vs e0
+            let mut vl = cross(&a, &e0);
+            let fp0 = dot3(&vl, &vd);
+            let fp2 = fp0 + dot3(&a, &n);
+            let fr = fx * dot3(&pa, &e0).abs() + fy * dot3(&pb, &e0).abs();
+            // ODE passes (fp1 = fp0, fp2) for the first two box axes' e0 edge
+            if !self.test_edge(fp0, fp2, fr, &mut vl, axis) {
+                return false;
+            }
+            axis += 1;
+            // vs e1
+            let mut vl = cross(&a, &e1);
+            let fp0 = dot3(&vl, &vd);
+            let fp1 = fp0 - dot3(&a, &n);
+            let fr = fx * dot3(&pa, &e1).abs() + fy * dot3(&pb, &e1).abs();
+            if !self.test_edge(fp0, fp1, fr, &mut vl, axis) {
+                return false;
+            }
+            axis += 1;
+            // vs e2
+            let mut vl = cross(&a, &e2);
+            let fp0 = dot3(&vl, &vd);
+            let fp1 = fp0 - dot3(&a, &n);
+            let fr = fx * dot3(&pa, &e2).abs() + fy * dot3(&pb, &e2).abs();
+            if !self.test_edge(fp0, fp1, fr, &mut vl, axis) {
+                return false;
+            }
+            axis += 1;
+        }
+        true
+    }
+
+    /// GenerateContact: add, merge with a duplicate, or replace the
+    /// shallowest when full
+    fn generate(&mut self, tri: i32, pos: &V3, normal: &V3, depth: Real) {
+        let maxc = (self.flags & NUMC_MASK) as usize;
+        let mut target: Option<usize> = None;
+        if self.flags & CONTACTS_UNIMPORTANT == 0 {
+            let mut min_depth = INFINITY;
+            let mut min_contact: Option<usize> = None;
+            for i in 0..self.contacts.len() {
+                let c = &mut self.contacts[i];
+                let diff = sub3(pos, &c.pos);
+                if dot3(&diff, &diff) < f64::EPSILON && 1.0 - dot3(normal, &c.normal) < f64::EPSILON {
+                    if depth > c.depth {
+                        c.depth = depth;
+                        c.side1 = tri;
+                    }
+                    return;
+                }
+                if c.depth < min_depth {
+                    min_depth = c.depth;
+                    min_contact = Some(i);
+                }
+            }
+            if self.contacts.len() == maxc {
+                if !(min_depth < depth) {
+                    return;
+                }
+                target = min_contact;
+            }
+        }
+        let idx = match target {
+            Some(i) => i,
+            None => {
+                self.contacts.push(ContactGeom { g1: self.g1, g2: self.g2, side2: -1, ..Default::default() });
+                self.contacts.len() - 1
+            }
+        };
+        let c = &mut self.contacts[idx];
+        c.pos = [pos[0], pos[1], pos[2], 0.0];
+        c.normal = [normal[0], normal[1], normal[2], 0.0];
+        c.depth = depth;
+        c.side1 = tri;
+    }
+    fn full(&self) -> bool {
+        ((self.contacts.len() as i32) | CONTACTS_UNIMPORTANT) == (self.flags & (NUMC_MASK | CONTACTS_UNIMPORTANT))
+    }
+
+    /// _cldClipping
+    fn clipping(&mut self, v0: &V3, v1: &V3, v2: &V3, tri: i32) {
+        if self.best_axis > 4 {
+            let mut pa = self.pos;
+            for i in 0..3 {
+                let col = get_column3(&self.rot, i);
+                let sign = if dot3(&self.best_normal, &col) > 0.0 { 1.0 } else { -1.0 };
+                pa[0] += sign * self.half[i] * col[0];
+                pa[1] += sign * self.half[i] * col[1];
+                pa[2] += sign * self.half[i] * col[2];
+            }
+            let edge = (self.best_axis - 5) % 3;
+            let (mut pb, mut ub) = match edge {
+                0 => (*v0, self.e0),
+                1 => (*v2, self.e1),
+                _ => (*v1, self.e2),
+            };
+            normalize3(&mut ub);
+            let col = ((self.best_axis - 5) / 3) as usize;
+            let ua = get_column3(&self.rot, col);
+            // _cldClosestPointOnTwoLines
+            let vp = sub3(&pb, &pa);
+            let uaub = dot3(&ua, &ub);
+            let q1 = dot3(&ua, &vp);
+            let q2 = -dot3(&ub, &vp);
+            let mut d = 1.0 - uaub * uaub;
+            let (p1, p2) = if d > 0.0 {
+                d = 1.0 / d;
+                ((q1 + uaub * q2) * d, (uaub * q1 + q2) * d)
+            } else {
+                (0.0, 0.0)
+            };
+            for k in 0..3 {
+                pa[k] += ua[k] * p1;
+            }
+            for k in 0..3 {
+                pb[k] += ub[k] * p2;
+            }
+            let mut p = add3(&pa, &pb);
+            p[0] *= 0.5;
+            p[1] *= 0.5;
+            p[2] *= 0.5;
+            let (bn, bd) = (self.best_normal, self.best_depth);
+            self.generate(tri, &p, &bn, bd);
+        } else if self.best_axis == 1 {
+            let n2 = neg3(&self.best_normal);
+            let m = &self.rot;
+            let nr = [
+                m[0] * n2[0] + m[4] * n2[1] + m[8] * n2[2],
+                m[1] * n2[0] + m[5] * n2[1] + m[9] * n2[2],
+                m[2] * n2[0] + m[6] * n2[1] + m[10] * n2[2],
+            ];
+            let an = [nr[0].abs(), nr[1].abs(), nr[2].abs()];
+            let (b0, b1, b2) = if an[1] > an[0] {
+                if an[1] > an[2] {
+                    (1, 0, 2)
+                } else {
+                    (2, 0, 1)
+                }
+            } else if an[0] > an[2] {
+                (0, 1, 2)
+            } else {
+                (2, 0, 1)
+            };
+            let rc = get_column3(m, b0);
+            let mut center = [0.0; 4];
+            for k in 0..3 {
+                center[k] = if nr[b0] > 0.0 { self.pos[k] - v0[k] - self.half[b0] * rc[k] } else { self.pos[k] - v0[k] + self.half[b0] * rc[k] };
+            }
+            let r1 = get_column3(m, b1);
+            let r2 = get_column3(m, b2);
+            let mut pts = [[0.0; 4]; 4];
+            for x in 0..3 {
+                pts[0][x] = center[x] + (self.half[b1] * r1[x]) - (self.half[b2] * r2[x]);
+                pts[1][x] = center[x] - (self.half[b1] * r1[x]) - (self.half[b2] * r2[x]);
+                pts[2][x] = center[x] - (self.half[b1] * r1[x]) + (self.half[b2] * r2[x]);
+                pts[3][x] = center[x] + (self.half[b1] * r1[x]) + (self.half[b2] * r2[x]);
+            }
+            let mut t1 = Vec::with_capacity(9);
+            let mut t2 = Vec::with_capacity(9);
+            let mut vt = neg3(&self.n);
+            normalize3(&mut vt);
+            clip_poly_to_plane(&pts, &mut t1, &mk_plane(&vt, 0.0));
+            let tmp2 = sub3(v1, v0);
+            let mut vt = cross(&self.n, &tmp2);
+            normalize3(&mut vt);
+            clip_poly_to_plane(&t1, &mut t2, &mk_plane(&vt, 0.0));
+            let tmp2 = sub3(v2, v1);
+            let mut vt = cross(&self.n, &tmp2);
+            normalize3(&mut vt);
+            let tmp2 = sub3(v0, v2);
+            clip_poly_to_plane(&t2, &mut t1, &mk_plane(&vt, dot3(&tmp2, &vt)));
+            let tmp2 = sub3(v0, v2);
+            let mut vt = cross(&self.n, &tmp2);
+            normalize3(&mut vt);
+            clip_poly_to_plane(&t1, &mut t2, &mk_plane(&vt, 0.0));
+            for p in &t2 {
+                let mut d = dot3(&n2, p);
+                if d > 0.0 {
+                    d = 0.0;
+                }
+                let pt = add3(p, v0);
+                let bn = self.best_normal;
+                self.generate(tri, &pt, &bn, -d);
+                if self.full() {
+                    break;
+                }
+            }
+        } else {
+            let n2 = self.best_normal;
+            let a0 = (self.best_axis - 2) as usize;
+            let (a1, a2) = match a0 {
+                0 => (1, 2),
+                1 => (0, 2),
+                _ => (0, 1),
+            };
+            let pts = [sub3(v0, &self.pos), sub3(v1, &self.pos), sub3(v2, &self.pos)];
+            let mut t1 = Vec::with_capacity(9);
+            let mut t2 = Vec::with_capacity(9);
+            let vt = neg3(&n2);
+            clip_poly_to_plane(&pts, &mut t1, &mk_plane(&vt, self.half[a0]));
+            let vt = get_column3(&self.rot, a1);
+            clip_poly_to_plane(&t1, &mut t2, &mk_plane(&vt, self.half[a1]));
+            let vt = neg3(&get_column3(&self.rot, a1));
+            clip_poly_to_plane(&t2, &mut t1, &mk_plane(&vt, self.half[a1]));
+            let vt = get_column3(&self.rot, a2);
+            clip_poly_to_plane(&t1, &mut t2, &mk_plane(&vt, self.half[a2]));
+            let vt = neg3(&get_column3(&self.rot, a2));
+            clip_poly_to_plane(&t2, &mut t1, &mk_plane(&vt, self.half[a2]));
+            for p in &t1 {
+                let mut d = dot3(&n2, p) - self.half[a0];
+                if d > 0.0 {
+                    d = 0.0;
+                }
+                let pt = add3(p, &self.pos);
+                let bn = self.best_normal;
+                self.generate(tri, &pt, &bn, -d);
+                if self.full() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// dCollideBTL
+fn collide_box_trimesh(o1: &Prim, o2: &Prim, flags: i32) -> Vec<ContactGeom> {
+    use super::volume::{ObbVol, VolumeQuery};
+    let d = mesh_of(o1.shape);
+    let Shape::Box { side } = o2.shape else { return Vec::new() };
+    let (mesh_pos, mesh_rot) = (&o1.pr.pos, &o1.pr.r);
+    let (box_pos, box_rot) = (&o2.pr.pos, &o2.pr.r);
+    let mut c = Btl {
+        rot: *box_rot,
+        pos: *box_pos,
+        half: [side[0] * 0.5, side[1] * 0.5, side[2] * 0.5, side[3]],
+        best_normal: [0.0; 4],
+        best_depth: f64::MAX,
+        best_axis: 0,
+        e0: [0.0; 4],
+        e1: [0.0; 4],
+        e2: [0.0; 4],
+        n: [0.0; 4],
+        flags,
+        g1: o1.id,
+        g2: o2.id,
+        contacts: Vec::new(),
+    };
+    let mesh_matrix = opcode::make_matrix(&[0.0; 3], mesh_rot);
+    let off = sub3(box_pos, mesh_pos);
+    let r = box_rot;
+    let rot = [[r[0] as f32, r[4] as f32, r[8] as f32], [r[1] as f32, r[5] as f32, r[9] as f32], [r[2] as f32, r[6] as f32, r[10] as f32]];
+    let vol = ObbVol::new([off[0] as f32, off[1] as f32, off[2] as f32], [c.half[0] as f32, c.half[1] as f32, c.half[2] as f32], rot, &mesh_matrix);
+    let mut q = VolumeQuery::new(vol, &d.mesh);
+    q.run(&d.model);
+    if !q.contact {
+        return Vec::new();
+    }
+    for &tri in &q.touched {
+        let dv = fetch_triangle(d, tri as usize, mesh_pos, mesh_rot);
+        if c.separating_axes(&dv[0], &dv[1], &dv[2]) && c.best_axis != 0 {
+            c.clipping(&dv[0], &dv[1], &dv[2], tri as i32);
+            if c.full() {
+                break;
+            }
+        }
+    }
+    c.contacts
 }

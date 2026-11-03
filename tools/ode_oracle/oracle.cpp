@@ -394,6 +394,7 @@ static int trimesh_scenario(int steps) {
     dGeomID mesh = dCreateTriMesh(space, data, 0, 0, 0);
     dGeomID ray = dCreateRay(space, 1.0);
     dGeomID sph = dCreateSphere(space, 0.3);
+    dGeomID bx = dCreateBox(space, 0.6, 0.3, 0.9);
     dMatrix3 R;
     for (int s = 0; s < steps; s++) {
         printf("S%d\n", s);
@@ -446,6 +447,25 @@ static int trimesh_scenario(int steps) {
             dump_contacts(cg, n);
             n = dCollide(mesh, sph, maxc, cg, sizeof(dContactGeom));
             printf("Q%d %d\n", q, n);
+            dump_contacts(cg, n);
+        }
+        for (int q = 0; q < 16; q++) {
+            double x = -2.4 + 0.31 * q, z = 2.0 - 0.27 * q + 0.004 * s;
+            double y = 0.2 * sin(q * 1.3 + s * 0.04) + 0.05 * x;
+            dGeomBoxSetLengths(bx, 0.3 + 0.15 * (q % 4), 0.2 + 0.1 * (q % 3), 0.4 + 0.2 * (q % 5));
+            dMatrix3 RB;
+            dRFromAxisAndAngle(RB, sin(q * 0.5), 1.0, cos(q * 0.3), 0.4 * q + 0.03 * s);
+            dGeomSetRotation(bx, RB);
+            dGeomSetPosition(bx, x, y, z);
+            int maxc = 1 + (q % 5) * 3;
+            dContactGeom cg[16];
+            int n = dCollide(bx, mesh, maxc | ((q % 7 == 6) ? CONTACTS_UNIMPORTANT : 0), cg, sizeof(dContactGeom));
+            printf("X%d %d", q, n);
+            for (int i = 0; i < n; i++) printf(" %d/%d", cg[i].side1, cg[i].side2);
+            printf("\n");
+            dump_contacts(cg, n);
+            n = dCollide(mesh, bx, maxc, cg, sizeof(dContactGeom));
+            printf("Y%d %d\n", q, n);
             dump_contacts(cg, n);
         }
     }
