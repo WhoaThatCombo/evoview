@@ -1,0 +1,2049 @@
+{
+ "rev": "36857df",
+ "label": "look-perf 36857df on look-base7",
+ "date": "2026-10-18T02:11:19",
+ "sizes": [
+  "1920x1080",
+  "3840x2160"
+ ],
+ "seconds": 8.0,
+ "repeat": 3,
+ "results": {
+  "ks_bmw_m4_gt3@1920x1080": {
+   "name": "ks_bmw_m4_gt3",
+   "size": "1920x1080",
+   "seconds": 8,
+   "load_s": 1.424,
+   "phases_s": {
+    "archive index": 0.0807,
+    "vfs index": 0.1183,
+    "pkg io": 0.5466,
+    "pkg dexor": 0.0287,
+    "file read": 0.0711,
+    "mesh decode": 0.0111,
+    "texture decode": 0.6432,
+    "texture prefetch (wall)": 0.2015,
+    "content load (wall)": 0.8831,
+    "device init": 0.2949,
+    "tex upload: unique": 0.0614,
+    "tex upload: shared": 0.0,
+    "materials+tex upload": 0.0949,
+    "scene upload": 0.0219,
+    "pipeline creation": 0.0118
+   },
+   "frames": 17463,
+   "cpu_ms": {
+    "mean": 0.4539,
+    "p50": 0.4014,
+    "p99": 1.2808
+   },
+   "gpu_ms": {
+    "mean": 0.4164,
+    "p50": 0.3779,
+    "p99": 1.195
+   },
+   "vram_mb": 598.6,
+   "peak_ws_mb": 1077.7,
+   "peak_commit_mb": 2045.9,
+   "ws_mb": 368.0,
+   "info": {
+    "meshes": 15,
+    "draws": 92,
+    "tris": 542494,
+    "instanced_tris": 542496,
+    "instances": 15,
+    "textures": 200,
+    "materials": 86
+   },
+   "kind": "car",
+   "runs": [
+    {
+     "name": "ks_bmw_m4_gt3",
+     "size": "1920x1080",
+     "seconds": 8,
+     "load_s": 1.424,
+     "phases_s": {
+      "archive index": 0.0807,
+      "vfs index": 0.145,
+      "pkg io": 0.5466,
+      "pkg dexor": 0.0374,
+      "file read": 0.0795,
+      "mesh decode": 0.0166,
+      "texture decode": 0.6432,
+      "texture prefetch (wall)": 0.2015,
+      "content load (wall)": 0.8831,
+      "device init": 0.2978,
+      "tex upload: unique": 0.0614,
+      "tex upload: shared": 0.0,
+      "materials+tex upload": 0.1083,
+      "scene upload": 0.025,
+      "pipeline creation": 0.0118
+     },
+     "frames": 17463,
+     "cpu_ms": {
+      "mean": 0.4581,
+      "p50": 0.4034,
+      "p99": 1.2929
+     },
+     "gpu_ms": {
+      "mean": 0.4164,
+      "p50": 0.3779,
+      "p99": 1.2032
+     },
+     "vram_mb": 598.6,
+     "peak_ws_mb": 1077.7,
+     "peak_commit_mb": 2045.0,
+     "ws_mb": 368.0,
+     "info": {
+      "meshes": 15,
+      "draws": 92,
+      "tris": 542494,
+      "instanced_tris": 542496,
+      "instances": 15,
+      "textures": 200,
+      "materials": 86
+     },
+     "kind": "car"
+    },
+    {
+     "name": "ks_bmw_m4_gt3",
+     "size": "1920x1080",
+     "seconds": 8,
+     "load_s": 1.7071,
+     "phases_s": {
+      "archive index": 0.0895,
+      "vfs index": 0.1274,
+      "pkg io": 0.665,
+      "pkg dexor": 0.0309,
+      "file read": 0.0711,
+      "mesh decode": 0.0115,
+      "texture decode": 0.7718,
+      "texture prefetch (wall)": 0.25,
+      "content load (wall)": 1.0424,
+      "device init": 0.3188,
+      "tex upload: unique": 0.0615,
+      "tex upload: shared": 0.0,
+      "materials+tex upload": 0.1272,
+      "scene upload": 0.0791,
+      "pipeline creation": 0.0143
+     },
+     "frames": 17564,
+     "cpu_ms": {
+      "mean": 0.4555,
+      "p50": 0.4014,
+      "p99": 1.2811
+     },
+     "gpu_ms": {
+      "mean": 0.4171,
+      "p50": 0.3789,
+      "p99": 1.2042
+     },
+     "vram_mb": 598.6,
+     "peak_ws_mb": 1076.8,
+     "peak_commit_mb": 2045.9,
+     "ws_mb": 367.4,
+     "info": {
+      "meshes": 15,
+      "draws": 92,
+      "tris": 542494,
+      "instanced_tris": 542496,
+      "instances": 15,
+      "textures": 200,
+      "materials": 86
+     },
+     "kind": "car"
+    },
+    {
+     "name": "ks_bmw_m4_gt3",
+     "size": "1920x1080",
+     "seconds": 8,
+     "load_s": 1.7064,
+     "phases_s": {
+      "archive index": 0.0822,
+      "vfs index": 0.1183,
+      "pkg io": 0.6483,
+      "pkg dexor": 0.0287,
+      "file read": 0.0754,
+      "mesh decode": 0.0111,
+      "texture decode": 0.6874,
+      "texture prefetch (wall)": 0.2255,
+      "content load (wall)": 1.1225,
+      "device init": 0.2949,
+      "tex upload: unique": 0.0685,
+      "tex upload: shared": 0.0,
+      "materials+tex upload": 0.0949,
+      "scene upload": 0.0219,
+      "pipeline creation": 0.015
+     },
+     "frames": 17625,
+     "cpu_ms": {
+      "mean": 0.4539,
+      "p50": 0.4025,
+      "p99": 1.2808
+     },
+     "gpu_ms": {
+      "mean": 0.4184,
+      "p50": 0.3789,
+      "p99": 1.195
+     },
+     "vram_mb": 598.6,
+     "peak_ws_mb": 1077.1,
+     "peak_commit_mb": 2043.6,
+     "ws_mb": 367.6,
+     "info": {
+      "meshes": 15,
+      "draws": 92,
+      "tris": 542494,
+      "instanced_tris": 542496,
+      "instances": 15,
+      "textures": 200,
+      "materials": 86
+     },
+     "kind": "car"
+    }
+   ]
+  },
+  "ks_bmw_m4_gt3@3840x2160": {
+   "name": "ks_bmw_m4_gt3",
+   "size": "3840x2160",
+   "seconds": 8,
+   "load_s": 1.5714,
+   "phases_s": {
+    "archive index": 0.0862,
+    "vfs index": 0.1214,
+    "pkg io": 0.6737,
+    "pkg dexor": 0.0284,
+    "file read": 0.0662,
+    "mesh decode": 0.0111,
+    "texture decode": 0.7192,
+    "texture prefetch (wall)": 0.2374,
+    "content load (wall)": 1.0565,
+    "device init": 0.2778,
+    "tex upload: unique": 0.0473,
+    "tex upload: shared": 0.0,
+    "materials+tex upload": 0.0767,
+    "scene upload": 0.0243,
+    "pipeline creation": 0.0102
+   },
+   "frames": 7283,
+   "cpu_ms": {
+    "mean": 1.0985,
+    "p50": 1.0275,
+    "p99": 1.9131
+   },
+   "gpu_ms": {
+    "mean": 1.0688,
+    "p50": 1.0004,
+    "p99": 1.8319
+   },
+   "vram_mb": 853.2,
+   "peak_ws_mb": 1080.9,
+   "peak_commit_mb": 2300.6,
+   "ws_mb": 366.3,
+   "info": {
+    "meshes": 15,
+    "draws": 92,
+    "tris": 542494,
+    "instanced_tris": 542496,
+    "instances": 15,
+    "textures": 200,
+    "materials": 86
+   },
+   "kind": "car",
+   "runs": [
+    {
+     "name": "ks_bmw_m4_gt3",
+     "size": "3840x2160",
+     "seconds": 8,
+     "load_s": 1.9166,
+     "phases_s": {
+      "archive index": 0.0862,
+      "vfs index": 0.1214,
+      "pkg io": 0.6794,
+      "pkg dexor": 0.0284,
+      "file read": 0.0662,
+      "mesh decode": 0.0111,
+      "texture decode": 0.7192,
+      "texture prefetch (wall)": 0.2374,
+      "content load (wall)": 1.103,
+      "device init": 0.2906,
+      "tex upload: unique": 0.0882,
+      "tex upload: shared": 0.0,
+      "materials+tex upload": 0.1341,
+      "scene upload": 0.044,
+      "pipeline creation": 0.0128
+     },
+     "frames": 6462,
+     "cpu_ms": {
+      "mean": 1.238,
+      "p50": 1.0714,
+      "p99": 2.9426
+     },
+     "gpu_ms": {
+      "mean": 1.1491,
+      "p50": 1.0291,
+      "p99": 2.3562
+     },
+     "vram_mb": 853.2,
+     "peak_ws_mb": 1072.9,
+     "peak_commit_mb": 2300.6,
+     "ws_mb": 366.5,
+     "info": {
+      "meshes": 15,
+      "draws": 92,
+      "tris": 542494,
+      "instanced_tris": 542496,
+      "instances": 15,
+      "textures": 200,
+      "materials": 86
+     },
+     "kind": "car"
+    },
+    {
+     "name": "ks_bmw_m4_gt3",
+     "size": "3840x2160",
+     "seconds": 8,
+     "load_s": 1.5714,
+     "phases_s": {
+      "archive index": 0.0996,
+      "vfs index": 0.1388,
+      "pkg io": 0.6737,
+      "pkg dexor": 0.03,
+      "file read": 0.0694,
+      "mesh decode": 0.0125,
+      "texture decode": 0.8608,
+      "texture prefetch (wall)": 0.2636,
+      "content load (wall)": 1.0565,
+      "device init": 0.2778,
+      "tex upload: unique": 0.0473,
+      "tex upload: shared": 0.0,
+      "materials+tex upload": 0.0767,
+      "scene upload": 0.0243,
+      "pipeline creation": 0.0102
+     },
+     "frames": 7283,
+     "cpu_ms": {
+      "mean": 1.0985,
+      "p50": 1.0275,
+      "p99": 1.9131
+     },
+     "gpu_ms": {
+      "mean": 1.0688,
+      "p50": 1.0004,
+      "p99": 1.8319
+     },
+     "vram_mb": 853.2,
+     "peak_ws_mb": 1078.6,
+     "peak_commit_mb": 2300.3,
+     "ws_mb": 366.3,
+     "info": {
+      "meshes": 15,
+      "draws": 92,
+      "tris": 542494,
+      "instanced_tris": 542496,
+      "instances": 15,
+      "textures": 200,
+      "materials": 86
+     },
+     "kind": "car"
+    },
+    {
+     "name": "ks_bmw_m4_gt3",
+     "size": "3840x2160",
+     "seconds": 8,
+     "load_s": 1.7389,
+     "phases_s": {
+      "archive index": 0.0879,
+      "vfs index": 0.1267,
+      "pkg io": 0.8588,
+      "pkg dexor": 0.0315,
+      "file read": 0.0721,
+      "mesh decode": 0.0121,
+      "texture decode": 0.8046,
+      "texture prefetch (wall)": 0.2799,
+      "content load (wall)": 1.1204,
+      "device init": 0.3416,
+      "tex upload: unique": 0.0805,
+      "tex upload: shared": 0.0,
+      "materials+tex upload": 0.1066,
+      "scene upload": 0.031,
+      "pipeline creation": 0.0145
+     },
+     "frames": 7255,
+     "cpu_ms": {
+      "mean": 1.1026,
+      "p50": 1.0381,
+      "p99": 1.9262
+     },
+     "gpu_ms": {
+      "mean": 1.0749,
+      "p50": 1.0066,
+      "p99": 1.8504
+     },
+     "vram_mb": 853.2,
+     "peak_ws_mb": 1080.9,
+     "peak_commit_mb": 2300.2,
+     "ws_mb": 366.5,
+     "info": {
+      "meshes": 15,
+      "draws": 92,
+      "tris": 542494,
+      "instanced_tris": 542496,
+      "instances": 15,
+      "textures": 200,
+      "materials": 86
+     },
+     "kind": "car"
+    }
+   ]
+  },
+  "ks_toyota_gr86@1920x1080": {
+   "name": "ks_toyota_gr86",
+   "size": "1920x1080",
+   "seconds": 8,
+   "load_s": 1.4632,
+   "phases_s": {
+    "archive index": 0.0771,
+    "vfs index": 0.1242,
+    "pkg io": 0.5924,
+    "pkg dexor": 0.0232,
+    "file read": 0.0657,
+    "mesh decode": 0.0065,
+    "texture decode": 0.5537,
+    "texture prefetch (wall)": 0.1988,
+    "content load (wall)": 0.8978,
+    "device init": 0.2916,
+    "tex upload: unique": 0.0437,
+    "tex upload: shared": 0.0,
+    "materials+tex upload": 0.0862,
+    "scene upload": 0.0123,
+    "pipeline creation": 0.0104
+   },
+   "frames": 21043,
+   "cpu_ms": {
+    "mean": 0.3773,
+    "p50": 0.3314,
+    "p99": 1.0414
+   },
+   "gpu_ms": {
+    "mean": 0.3373,
+    "p50": 0.3031,
+    "p99": 0.897
+   },
+   "vram_mb": 534.4,
+   "peak_ws_mb": 894.2,
+   "peak_commit_mb": 1760.5,
+   "ws_mb": 377.8,
+   "info": {
+    "meshes": 13,
+    "draws": 84,
+    "tris": 348861,
+    "instanced_tris": 348863,
+    "instances": 13,
+    "textures": 165,
+    "materials": 83
+   },
+   "kind": "car",
+   "runs": [
+    {
+     "name": "ks_toyota_gr86",
+     "size": "1920x1080",
+     "seconds": 8,
+     "load_s": 1.6741,
+     "phases_s": {
+      "archive index": 0.0771,
+      "vfs index": 0.1242,
+      "pkg io": 0.6669,
+      "pkg dexor": 0.0232,
+      "file read": 0.0662,
+      "mesh decode": 0.0065,
+      "texture decode": 0.5537,
+      "texture prefetch (wall)": 0.2048,
+      "content load (wall)": 1.0711,
+      "device init": 0.3303,
+      "tex upload: unique": 0.0437,
+      "tex upload: shared": 0.0,
+      "materials+tex upload": 0.0862,
+      "scene upload": 0.0123,
+      "pipeline creation": 0.0104
+     },
+     "frames": 21073,
+     "cpu_ms": {
+      "mean": 0.3796,
+      "p50": 0.3354,
+      "p99": 1.0414
+     },
+     "gpu_ms": {
+      "mean": 0.3375,
+      "p50": 0.3041,
+      "p99": 0.9144
+     },
+     "vram_mb": 534.4,
+     "peak_ws_mb": 894.2,
+     "peak_commit_mb": 1759.7,
+     "ws_mb": 378.3,
+     "info": {
+      "meshes": 13,
+      "draws": 84,
+      "tris": 348861,
+      "instanced_tris": 348863,
+      "instances": 13,
+      "textures": 165,
+      "materials": 83
+     },
+     "kind": "car"
+    },
+    {
+     "name": "ks_toyota_gr86",
+     "size": "1920x1080",
+     "seconds": 8,
+     "load_s": 1.6801,
+     "phases_s": {
+      "archive index": 0.0816,
+      "vfs index": 0.1354,
+      "pkg io": 0.5924,
+      "pkg dexor": 0.0257,
+      "file read": 0.0657,
+      "mesh decode": 0.0072,
+      "texture decode": 0.5616,
+      "texture prefetch (wall)": 0.1988,
+      "content load (wall)": 1.0678,
+      "device init": 0.2916,
+      "tex upload: unique": 0.1182,
+      "tex upload: shared": 0.0,
+      "materials+tex upload": 0.1565,
+      "scene upload": 0.0178,
+      "pipeline creation": 0.0113
+     },
+     "frames": 21043,
+     "cpu_ms": {
+      "mean": 0.3802,
+      "p50": 0.3314,
+      "p99": 1.0747
+     },
+     "gpu_ms": {
+      "mean": 0.3373,
+      "p50": 0.3031,
+      "p99": 0.897
+     },
+     "vram_mb": 534.4,
+     "peak_ws_mb": 893.2,
+     "peak_commit_mb": 1759.5,
+     "ws_mb": 377.8,
+     "info": {
+      "meshes": 13,
+      "draws": 84,
+      "tris": 348861,
+      "instanced_tris": 348863,
+      "instances": 13,
+      "textures": 165,
+      "materials": 83
+     },
+     "kind": "car"
+    },
+    {
+     "name": "ks_toyota_gr86",
+     "size": "1920x1080",
+     "seconds": 8,
+     "load_s": 1.4632,
+     "phases_s": {
+      "archive index": 0.0775,
+      "vfs index": 0.1475,
+      "pkg io": 0.6282,
+      "pkg dexor": 0.026,
+      "file read": 0.0696,
+      "mesh decode": 0.007,
+      "texture decode": 0.6583,
+      "texture prefetch (wall)": 0.2173,
+      "content load (wall)": 0.8978,
+      "device init": 0.2942,
+      "tex upload: unique": 0.0855,
+      "tex upload: shared": 0.0,
+      "materials+tex upload": 0.1138,
+      "scene upload": 0.0195,
+      "pipeline creation": 0.015
+     },
+     "frames": 21204,
+     "cpu_ms": {
+      "mean": 0.3773,
+      "p50": 0.3323,
+      "p99": 1.0543
+     },
+     "gpu_ms": {
+      "mean": 0.3382,
+      "p50": 0.3041,
+      "p99": 0.9062
+     },
+     "vram_mb": 534.4,
+     "peak_ws_mb": 892.8,
+     "peak_commit_mb": 1760.5,
+     "ws_mb": 377.8,
+     "info": {
+      "meshes": 13,
+      "draws": 84,
+      "tris": 348861,
+      "instanced_tris": 348863,
+      "instances": 13,
+      "textures": 165,
+      "materials": 83
+     },
+     "kind": "car"
+    }
+   ]
+  },
+  "ks_toyota_gr86@3840x2160": {
+   "name": "ks_toyota_gr86",
+   "size": "3840x2160",
+   "seconds": 8,
+   "load_s": 1.4044,
+   "phases_s": {
+    "archive index": 0.0753,
+    "vfs index": 0.1229,
+    "pkg io": 0.5483,
+    "pkg dexor": 0.0233,
+    "file read": 0.0607,
+    "mesh decode": 0.006,
+    "texture decode": 0.4992,
+    "texture prefetch (wall)": 0.1762,
+    "content load (wall)": 0.867,
+    "device init": 0.288,
+    "tex upload: unique": 0.054,
+    "tex upload: shared": 0.0,
+    "materials+tex upload": 0.0912,
+    "scene upload": 0.0152,
+    "pipeline creation": 0.0103
+   },
+   "frames": 8557,
+   "cpu_ms": {
+    "mean": 0.9348,
+    "p50": 0.8783,
+    "p99": 1.7409
+   },
+   "gpu_ms": {
+    "mean": 0.9095,
+    "p50": 0.8499,
+    "p99": 1.6609
+   },
+   "vram_mb": 725.2,
+   "peak_ws_mb": 893.9,
+   "peak_commit_mb": 1952.4,
+   "ws_mb": 376.4,
+   "info": {
+    "meshes": 13,
+    "draws": 84,
+    "tris": 348861,
+    "instanced_tris": 348863,
+    "instances": 13,
+    "textures": 165,
+    "materials": 83
+   },
+   "kind": "car",
+   "runs": [
+    {
+     "name": "ks_toyota_gr86",
+     "size": "3840x2160",
+     "seconds": 8,
+     "load_s": 1.8348,
+     "phases_s": {
+      "archive index": 0.0871,
+      "vfs index": 0.138,
+      "pkg io": 0.9274,
+      "pkg dexor": 0.0235,
+      "file read": 0.0627,
+      "mesh decode": 0.0064,
+      "texture decode": 0.8188,
+      "texture prefetch (wall)": 0.2924,
+      "content load (wall)": 1.0519,
+      "device init": 0.3231,
+      "tex upload: unique": 0.1889,
+      "tex upload: shared": 0.0,
+      "materials+tex upload": 0.3053,
+      "scene upload": 0.0175,
+      "pipeline creation": 0.0121
+     },
+     "frames": 8461,
+     "cpu_ms": {
+      "mean": 0.9455,
+      "p50": 0.8882,
+      "p99": 1.7469
+     },
+     "gpu_ms": {
+      "mean": 0.9203,
+      "p50": 0.8581,
+      "p99": 1.6763
+     },
+     "vram_mb": 725.2,
+     "peak_ws_mb": 893.5,
+     "peak_commit_mb": 1951.4,
+     "ws_mb": 374.8,
+     "info": {
+      "meshes": 13,
+      "draws": 84,
+      "tris": 348861,
+      "instanced_tris": 348863,
+      "instances": 13,
+      "textures": 165,
+      "materials": 83
+     },
+     "kind": "car"
+    },
+    {
+     "name": "ks_toyota_gr86",
+     "size": "3840x2160",
+     "seconds": 8,
+     "load_s": 1.6371,
+     "phases_s": {
+      "archive index": 0.0758,
+      "vfs index": 0.1232,
+      "pkg io": 0.5737,
+      "pkg dexor": 0.0249,
+      "file read": 0.065,
+      "mesh decode": 0.006,
+      "texture decode": 0.532,
+      "texture prefetch (wall)": 0.1842,
+      "content load (wall)": 0.9861,
+      "device init": 0.3007,
+      "tex upload: unique": 0.054,
+      "tex upload: shared": 0.0,
+      "materials+tex upload": 0.0912,
+      "scene upload": 0.0178,
+      "pipeline creation": 0.0103
+     },
+     "frames": 8523,
+     "cpu_ms": {
+      "mean": 0.9386,
+      "p50": 0.8826,
+      "p99": 1.7626
+     },
+     "gpu_ms": {
+      "mean": 0.9135,
+      "p50": 0.852,
+      "p99": 1.6691
+     },
+     "vram_mb": 725.2,
+     "peak_ws_mb": 893.9,
+     "peak_commit_mb": 1952.4,
+     "ws_mb": 378.0,
+     "info": {
+      "meshes": 13,
+      "draws": 84,
+      "tris": 348861,
+      "instanced_tris": 348863,
+      "instances": 13,
+      "textures": 165,
+      "materials": 83
+     },
+     "kind": "car"
+    },
+    {
+     "name": "ks_toyota_gr86",
+     "size": "3840x2160",
+     "seconds": 8,
+     "load_s": 1.4044,
+     "phases_s": {
+      "archive index": 0.0753,
+      "vfs index": 0.1229,
+      "pkg io": 0.5483,
+      "pkg dexor": 0.0233,
+      "file read": 0.0607,
+      "mesh decode": 0.0066,
+      "texture decode": 0.4992,
+      "texture prefetch (wall)": 0.1762,
+      "content load (wall)": 0.867,
+      "device init": 0.288,
+      "tex upload: unique": 0.0836,
+      "tex upload: shared": 0.0,
+      "materials+tex upload": 0.1199,
+      "scene upload": 0.0152,
+      "pipeline creation": 0.0107
+     },
+     "frames": 8557,
+     "cpu_ms": {
+      "mean": 0.9348,
+      "p50": 0.8783,
+      "p99": 1.7409
+     },
+     "gpu_ms": {
+      "mean": 0.9095,
+      "p50": 0.8499,
+      "p99": 1.6609
+     },
+     "vram_mb": 725.2,
+     "peak_ws_mb": 893.4,
+     "peak_commit_mb": 1950.9,
+     "ws_mb": 376.4,
+     "info": {
+      "meshes": 13,
+      "draws": 84,
+      "tris": 348861,
+      "instanced_tris": 348863,
+      "instances": 13,
+      "textures": 165,
+      "materials": 83
+     },
+     "kind": "car"
+    }
+   ]
+  },
+  "ks_ferrari_sf_25@1920x1080": {
+   "name": "ks_ferrari_sf_25",
+   "size": "1920x1080",
+   "seconds": 8,
+   "load_s": 1.2278,
+   "phases_s": {
+    "archive index": 0.076,
+    "vfs index": 0.1195,
+    "pkg io": 0.2969,
+    "pkg dexor": 0.0213,
+    "file read": 0.0501,
+    "mesh decode": 0.0071,
+    "texture decode": 0.1955,
+    "texture prefetch (wall)": 0.0839,
+    "content load (wall)": 0.609,
+    "device init": 0.3204,
+    "tex upload: unique": 0.0175,
+    "tex upload: shared": 0.0,
+    "materials+tex upload": 0.0552,
+    "scene upload": 0.0383,
+    "pipeline creation": 0.0105
+   },
+   "frames": 24572,
+   "cpu_ms": {
+    "mean": 0.3227,
+    "p50": 0.284,
+    "p99": 0.9581
+   },
+   "gpu_ms": {
+    "mean": 0.2824,
+    "p50": 0.2621,
+    "p99": 0.8274
+   },
+   "vram_mb": 406.7,
+   "peak_ws_mb": 732.6,
+   "peak_commit_mb": 1294.9,
+   "ws_mb": 362.3,
+   "info": {
+    "meshes": 12,
+    "draws": 55,
+    "tris": 415540,
+    "instanced_tris": 415542,
+    "instances": 12,
+    "textures": 133,
+    "materials": 57
+   },
+   "kind": "car",
+   "runs": [
+    {
+     "name": "ks_ferrari_sf_25",
+     "size": "1920x1080",
+     "seconds": 8,
+     "load_s": 1.2347,
+     "phases_s": {
+      "archive index": 0.076,
+      "vfs index": 0.1195,
+      "pkg io": 0.3521,
+      "pkg dexor": 0.0232,
+      "file read": 0.0601,
+      "mesh decode": 0.0077,
+      "texture decode": 0.285,
+      "texture prefetch (wall)": 0.114,
+      "content load (wall)": 0.6966,
+      "device init": 0.3204,
+      "tex upload: unique": 0.0187,
+      "tex upload: shared": 0.0,
+      "materials+tex upload": 0.0577,
+      "scene upload": 0.0493,
+      "pipeline creation": 0.0111
+     },
+     "frames": 24572,
+     "cpu_ms": {
+      "mean": 0.3256,
+      "p50": 0.284,
+      "p99": 0.9581
+     },
+     "gpu_ms": {
+      "mean": 0.2833,
+      "p50": 0.2621,
+      "p99": 0.8315
+     },
+     "vram_mb": 406.7,
+     "peak_ws_mb": 732.4,
+     "peak_commit_mb": 1293.9,
+     "ws_mb": 362.3,
+     "info": {
+      "meshes": 12,
+      "draws": 55,
+      "tris": 415540,
+      "instanced_tris": 415542,
+      "instances": 12,
+      "textures": 133,
+      "materials": 57
+     },
+     "kind": "car"
+    },
+    {
+     "name": "ks_ferrari_sf_25",
+     "size": "1920x1080",
+     "seconds": 8,
+     "load_s": 1.3486,
+     "phases_s": {
+      "archive index": 0.0845,
+      "vfs index": 0.1545,
+      "pkg io": 0.3723,
+      "pkg dexor": 0.0258,
+      "file read": 0.0687,
+      "mesh decode": 0.0087,
+      "texture decode": 0.2694,
+      "texture prefetch (wall)": 0.1088,
+      "content load (wall)": 0.8172,
+      "device init": 0.3241,
+      "tex upload: unique": 0.0185,
+      "tex upload: shared": 0.0,
+      "materials+tex upload": 0.0565,
+      "scene upload": 0.0383,
+      "pipeline creation": 0.0105
+     },
+     "frames": 24491,
+     "cpu_ms": {
+      "mean": 0.3266,
+      "p50": 0.2843,
+      "p99": 0.9894
+     },
+     "gpu_ms": {
+      "mean": 0.2831,
+      "p50": 0.2621,
+      "p99": 0.8274
+     },
+     "vram_mb": 406.7,
+     "peak_ws_mb": 732.4,
+     "peak_commit_mb": 1293.1,
+     "ws_mb": 362.2,
+     "info": {
+      "meshes": 12,
+      "draws": 55,
+      "tris": 415540,
+      "instanced_tris": 415542,
+      "instances": 12,
+      "textures": 133,
+      "materials": 57
+     },
+     "kind": "car"
+    },
+    {
+     "name": "ks_ferrari_sf_25",
+     "size": "1920x1080",
+     "seconds": 8,
+     "load_s": 1.2278,
+     "phases_s": {
+      "archive index": 0.0897,
+      "vfs index": 0.1274,
+      "pkg io": 0.2969,
+      "pkg dexor": 0.0213,
+      "file read": 0.0501,
+      "mesh decode": 0.0071,
+      "texture decode": 0.1955,
+      "texture prefetch (wall)": 0.0839,
+      "content load (wall)": 0.609,
+      "device init": 0.3281,
+      "tex upload: unique": 0.0175,
+      "tex upload: shared": 0.0,
+      "materials+tex upload": 0.0552,
+      "scene upload": 0.0846,
+      "pipeline creation": 0.0307
+     },
+     "frames": 24795,
+     "cpu_ms": {
+      "mean": 0.3227,
+      "p50": 0.2847,
+      "p99": 0.9625
+     },
+     "gpu_ms": {
+      "mean": 0.2824,
+      "p50": 0.2621,
+      "p99": 0.8305
+     },
+     "vram_mb": 406.7,
+     "peak_ws_mb": 732.6,
+     "peak_commit_mb": 1294.9,
+     "ws_mb": 362.3,
+     "info": {
+      "meshes": 12,
+      "draws": 55,
+      "tris": 415540,
+      "instanced_tris": 415542,
+      "instances": 12,
+      "textures": 133,
+      "materials": 57
+     },
+     "kind": "car"
+    }
+   ]
+  },
+  "ks_ferrari_sf_25@3840x2160": {
+   "name": "ks_ferrari_sf_25",
+   "size": "3840x2160",
+   "seconds": 8,
+   "load_s": 1.2796,
+   "phases_s": {
+    "archive index": 0.0769,
+    "vfs index": 0.1184,
+    "pkg io": 0.329,
+    "pkg dexor": 0.0209,
+    "file read": 0.0536,
+    "mesh decode": 0.0069,
+    "texture decode": 0.2426,
+    "texture prefetch (wall)": 0.0981,
+    "content load (wall)": 0.6894,
+    "device init": 0.3405,
+    "tex upload: unique": 0.0174,
+    "tex upload: shared": 0.0,
+    "materials+tex upload": 0.0652,
+    "scene upload": 0.024,
+    "pipeline creation": 0.0105
+   },
+   "frames": 9651,
+   "cpu_ms": {
+    "mean": 0.8289,
+    "p50": 0.7747,
+    "p99": 1.6209
+   },
+   "gpu_ms": {
+    "mean": 0.8038,
+    "p50": 0.7516,
+    "p99": 1.5647
+   },
+   "vram_mb": 661.2,
+   "peak_ws_mb": 732.7,
+   "peak_commit_mb": 1549.7,
+   "ws_mb": 361.7,
+   "info": {
+    "meshes": 12,
+    "draws": 55,
+    "tris": 415540,
+    "instanced_tris": 415542,
+    "instances": 12,
+    "textures": 133,
+    "materials": 57
+   },
+   "kind": "car",
+   "runs": [
+    {
+     "name": "ks_ferrari_sf_25",
+     "size": "3840x2160",
+     "seconds": 8,
+     "load_s": 1.6272,
+     "phases_s": {
+      "archive index": 0.0779,
+      "vfs index": 0.148,
+      "pkg io": 0.4269,
+      "pkg dexor": 0.0243,
+      "file read": 0.0629,
+      "mesh decode": 0.0106,
+      "texture decode": 0.4143,
+      "texture prefetch (wall)": 0.1478,
+      "content load (wall)": 0.836,
+      "device init": 0.3843,
+      "tex upload: unique": 0.102,
+      "tex upload: shared": 0.0,
+      "materials+tex upload": 0.1412,
+      "scene upload": 0.1503,
+      "pipeline creation": 0.0108
+     },
+     "frames": 9651,
+     "cpu_ms": {
+      "mean": 0.8289,
+      "p50": 0.7747,
+      "p99": 1.6209
+     },
+     "gpu_ms": {
+      "mean": 0.8038,
+      "p50": 0.7516,
+      "p99": 1.5647
+     },
+     "vram_mb": 661.2,
+     "peak_ws_mb": 732.4,
+     "peak_commit_mb": 1549.6,
+     "ws_mb": 361.7,
+     "info": {
+      "meshes": 12,
+      "draws": 55,
+      "tris": 415540,
+      "instanced_tris": 415542,
+      "instances": 12,
+      "textures": 133,
+      "materials": 57
+     },
+     "kind": "car"
+    },
+    {
+     "name": "ks_ferrari_sf_25",
+     "size": "3840x2160",
+     "seconds": 8,
+     "load_s": 1.2796,
+     "phases_s": {
+      "archive index": 0.0773,
+      "vfs index": 0.1184,
+      "pkg io": 0.3733,
+      "pkg dexor": 0.0212,
+      "file read": 0.0585,
+      "mesh decode": 0.0082,
+      "texture decode": 0.2646,
+      "texture prefetch (wall)": 0.1079,
+      "content load (wall)": 0.7012,
+      "device init": 0.3405,
+      "tex upload: unique": 0.0174,
+      "tex upload: shared": 0.0,
+      "materials+tex upload": 0.0652,
+      "scene upload": 0.0517,
+      "pipeline creation": 0.0107
+     },
+     "frames": 9496,
+     "cpu_ms": {
+      "mean": 0.8425,
+      "p50": 0.7873,
+      "p99": 1.633
+     },
+     "gpu_ms": {
+      "mean": 0.8175,
+      "p50": 0.7649,
+      "p99": 1.5708
+     },
+     "vram_mb": 661.2,
+     "peak_ws_mb": 732.2,
+     "peak_commit_mb": 1549.1,
+     "ws_mb": 361.4,
+     "info": {
+      "meshes": 12,
+      "draws": 55,
+      "tris": 415540,
+      "instanced_tris": 415542,
+      "instances": 12,
+      "textures": 133,
+      "materials": 57
+     },
+     "kind": "car"
+    },
+    {
+     "name": "ks_ferrari_sf_25",
+     "size": "3840x2160",
+     "seconds": 8,
+     "load_s": 1.3014,
+     "phases_s": {
+      "archive index": 0.0769,
+      "vfs index": 0.1293,
+      "pkg io": 0.329,
+      "pkg dexor": 0.0209,
+      "file read": 0.0536,
+      "mesh decode": 0.0069,
+      "texture decode": 0.2426,
+      "texture prefetch (wall)": 0.0981,
+      "content load (wall)": 0.6894,
+      "device init": 0.3754,
+      "tex upload: unique": 0.0268,
+      "tex upload: shared": 0.0,
+      "materials+tex upload": 0.0823,
+      "scene upload": 0.024,
+      "pipeline creation": 0.0105
+     },
+     "frames": 9544,
+     "cpu_ms": {
+      "mean": 0.8383,
+      "p50": 0.7848,
+      "p99": 1.6301
+     },
+     "gpu_ms": {
+      "mean": 0.8142,
+      "p50": 0.7629,
+      "p99": 1.5759
+     },
+     "vram_mb": 661.2,
+     "peak_ws_mb": 732.7,
+     "peak_commit_mb": 1549.7,
+     "ws_mb": 361.8,
+     "info": {
+      "meshes": 12,
+      "draws": 55,
+      "tris": 415540,
+      "instanced_tris": 415542,
+      "instances": 12,
+      "textures": 133,
+      "materials": 57
+     },
+     "kind": "car"
+    }
+   ]
+  },
+  "brands_hatch@1920x1080": {
+   "name": "brands_hatch",
+   "size": "1920x1080",
+   "seconds": 8,
+   "load_s": 3.2053,
+   "phases_s": {
+    "archive index": 0.0811,
+    "vfs index": 0.1244,
+    "track: setup": 0.0054,
+    "pkg io": 1.4056,
+    "pkg dexor": 0.0561,
+    "file read": 0.3158,
+    "mesh decode": 0.0195,
+    "track: scenes + static meshes": 0.2618,
+    "track: instanced meshes": 0.078,
+    "texture decode": 0.723,
+    "texture prefetch (wall)": 0.2729,
+    "track: materials + textures": 1.1698,
+    "content load (wall)": 1.9282,
+    "device init": 0.3091,
+    "tex upload: unique": 0.6265,
+    "tex upload: shared": 0.0,
+    "tex upload: staging flush": 0.4617,
+    "materials+tex upload": 0.6626,
+    "scene upload": 0.0686,
+    "pipeline creation": 0.0101,
+    "cull setup": 0.0066
+   },
+   "frames": 6241,
+   "cpu_ms": {
+    "mean": 1.1721,
+    "p50": 1.125,
+    "p99": 2.3973
+   },
+   "gpu_ms": {
+    "mean": 0.7786,
+    "p50": 0.7291,
+    "p99": 1.3312
+   },
+   "vram_mb": 1337.0,
+   "peak_ws_mb": 1889.7,
+   "peak_commit_mb": 2958.7,
+   "ws_mb": 741.4,
+   "info": {
+    "meshes": 780,
+    "draws": 928,
+    "tris": 1428675,
+    "instanced_tris": 78489011,
+    "instances": 41670,
+    "textures": 730,
+    "materials": 209
+   },
+   "kind": "track",
+   "runs": [
+    {
+     "name": "brands_hatch",
+     "size": "1920x1080",
+     "seconds": 8,
+     "load_s": 3.4939,
+     "phases_s": {
+      "archive index": 0.0811,
+      "vfs index": 0.1244,
+      "track: setup": 0.0054,
+      "pkg io": 1.468,
+      "pkg dexor": 0.0606,
+      "file read": 0.3692,
+      "mesh decode": 0.0228,
+      "track: scenes + static meshes": 0.2975,
+      "track: instanced meshes": 0.1142,
+      "texture decode": 0.723,
+      "texture prefetch (wall)": 0.2729,
+      "track: materials + textures": 1.35,
+      "content load (wall)": 2.0757,
+      "device init": 0.3091,
+      "tex upload: unique": 0.8603,
+      "tex upload: shared": 0.0,
+      "tex upload: staging flush": 0.5963,
+      "materials+tex upload": 0.8952,
+      "scene upload": 0.0686,
+      "pipeline creation": 0.0101,
+      "cull setup": 0.0066
+     },
+     "frames": 6342,
+     "cpu_ms": {
+      "mean": 1.2615,
+      "p50": 1.1481,
+      "p99": 3.2246
+     },
+     "gpu_ms": {
+      "mean": 0.8064,
+      "p50": 0.7475,
+      "p99": 1.5401
+     },
+     "vram_mb": 1337.0,
+     "peak_ws_mb": 1889.0,
+     "peak_commit_mb": 2958.5,
+     "ws_mb": 741.6,
+     "info": {
+      "meshes": 780,
+      "draws": 928,
+      "tris": 1428675,
+      "instanced_tris": 78489011,
+      "instances": 41670,
+      "textures": 730,
+      "materials": 209
+     },
+     "kind": "track"
+    },
+    {
+     "name": "brands_hatch",
+     "size": "1920x1080",
+     "seconds": 8,
+     "load_s": 3.2053,
+     "phases_s": {
+      "archive index": 0.1044,
+      "vfs index": 0.165,
+      "track: setup": 0.0073,
+      "pkg io": 1.4056,
+      "pkg dexor": 0.0561,
+      "file read": 0.3158,
+      "mesh decode": 0.0195,
+      "track: scenes + static meshes": 0.2618,
+      "track: instanced meshes": 0.078,
+      "texture decode": 0.8717,
+      "texture prefetch (wall)": 0.3158,
+      "track: materials + textures": 1.1698,
+      "content load (wall)": 1.9282,
+      "device init": 0.3155,
+      "tex upload: unique": 0.6389,
+      "tex upload: shared": 0.0,
+      "tex upload: staging flush": 0.4617,
+      "materials+tex upload": 0.6864,
+      "scene upload": 0.0902,
+      "pipeline creation": 0.0114,
+      "cull setup": 0.0099
+     },
+     "frames": 6826,
+     "cpu_ms": {
+      "mean": 1.1721,
+      "p50": 1.125,
+      "p99": 2.3973
+     },
+     "gpu_ms": {
+      "mean": 0.7956,
+      "p50": 0.7414,
+      "p99": 1.3793
+     },
+     "vram_mb": 1337.0,
+     "peak_ws_mb": 1888.8,
+     "peak_commit_mb": 2956.4,
+     "ws_mb": 741.3,
+     "info": {
+      "meshes": 780,
+      "draws": 928,
+      "tris": 1428675,
+      "instanced_tris": 78489011,
+      "instances": 41670,
+      "textures": 730,
+      "materials": 209
+     },
+     "kind": "track"
+    },
+    {
+     "name": "brands_hatch",
+     "size": "1920x1080",
+     "seconds": 8,
+     "load_s": 3.3296,
+     "phases_s": {
+      "archive index": 0.1446,
+      "vfs index": 0.165,
+      "track: setup": 0.0062,
+      "pkg io": 1.7076,
+      "pkg dexor": 0.0577,
+      "file read": 0.3297,
+      "mesh decode": 0.0219,
+      "track: scenes + static meshes": 0.278,
+      "track: instanced meshes": 0.0842,
+      "texture decode": 1.0447,
+      "texture prefetch (wall)": 0.3921,
+      "track: materials + textures": 1.2509,
+      "content load (wall)": 2.0799,
+      "device init": 0.3177,
+      "tex upload: unique": 0.6265,
+      "tex upload: shared": 0.0,
+      "tex upload: staging flush": 0.4715,
+      "materials+tex upload": 0.6626,
+      "scene upload": 0.0943,
+      "pipeline creation": 0.0105,
+      "cull setup": 0.009
+     },
+     "frames": 6241,
+     "cpu_ms": {
+      "mean": 1.282,
+      "p50": 1.1823,
+      "p99": 3.0521
+     },
+     "gpu_ms": {
+      "mean": 0.7786,
+      "p50": 0.7291,
+      "p99": 1.3312
+     },
+     "vram_mb": 1337.0,
+     "peak_ws_mb": 1889.7,
+     "peak_commit_mb": 2958.7,
+     "ws_mb": 741.4,
+     "info": {
+      "meshes": 780,
+      "draws": 928,
+      "tris": 1428675,
+      "instanced_tris": 78489011,
+      "instances": 41670,
+      "textures": 730,
+      "materials": 209
+     },
+     "kind": "track"
+    }
+   ]
+  },
+  "brands_hatch@3840x2160": {
+   "name": "brands_hatch",
+   "size": "3840x2160",
+   "seconds": 8,
+   "load_s": 3.0179,
+   "phases_s": {
+    "archive index": 0.0802,
+    "vfs index": 0.1295,
+    "track: setup": 0.0058,
+    "pkg io": 1.4536,
+    "pkg dexor": 0.0635,
+    "file read": 0.3389,
+    "mesh decode": 0.0268,
+    "track: scenes + static meshes": 0.3101,
+    "track: instanced meshes": 0.0888,
+    "texture decode": 0.6995,
+    "texture prefetch (wall)": 0.2555,
+    "track: materials + textures": 1.3213,
+    "content load (wall)": 2.0508,
+    "device init": 0.316,
+    "tex upload: unique": 0.3444,
+    "tex upload: shared": 0.0,
+    "tex upload: staging flush": 0.2359,
+    "materials+tex upload": 0.3976,
+    "scene upload": 0.062,
+    "pipeline creation": 0.0105,
+    "cull setup": 0.0079
+   },
+   "frames": 2999,
+   "cpu_ms": {
+    "mean": 2.6678,
+    "p50": 2.4367,
+    "p99": 4.8461
+   },
+   "gpu_ms": {
+    "mean": 2.5479,
+    "p50": 2.345,
+    "p99": 4.3704
+   },
+   "vram_mb": 1366.6,
+   "peak_ws_mb": 1889.7,
+   "peak_commit_mb": 2993.1,
+   "ws_mb": 742.2,
+   "info": {
+    "meshes": 780,
+    "draws": 928,
+    "tris": 1428675,
+    "instanced_tris": 78489011,
+    "instances": 41670,
+    "textures": 730,
+    "materials": 209
+   },
+   "kind": "track",
+   "runs": [
+    {
+     "name": "brands_hatch",
+     "size": "3840x2160",
+     "seconds": 8,
+     "load_s": 3.0179,
+     "phases_s": {
+      "archive index": 0.0838,
+      "vfs index": 0.1348,
+      "track: setup": 0.0058,
+      "pkg io": 1.4536,
+      "pkg dexor": 0.0635,
+      "file read": 0.4084,
+      "mesh decode": 0.0273,
+      "track: scenes + static meshes": 0.3101,
+      "track: instanced meshes": 0.0951,
+      "texture decode": 0.6995,
+      "texture prefetch (wall)": 0.2555,
+      "track: materials + textures": 1.3221,
+      "content load (wall)": 2.0525,
+      "device init": 0.316,
+      "tex upload: unique": 0.3913,
+      "tex upload: shared": 0.0,
+      "tex upload: staging flush": 0.302,
+      "materials+tex upload": 0.4251,
+      "scene upload": 0.062,
+      "pipeline creation": 0.0105,
+      "cull setup": 0.0079
+     },
+     "frames": 2999,
+     "cpu_ms": {
+      "mean": 2.6678,
+      "p50": 2.4367,
+      "p99": 5.0952
+     },
+     "gpu_ms": {
+      "mean": 2.5479,
+      "p50": 2.345,
+      "p99": 4.4636
+     },
+     "vram_mb": 1366.6,
+     "peak_ws_mb": 1888.9,
+     "peak_commit_mb": 2993.1,
+     "ws_mb": 742.2,
+     "info": {
+      "meshes": 780,
+      "draws": 928,
+      "tris": 1428675,
+      "instanced_tris": 78489011,
+      "instances": 41670,
+      "textures": 730,
+      "materials": 209
+     },
+     "kind": "track"
+    },
+    {
+     "name": "brands_hatch",
+     "size": "3840x2160",
+     "seconds": 8,
+     "load_s": 3.1061,
+     "phases_s": {
+      "archive index": 0.0802,
+      "vfs index": 0.1295,
+      "track: setup": 0.0093,
+      "pkg io": 1.7111,
+      "pkg dexor": 0.0713,
+      "file read": 0.3389,
+      "mesh decode": 0.0268,
+      "track: scenes + static meshes": 0.3179,
+      "track: instanced meshes": 0.0888,
+      "texture decode": 0.8079,
+      "texture prefetch (wall)": 0.355,
+      "track: materials + textures": 1.3213,
+      "content load (wall)": 2.0508,
+      "device init": 0.3295,
+      "tex upload: unique": 0.3444,
+      "tex upload: shared": 0.0,
+      "tex upload: staging flush": 0.2359,
+      "materials+tex upload": 0.3976,
+      "scene upload": 0.0831,
+      "pipeline creation": 0.0136,
+      "cull setup": 0.0085
+     },
+     "frames": 2730,
+     "cpu_ms": {
+      "mean": 2.9317,
+      "p50": 2.8275,
+      "p99": 5.5283
+     },
+     "gpu_ms": {
+      "mean": 2.801,
+      "p50": 2.7259,
+      "p99": 4.5036
+     },
+     "vram_mb": 1366.6,
+     "peak_ws_mb": 1889.7,
+     "peak_commit_mb": 2988.2,
+     "ws_mb": 743.0,
+     "info": {
+      "meshes": 780,
+      "draws": 928,
+      "tris": 1428675,
+      "instanced_tris": 78489011,
+      "instances": 41670,
+      "textures": 730,
+      "materials": 209
+     },
+     "kind": "track"
+    },
+    {
+     "name": "brands_hatch",
+     "size": "3840x2160",
+     "seconds": 8,
+     "load_s": 3.3176,
+     "phases_s": {
+      "archive index": 0.0849,
+      "vfs index": 0.1487,
+      "track: setup": 0.0059,
+      "pkg io": 1.7951,
+      "pkg dexor": 0.0691,
+      "file read": 0.3431,
+      "mesh decode": 0.0312,
+      "track: scenes + static meshes": 0.3452,
+      "track: instanced meshes": 0.1134,
+      "texture decode": 1.095,
+      "texture prefetch (wall)": 0.4163,
+      "track: materials + textures": 1.4707,
+      "content load (wall)": 2.2694,
+      "device init": 0.3301,
+      "tex upload: unique": 0.38,
+      "tex upload: shared": 0.0,
+      "tex upload: staging flush": 0.2701,
+      "materials+tex upload": 0.4323,
+      "scene upload": 0.0924,
+      "pipeline creation": 0.0138,
+      "cull setup": 0.0096
+     },
+     "frames": 2837,
+     "cpu_ms": {
+      "mean": 2.8206,
+      "p50": 2.7297,
+      "p99": 4.8461
+     },
+     "gpu_ms": {
+      "mean": 2.7226,
+      "p50": 2.6481,
+      "p99": 4.3704
+     },
+     "vram_mb": 1366.6,
+     "peak_ws_mb": 1888.1,
+     "peak_commit_mb": 2991.3,
+     "ws_mb": 743.5,
+     "info": {
+      "meshes": 780,
+      "draws": 928,
+      "tris": 1428675,
+      "instanced_tris": 78489011,
+      "instances": 41670,
+      "textures": 730,
+      "materials": 209
+     },
+     "kind": "track"
+    }
+   ]
+  },
+  "laguna_seca@1920x1080": {
+   "name": "laguna_seca",
+   "size": "1920x1080",
+   "seconds": 8,
+   "load_s": 3.5635,
+   "phases_s": {
+    "archive index": 0.0745,
+    "vfs index": 0.1285,
+    "track: setup": 0.0052,
+    "pkg io": 1.6166,
+    "pkg dexor": 0.0708,
+    "file read": 0.3535,
+    "mesh decode": 0.0269,
+    "track: scenes + static meshes": 0.2156,
+    "track: instanced meshes": 0.1075,
+    "texture decode": 1.1838,
+    "texture prefetch (wall)": 0.3912,
+    "track: materials + textures": 1.4664,
+    "content load (wall)": 2.2224,
+    "device init": 0.2973,
+    "tex upload: unique": 0.6394,
+    "tex upload: shared": 0.0,
+    "tex upload: staging flush": 0.4365,
+    "materials+tex upload": 0.6892,
+    "scene upload": 0.0766,
+    "pipeline creation": 0.0098,
+    "cull setup": 0.0078
+   },
+   "frames": 7418,
+   "cpu_ms": {
+    "mean": 1.0786,
+    "p50": 0.9684,
+    "p99": 2.4811
+   },
+   "gpu_ms": {
+    "mean": 0.4724,
+    "p50": 0.4495,
+    "p99": 0.7956
+   },
+   "vram_mb": 1529.4,
+   "peak_ws_mb": 2044.1,
+   "peak_commit_mb": 3460.9,
+   "ws_mb": 744.8,
+   "info": {
+    "meshes": 920,
+    "draws": 1158,
+    "tris": 1994397,
+    "instanced_tris": 42617559,
+    "instances": 38434,
+    "textures": 726,
+    "materials": 242
+   },
+   "kind": "track",
+   "runs": [
+    {
+     "name": "laguna_seca",
+     "size": "1920x1080",
+     "seconds": 8,
+     "load_s": 3.8374,
+     "phases_s": {
+      "archive index": 0.1217,
+      "vfs index": 0.1558,
+      "track: setup": 0.006,
+      "pkg io": 1.9259,
+      "pkg dexor": 0.0708,
+      "file read": 0.4072,
+      "mesh decode": 0.0269,
+      "track: scenes + static meshes": 0.2156,
+      "track: instanced meshes": 0.1075,
+      "texture decode": 1.4574,
+      "texture prefetch (wall)": 0.4776,
+      "track: materials + textures": 1.7091,
+      "content load (wall)": 2.4419,
+      "device init": 0.3495,
+      "tex upload: unique": 0.6683,
+      "tex upload: shared": 0.0,
+      "tex upload: staging flush": 0.4365,
+      "materials+tex upload": 0.7408,
+      "scene upload": 0.1118,
+      "pipeline creation": 0.0117,
+      "cull setup": 0.009
+     },
+     "frames": 5527,
+     "cpu_ms": {
+      "mean": 1.4476,
+      "p50": 1.3176,
+      "p99": 3.6517
+     },
+     "gpu_ms": {
+      "mean": 0.5258,
+      "p50": 0.4557,
+      "p99": 1.4029
+     },
+     "vram_mb": 1529.4,
+     "peak_ws_mb": 2043.8,
+     "peak_commit_mb": 3460.2,
+     "ws_mb": 746.2,
+     "info": {
+      "meshes": 920,
+      "draws": 1158,
+      "tris": 1994397,
+      "instanced_tris": 42617559,
+      "instances": 38434,
+      "textures": 726,
+      "materials": 242
+     },
+     "kind": "track"
+    },
+    {
+     "name": "laguna_seca",
+     "size": "1920x1080",
+     "seconds": 8,
+     "load_s": 3.5635,
+     "phases_s": {
+      "archive index": 0.0745,
+      "vfs index": 0.1285,
+      "track: setup": 0.0052,
+      "pkg io": 1.6166,
+      "pkg dexor": 0.0811,
+      "file read": 0.3979,
+      "mesh decode": 0.0404,
+      "track: scenes + static meshes": 0.2869,
+      "track: instanced meshes": 0.1616,
+      "texture decode": 1.1838,
+      "texture prefetch (wall)": 0.3912,
+      "track: materials + textures": 1.4664,
+      "content load (wall)": 2.2224,
+      "device init": 0.2973,
+      "tex upload: unique": 0.6813,
+      "tex upload: shared": 0.0,
+      "tex upload: staging flush": 0.4449,
+      "materials+tex upload": 0.7606,
+      "scene upload": 0.098,
+      "pipeline creation": 0.0105,
+      "cull setup": 0.0096
+     },
+     "frames": 7418,
+     "cpu_ms": {
+      "mean": 1.0786,
+      "p50": 0.9684,
+      "p99": 2.4811
+     },
+     "gpu_ms": {
+      "mean": 0.4724,
+      "p50": 0.4495,
+      "p99": 0.7956
+     },
+     "vram_mb": 1529.4,
+     "peak_ws_mb": 2044.1,
+     "peak_commit_mb": 3460.9,
+     "ws_mb": 744.8,
+     "info": {
+      "meshes": 920,
+      "draws": 1158,
+      "tris": 1994397,
+      "instanced_tris": 42617559,
+      "instances": 38434,
+      "textures": 726,
+      "materials": 242
+     },
+     "kind": "track"
+    },
+    {
+     "name": "laguna_seca",
+     "size": "1920x1080",
+     "seconds": 8,
+     "load_s": 3.5909,
+     "phases_s": {
+      "archive index": 0.0963,
+      "vfs index": 0.1356,
+      "track: setup": 0.0062,
+      "pkg io": 2.0011,
+      "pkg dexor": 0.0775,
+      "file read": 0.3535,
+      "mesh decode": 0.0311,
+      "track: scenes + static meshes": 0.2283,
+      "track: instanced meshes": 0.1164,
+      "texture decode": 1.6536,
+      "texture prefetch (wall)": 0.5534,
+      "track: materials + textures": 1.6466,
+      "content load (wall)": 2.3344,
+      "device init": 0.3125,
+      "tex upload: unique": 0.6394,
+      "tex upload: shared": 0.0,
+      "tex upload: staging flush": 0.4815,
+      "materials+tex upload": 0.6892,
+      "scene upload": 0.0766,
+      "pipeline creation": 0.0098,
+      "cull setup": 0.0078
+     },
+     "frames": 6942,
+     "cpu_ms": {
+      "mean": 1.1526,
+      "p50": 0.9869,
+      "p99": 3.0352
+     },
+     "gpu_ms": {
+      "mean": 0.4743,
+      "p50": 0.4495,
+      "p99": 0.7997
+     },
+     "vram_mb": 1529.4,
+     "peak_ws_mb": 2043.3,
+     "peak_commit_mb": 3459.4,
+     "ws_mb": 744.8,
+     "info": {
+      "meshes": 920,
+      "draws": 1158,
+      "tris": 1994397,
+      "instanced_tris": 42617559,
+      "instances": 38434,
+      "textures": 726,
+      "materials": 242
+     },
+     "kind": "track"
+    }
+   ]
+  },
+  "laguna_seca@3840x2160": {
+   "name": "laguna_seca",
+   "size": "3840x2160",
+   "seconds": 8,
+   "load_s": 2.6612,
+   "phases_s": {
+    "archive index": 0.07,
+    "vfs index": 0.1118,
+    "track: setup": 0.0047,
+    "pkg io": 1.5641,
+    "pkg dexor": 0.0676,
+    "file read": 0.2975,
+    "mesh decode": 0.0245,
+    "track: scenes + static meshes": 0.1917,
+    "track: instanced meshes": 0.0967,
+    "texture decode": 0.6859,
+    "texture prefetch (wall)": 0.3183,
+    "track: materials + textures": 1.1401,
+    "content load (wall)": 1.7552,
+    "device init": 0.2839,
+    "tex upload: unique": 0.2606,
+    "tex upload: shared": 0.0,
+    "tex upload: staging flush": 0.1443,
+    "materials+tex upload": 0.318,
+    "scene upload": 0.0825,
+    "pipeline creation": 0.0108,
+    "cull setup": 0.0079
+   },
+   "frames": 5225,
+   "cpu_ms": {
+    "mean": 1.4918,
+    "p50": 1.3947,
+    "p99": 2.8829
+   },
+   "gpu_ms": {
+    "mean": 1.3633,
+    "p50": 1.2298,
+    "p99": 2.6563
+   },
+   "vram_mb": 1622.6,
+   "peak_ws_mb": 2043.4,
+   "peak_commit_mb": 3557.3,
+   "ws_mb": 647.9,
+   "info": {
+    "meshes": 920,
+    "draws": 1158,
+    "tris": 1994397,
+    "instanced_tris": 42617559,
+    "instances": 38434,
+    "textures": 726,
+    "materials": 242
+   },
+   "kind": "track",
+   "runs": [
+    {
+     "name": "laguna_seca",
+     "size": "3840x2160",
+     "seconds": 8,
+     "load_s": 3.5024,
+     "phases_s": {
+      "archive index": 0.0807,
+      "vfs index": 0.1428,
+      "track: setup": 0.006,
+      "pkg io": 1.8142,
+      "pkg dexor": 0.0749,
+      "file read": 0.3691,
+      "mesh decode": 0.0311,
+      "track: scenes + static meshes": 0.2685,
+      "track: instanced meshes": 0.1231,
+      "texture decode": 1.0042,
+      "texture prefetch (wall)": 0.4018,
+      "track: materials + textures": 1.5856,
+      "content load (wall)": 2.2922,
+      "device init": 0.3802,
+      "tex upload: unique": 0.4458,
+      "tex upload: shared": 0.0,
+      "tex upload: staging flush": 0.1624,
+      "materials+tex upload": 0.5684,
+      "scene upload": 0.084,
+      "pipeline creation": 0.0115,
+      "cull setup": 0.0084
+     },
+     "frames": 5225,
+     "cpu_ms": {
+      "mean": 1.531,
+      "p50": 1.4224,
+      "p99": 3.4037
+     },
+     "gpu_ms": {
+      "mean": 1.3633,
+      "p50": 1.2298,
+      "p99": 2.6563
+     },
+     "vram_mb": 1622.6,
+     "peak_ws_mb": 1915.4,
+     "peak_commit_mb": 3553.4,
+     "ws_mb": 647.9,
+     "info": {
+      "meshes": 920,
+      "draws": 1158,
+      "tris": 1994397,
+      "instanced_tris": 42617559,
+      "instances": 38434,
+      "textures": 726,
+      "materials": 242
+     },
+     "kind": "track"
+    },
+    {
+     "name": "laguna_seca",
+     "size": "3840x2160",
+     "seconds": 8,
+     "load_s": 2.6612,
+     "phases_s": {
+      "archive index": 0.0807,
+      "vfs index": 0.1253,
+      "track: setup": 0.0056,
+      "pkg io": 1.5907,
+      "pkg dexor": 0.0808,
+      "file read": 0.3303,
+      "mesh decode": 0.0332,
+      "track: scenes + static meshes": 0.2288,
+      "track: instanced meshes": 0.1232,
+      "texture decode": 0.6994,
+      "texture prefetch (wall)": 0.3207,
+      "track: materials + textures": 1.1401,
+      "content load (wall)": 1.7932,
+      "device init": 0.3122,
+      "tex upload: unique": 0.2606,
+      "tex upload: shared": 0.0,
+      "tex upload: staging flush": 0.1443,
+      "materials+tex upload": 0.318,
+      "scene upload": 0.0867,
+      "pipeline creation": 0.0108,
+      "cull setup": 0.0079
+     },
+     "frames": 4904,
+     "cpu_ms": {
+      "mean": 1.6313,
+      "p50": 1.5663,
+      "p99": 3.0483
+     },
+     "gpu_ms": {
+      "mean": 1.4454,
+      "p50": 1.3609,
+      "p99": 2.8324
+     },
+     "vram_mb": 1622.6,
+     "peak_ws_mb": 2043.3,
+     "peak_commit_mb": 3557.3,
+     "ws_mb": 744.6,
+     "info": {
+      "meshes": 920,
+      "draws": 1158,
+      "tris": 1994397,
+      "instanced_tris": 42617559,
+      "instances": 38434,
+      "textures": 726,
+      "materials": 242
+     },
+     "kind": "track"
+    },
+    {
+     "name": "laguna_seca",
+     "size": "3840x2160",
+     "seconds": 8,
+     "load_s": 2.7315,
+     "phases_s": {
+      "archive index": 0.07,
+      "vfs index": 0.1118,
+      "track: setup": 0.0047,
+      "pkg io": 1.5641,
+      "pkg dexor": 0.0676,
+      "file read": 0.2975,
+      "mesh decode": 0.0245,
+      "track: scenes + static meshes": 0.1917,
+      "track: instanced meshes": 0.0967,
+      "texture decode": 0.6859,
+      "texture prefetch (wall)": 0.3183,
+      "track: materials + textures": 1.2054,
+      "content load (wall)": 1.7552,
+      "device init": 0.2839,
+      "tex upload: unique": 0.4059,
+      "tex upload: shared": 0.0,
+      "tex upload: staging flush": 0.3085,
+      "materials+tex upload": 0.4579,
+      "scene upload": 0.0825,
+      "pipeline creation": 0.0112,
+      "cull setup": 0.0084
+     },
+     "frames": 5363,
+     "cpu_ms": {
+      "mean": 1.4918,
+      "p50": 1.3947,
+      "p99": 2.8829
+     },
+     "gpu_ms": {
+      "mean": 1.3971,
+      "p50": 1.3097,
+      "p99": 2.7146
+     },
+     "vram_mb": 1622.6,
+     "peak_ws_mb": 2043.4,
+     "peak_commit_mb": 3553.3,
+     "ws_mb": 743.4,
+     "info": {
+      "meshes": 920,
+      "draws": 1158,
+      "tris": 1994397,
+      "instanced_tris": 42617559,
+      "instances": 38434,
+      "textures": 726,
+      "materials": 242
+     },
+     "kind": "track"
+    }
+   ]
+  }
+ }
+}

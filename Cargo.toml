@@ -1,0 +1,41 @@
+[package]
+name = "evoview"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+edition = "2021"
+description = "A fast Assetto Corsa EVO car and track viewer (Vulkan via wgpu)"
+readme = "README.md"
+# ⚠ Set before any public release. Ships no game content; see README.
+# license = "MIT"
+publish = false
+
+[dependencies]
+# wgpu targets Vulkan on Windows and compiles WGSL in-process, so there is no
+# Vulkan SDK or glslc to install.
+wgpu = "22"
+winit = "0.29"
+pollster = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# offscreen screenshots, so the viewer can be checked without a human at the keyboard
+png = "0.17"
+# The game's own FMOD is loaded at runtime from the install directory, so
+# nothing of FMOD's is redistributed with the viewer.
+libloading = "0.8"
+# dash screens: the car's own TTF/OTF fonts, rasterised to a glyph atlas
+ab_glyph = "0.2"
+# CPU BC6H/BC7 decode, to pack the side-window rain streak maps (rain.rs)
+texture2ddecoder = "0.1.2"
+# DLSS (dlss.rs): the raw Vulkan handles under wgpu-hal (same ash as wgpu-hal 22)
+ash = "0.38"
+
+# Debug builds of a renderer are painfully slow; optimise dependencies even in
+# dev so the viewer is usable while iterating.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = true
+codegen-units = 1

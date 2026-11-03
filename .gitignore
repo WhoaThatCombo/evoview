@@ -1,0 +1,11 @@
+target/
+*.png
+shots/
+verify_out*/
+cars/
+*.evocar
+assets/
+__pycache__/
+*.pyc
+*.bak
+.mingw_bin
