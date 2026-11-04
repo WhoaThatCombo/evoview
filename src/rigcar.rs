@@ -227,6 +227,8 @@ pub struct RigCar {
     ode: Option<Box<crate::rigode::OdeRig>>,
     /// EVOVIEW_RIG_ODE=links: the wishbones as ODE rods (rigwish.rs)
     links: Option<Box<crate::rigwish::Links>>,
+    /// the four tyres' road forces (world, summed) in the last substep
+    f_tyres: Vec3,
 }
 
 fn rate_curve(c: &[(f32, f32)], x: f32) -> f32 {
@@ -431,13 +433,14 @@ impl RigCar {
             ode: crate::rigode::OdeRig::enabled().then(|| Box::new(crate::rigode::OdeRig::new(mass, inertia, m_unsprung, &centres, cg_local))),
             links: crate::rigwish::Links::enabled()
                 .then(|| {
-                    let l = crate::rigwish::Links::new(mass, inertia, m_unsprung, [&p.geo[0], &p.geo[1]], &centres, cg_local, x_static, mr);
+                    let l = crate::rigwish::Links::new(mass, inertia, m_unsprung, [&p.geo[0], &p.geo[1]], &centres, cg_local, x_static, mr, radius);
                     if l.is_none() {
                         println!("RIG links: not double wishbones front and rear ({:?} / {:?}): the explicit integrator", p.geo[0].kind, p.geo[1].kind);
                     }
                     l.map(Box::new)
                 })
                 .flatten(),
+            f_tyres: Vec3::ZERO,
         }
     }
 
@@ -1161,6 +1164,7 @@ impl RigCar {
             t_drive[k] = t_axle * shares[k];
         }
         let mut mz_front = 0.0;
+        self.f_tyres = Vec3::ZERO;
         for k in 0..4 {
             let ax = k / 2;
             let kn = kin.as_ref().map(|kk| kk[k]);
@@ -1343,6 +1347,7 @@ impl RigCar {
                         th.wear(d, fz, v_slip, vc.length(), alpha, o0.nd_slip, camber, dt);
                     }
                     let f = n * fz + wf * o0.fx + wl * o0.fy;
+                    self.f_tyres += wf * o0.fx + wl * o0.fy;
                     if ax == 0 {
                         // what the rack feels: the tyre's whole force about the
                         // hub's steering axis (caster trail, scrub, kingpin
@@ -2265,4 +2270,80 @@ fn pedal_dips() -> bool {
 /// sequential box does (the old evoview behaviour).
 fn dct_neutral() -> bool {
     std::env::var_os("EVOVIEW_DCT_NEUTRAL").is_some()
+}
+
+/// `EVOVIEW_RIG_STEADY=1 EVOVIEW_RIG_PAD=1 --drive-test 1`: steady corners
+/// on the flat pad without the line driver - a rolling start, the road
+/// wheels ramped to a fixed angle, speed held by throttle; the last 2 s
+/// averaged per axle, then a full-throttle step (power oversteer).
+pub fn steady_test(rc: &mut RigCar) {
+    let g = flat_pad();
+    rc.auto_box = true;
+    let mut acc = 0.0;
+    for (kmh, deg) in [(60.0f32, 4.0f32), (80.0, 3.0), (80.0, 5.0), (100.0, 2.5)] {
+        rc.place(Vec3::new(0.0, 0.0, -1800.0), 0.0);
+        rc.roll(kmh / 3.6);
+        let n = (10.0 / DT) as usize;
+        let mut sum = [0.0f64; 21];
+        let mut cnt = 0.0f64;
+        let mut i_err = 0.0f32;
+        for i in 0..n {
+            let t = i as f32 * DT;
+            let err = kmh / 3.6 - rc.speed();
+            i_err = (i_err + err * DT).clamp(-2.0, 2.0);
+            let thr = (0.3 + err * 0.4 + i_err * 0.3).clamp(0.0, 1.0);
+            let st = deg.to_radians() * (t / 2.0).min(1.0);
+            let c = Controls { throttle: thr, steer: st / rc.max_steer.max(1e-3), analog: true, ..Default::default() };
+            rc.step(&c, DT, &g, &mut acc);
+            if t >= 8.0 {
+                let c4 = &rc.c;
+                let v = rc.v;
+                let vals = [
+                    rc.speed() as f64,
+                    rc.w.dot(rc.up()) as f64,
+                    (rc.speed() * rc.w.dot(rc.up()) / G) as f64,
+                    v.dot(rc.left()).atan2(rc.speed()).to_degrees() as f64,
+                    ((c4[0].alpha + c4[1].alpha) * 0.5).to_degrees() as f64,
+                    ((c4[2].alpha + c4[3].alpha) * 0.5).to_degrees() as f64,
+                    (c4[0].fy + c4[1].fy) as f64,
+                    (c4[2].fy + c4[3].fy) as f64,
+                    c4[0].fz as f64,
+                    c4[1].fz as f64,
+                    c4[2].fz as f64,
+                    c4[3].fz as f64,
+                    thr as f64,
+                    (c4[2].fx + c4[3].fx) as f64,
+                    rc.left().y.asin().to_degrees() as f64,
+                    c4[0].x as f64,
+                    c4[1].x as f64,
+                    c4[2].x as f64,
+                    c4[3].x as f64,
+                    (c4[0].fx + c4[1].fx) as f64,
+                    // the tyres' forces along the car's travel (drag < 0)
+                    {
+                        rc.f_tyres.dot(rc.v.normalize_or_zero()) as f64
+                    },
+                ];
+                for (s, x) in sum.iter_mut().zip(vals) {
+                    *s += x;
+                }
+                cnt += 1.0;
+            }
+        }
+        let a: Vec<f64> = sum.iter().map(|s| s / cnt).collect();
+        println!("STEADY {kmh:.0} km/h road wheels {deg:.1} deg: v {:.1} km/h r {:+.3} ay {:.2} g beta {:+.2} | alpha F {:+.2} R {:+.2} deg | Fy F {:.0} R {:.0} | Fz FR {:.0} FL {:.0} RR {:.0} RL {:.0} | thr {:.2} Fx R {:.0} | roll {:+.2} deg x {:+.3} {:+.3} {:+.3} {:+.3} | Fx F {:.0} along-path {:.0}",
+            a[0] * 3.6, a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15], a[16], a[17], a[18], a[19], a[20]);
+        // full throttle for 1.5 s from there
+        let mut peak = (0.0f32, 0.0f32, 0.0f32);
+        for _ in 0..(1.5 / DT) as usize {
+            let c = Controls { throttle: 1.0, steer: deg.to_radians() / rc.max_steer.max(1e-3), analog: true, ..Default::default() };
+            rc.step(&c, DT, &g, &mut acc);
+            let ar = ((rc.c[2].alpha + rc.c[3].alpha) * 0.5).to_degrees();
+            if ar.abs() > peak.0.abs() {
+                peak = (ar, ((rc.c[0].alpha + rc.c[1].alpha) * 0.5).to_degrees(), rc.w.dot(rc.up()));
+            }
+        }
+        println!("STEADY   + full throttle 1.5 s: rear alpha peak {:+.1} deg (front {:+.1}, r {:+.2}), end beta {:+.1} deg, gear {}",
+            peak.0, peak.1, peak.2, rc.v.dot(rc.left()).atan2(rc.speed()).to_degrees(), rc.gear);
+    }
 }

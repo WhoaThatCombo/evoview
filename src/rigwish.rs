@@ -93,7 +93,7 @@ impl Links {
 
     /// None unless both axles are double wishbones with tie rods.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(mass: f32, inertia: Vec3, m_unsprung: [f32; 2], geo: [&Geometry; 2], anchor: &[Vec3; 4], cg_local: Vec3, x_static: [f32; 4], mr: [f32; 2]) -> Option<Links> {
+    pub fn new(mass: f32, inertia: Vec3, m_unsprung: [f32; 2], geo: [&Geometry; 2], anchor: &[Vec3; 4], cg_local: Vec3, x_static: [f32; 4], mr: [f32; 2], radius: [f32; 2]) -> Option<Links> {
         for g in geo {
             if g.kind != SuspKind::DoubleWishbone || g.low.is_none() || g.up.is_none() || g.steer.is_none() {
                 return None;
@@ -160,6 +160,11 @@ impl Links {
             };
             Link { hub, tie, href, tie_body: p6, rack_per_rad, ball_up: mir(ub), ball_low: mir(lb), spring, x_static: x_static[k], mr: mr[k / 2].max(1e-3) }
         });
+        if std::env::var_os("EVOVIEW_RIG_LINKLOG").is_some() {
+            for ax in 0..2 {
+                println!("LINK geometry {}: roll centre {:.3} m over the ground, instant centre {:?}", ["front", "rear"][ax], roll_centre(geo[ax], anchor[ax * 2] - cg_local, radius[ax]).0, roll_centre(geo[ax], anchor[ax * 2] - cg_local, radius[ax]).1);
+            }
+        }
         Some(Links { w, body, link, last: (Vec3::ZERO, Quat::IDENTITY, Vec3::ZERO, Vec3::ZERO) })
     }
 
@@ -285,4 +290,26 @@ impl Links {
         self.last = self.get(self.body);
         self.last
     }
+}
+
+/// Front-view roll centre of the right-hand (-x) corner at design: the arms
+/// projected on x/y, their instant centre, the line from the contact patch
+/// through it crossing the car's centre line. (height over the ground,
+/// instant centre in the CG frame)
+pub fn roll_centre(g: &Geometry, href: Vec3, radius: f32) -> (f32, glam::Vec2) {
+    let (Some((u0, u1, ub)), Some((l0, l1, lb))) = (g.up, g.low) else { return (f32::NAN, glam::Vec2::NAN) };
+    let p = |v: Vec3| glam::Vec2::new(v.x + href.x, v.y + href.y);
+    let (ua, ubp) = (p(0.5 * (u0 + u1)), p(ub));
+    let (la, lbp) = (p(0.5 * (l0 + l1)), p(lb));
+    // intersect lines ua..ubp and la..lbp
+    let (d1, d2) = (ubp - ua, lbp - la);
+    let den = d1.x * d2.y - d1.y * d2.x;
+    let ic = if den.abs() < 1e-9 { glam::Vec2::new(f32::INFINITY, f32::INFINITY) } else {
+        let t = ((la.x - ua.x) * d2.y - (la.y - ua.y) * d2.x) / den;
+        ua + d1 * t
+    };
+    let cp = glam::Vec2::new(href.x, href.y - radius);
+    let s = (0.0 - cp.x) / (ic.x - cp.x);
+    let y = cp.y + (ic.y - cp.y) * s;
+    (y - cp.y, ic)
 }
