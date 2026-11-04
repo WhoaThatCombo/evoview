@@ -156,8 +156,15 @@ impl Ground {
                 let f = s.rsplit(['/', '\\']).next().unwrap_or("").to_ascii_lowercase();
                 f.starts_with("dist") || f.contains("-dist") || f.contains("_dist")
             });
+            // ... and every ColliderCategoryObject surface (category 3:
+            // poly, cones, plastic poles and cylinders, mobile barriers,
+            // distance markers - things a car knocks over): a polystyrene
+            // arrow on Fuji's hairpin apex stopped the M4 dead at 65 km/h
+            // every lap. EVOVIEW_OBJECT_WALLS=1: walls again.
+            let object_walls = std::env::var_os("EVOVIEW_OBJECT_WALLS").is_some();
             let drop = board || c.wall_surf.get(wi).map_or(false, |&s| c.surfaces.get(s as usize).map_or(false, |n| {
                 (n.is_empty() && !untagged_walls) || n == "distance_markers"
+                    || (!object_walls && def(n).map_or(false, |d| d.category == 3))
             }));
             if let Some((x, z, r)) = dump {
                 let m = ((w[0] + w[2]) * 0.5 - x).hypot((w[1] + w[3]) * 0.5 - z);
@@ -1485,6 +1492,8 @@ pub struct LineDriver {
     pub offset_target: f32,
     /// a speed cap, m/s (a car ahead, the rolling start); INFINITY = none
     pub vcap: f32,
+    /// the line has been moved off the walls beside it (clear_walls)
+    cleared: bool,
 }
 
 impl LineDriver {
@@ -1494,7 +1503,107 @@ impl LineDriver {
             (None, None) => line,
             (m, w) => kerb_attack(line, m.unwrap_or(0.0), w.unwrap_or(0.0)),
         };
-        LineDriver { line, i: 0, stuck: 0.0, backing: 0.0, back_steer: 0.0, back_from: Vec3::ZERO, rejoin: 0.0, pace: 1.0, brake_k: 1.0, offset: 0.0, offset_target: 0.0, vcap: f32::INFINITY }
+        LineDriver { line, i: 0, stuck: 0.0, backing: 0.0, back_steer: 0.0, back_from: Vec3::ZERO, rejoin: 0.0, pace: 1.0, brake_k: 1.0, offset: 0.0, offset_target: 0.0, vcap: f32::INFINITY, cleared: false }
+    }
+
+    /// The racing line moved off solid things beside it: the game's ideal
+    /// line uses every centimetre of a kerb, and a car a hand's width off it
+    /// (the driver tracks within ~1 m) put its flank into whatever stands
+    /// there - a bush at Watkins Glen's last kerb at 144 km/h. Each point
+    /// with a wall closer sideways than half a car plus margin (`need`)
+    /// moves away (at most 1.2 m), spread smoothly along the line.
+    /// EVOVIEW_LINE_CLEAR=0: the line as shipped.
+    pub fn clear_walls(&mut self, ground: &Ground) {
+        if std::env::var("EVOVIEW_LINE_CLEAR").map_or(false, |v| v == "0") {
+            return;
+        }
+        let n = self.line.len();
+        if n < 3 {
+            return;
+        }
+        let need = 1.6f32;
+        let mut push = vec![0.0f32; n];
+        let mut hits = Vec::new();
+        for i in 0..n {
+            let c = self.line[i];
+            let left = self.line_left(i);
+            let tan = Vec3::new(-left.z, 0.0, left.x);
+            ground.walls_near(c, need + 0.5, c.y + 0.15, c.y + 1.2, &mut hits);
+            let (mut l, mut r) = (0.0f32, 0.0f32);
+            for &(q, _, _) in hits.iter() {
+                let d = Vec3::new(q.x - c.x, 0.0, q.z - c.z);
+                if d.dot(tan).abs() > 1.5 {
+                    continue;
+                }
+                let lat = d.dot(left);
+                if lat >= 0.0 && lat < need {
+                    l = l.max(need - lat);
+                } else if lat < 0.0 && -lat < need {
+                    r = r.max(need + lat);
+                }
+            }
+            // walls both sides (a narrow gap): leave it
+            if l > 0.0 && r > 0.0 {
+                continue;
+            }
+            push[i] = (r - l).clamp(-1.2, 1.2);
+        }
+        self.apply_push(&push, "off walls beside them");
+    }
+
+    /// Sideways moves (+ = left, per line point) applied smoothly: the
+    /// strongest within +-12 points, then a +-12 mean.
+    fn apply_push(&mut self, push: &[f32], why: &str) {
+        let n = self.line.len();
+        let w = 12usize;
+        let wide: Vec<f32> = (0..n).map(|i| (0..=2 * w).map(|k| push[(i + n + k - w) % n]).fold(0.0f32, |a, b| if b.abs() > a.abs() { b } else { a })).collect();
+        let smooth: Vec<f32> = (0..n).map(|i| (0..=2 * w).map(|k| wide[(i + n + k - w) % n]).sum::<f32>() / (2 * w + 1) as f32).collect();
+        let lefts: Vec<Vec3> = (0..n).map(|i| self.line_left(i)).collect();
+        let mut moved = 0;
+        let mut most = 0.0f32;
+        for i in 0..n {
+            if smooth[i].abs() > 0.02 {
+                moved += 1;
+                most = most.max(smooth[i].abs());
+                self.line[i] += lefts[i] * smooth[i];
+            }
+        }
+        if moved > 0 {
+            println!("racing line: {moved} of {n} points moved {why} (up to {most:.2} m)");
+        }
+    }
+
+    /// The racing line kept inside the track limits: the ideal line runs the
+    /// whole exit kerb (Watkins Glen's T1: its centre 1.9 m past the limit),
+    /// and a driver ~1 m off it put all four wheels over and lost the lap
+    /// every time. A lap goes when every wheel is 1.2 m past a limit; the
+    /// line's centre may sit 0.8 m past one. EVOVIEW_LINE_CLEAR=0: as shipped.
+    pub fn keep_inside(&mut self, tt: &crate::laps::TimingTrack) {
+        if std::env::var("EVOVIEW_LINE_CLEAR").map_or(false, |v| v == "0") {
+            return;
+        }
+        let Some((l, sl, r, sr)) = tt.limits.as_ref() else { return };
+        let n = self.line.len();
+        if n < 3 {
+            return;
+        }
+        let allow = 0.8f32;
+        let (mut hl, mut hr) = (None, None);
+        let mut push = vec![0.0f32; n];
+        for i in 0..n {
+            let c = self.line[i];
+            let pl = l.project(c, hl);
+            let pr = r.project(c, hr);
+            hl = Some(pl.seg);
+            hr = Some(pr.seg);
+            let (el, er) = (pl.lat * sl, pr.lat * sr);
+            if el > allow {
+                push[i] = -(el - allow).min(2.0);
+            } else if er > allow {
+                push[i] = (er - allow).min(2.0);
+            }
+        }
+        self.apply_push(&push, "inside the track limits");
     }
 
     /// The line's left (unit, horizontal) at point `j`.
@@ -1537,6 +1646,10 @@ impl LineDriver {
 
     /// `dt` is the time since the last call (for the stuck / back-out timers).
     pub fn controls(&mut self, td: &TrackDrive, dt: f32) -> Controls {
+        if !self.cleared {
+            self.cleared = true;
+            self.clear_walls(&td.ground);
+        }
         Controls { auto_box: true, ..self.controls_line(td, dt) }
     }
 
@@ -1872,6 +1985,22 @@ pub fn test_run(td: &mut TrackDrive, secs: f32, mut driver: Option<LineDriver>, 
                 crate::rigcar::pad_test(rc);
             }
             return;
+        }
+    }
+    // the line inside the track limits the lap timer judges by
+    if let (Some(d), Some(l)) = (driver.as_mut(), laps.as_ref()) {
+        d.keep_inside(&l.track);
+    }
+    // EVOVIEW_PROBE_AT=x,z,dx,dz: the ground along a line from (x, z), every
+    // 0.5 m for 10 m (surface, height) - what is under a wall hit
+    if let Some(v) = std::env::var("EVOVIEW_PROBE_AT").ok().map(|s| s.split(',').filter_map(|t| t.trim().parse::<f32>().ok()).collect::<Vec<_>>()).filter(|v| v.len() == 4) {
+        let d = Vec3::new(v[2], 0.0, v[3]).normalize_or_zero();
+        for i in 0..=20 {
+            let p = Vec3::new(v[0], 0.0, v[1]) + d * (i as f32 * 0.5);
+            match td.ground.probe(p.x, p.z, 1e4) {
+                Some(h) => println!("PROBE {:4.1} m ({:.1}, {:.1}): y {:.2} n.y {:.2} {}", i as f32 * 0.5, p.x, p.z, h.y, h.n.y, td.ground.surf_name(h.surf)),
+                None => println!("PROBE {:4.1} m ({:.1}, {:.1}): nothing", i as f32 * 0.5, p.x, p.z),
+            }
         }
     }
     if std::env::var_os("EVOVIEW_DRIVE_PROBE").is_some() {

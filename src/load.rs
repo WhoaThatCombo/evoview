@@ -3186,6 +3186,8 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
     let mut physics_skip = 0usize;
     let mut chosen_layout: Option<String> = None;
     let mut layout_set: Vec<String> = Vec::new();
+    // the track's layout names (layout_<x>.scene containers)
+    let mut layout_names: Vec<String> = Vec::new();
     while let Some((s, place_xf)) = queue.pop() {
         let key = vfs.find(&s, None).unwrap_or(s.clone());
         let low = key.to_lowercase();
@@ -3209,6 +3211,13 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
         }
         let g = parse_scene_graph(&bytes, place_xf);
         physics_skip += g.physics_skip;
+        for (c, _) in &g.containers {
+            if let Some(k) = layout_key(c) {
+                if !layout_names.contains(&k) {
+                    layout_names.push(k);
+                }
+            }
+        }
         if chosen_layout.is_none() {
             chosen_layout = pick_race_layout(&g.containers);
             if let Some(ref lay) = chosen_layout {
@@ -3264,6 +3273,22 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
             }
             if !layout_set.is_empty() && variant_switched_off(&c, &layout_set) {
                 continue;
+            }
+            // another layout's own scenery: the Nordschleife race layout's
+            // table leaves out nords_exit_touristenfahrten, whose wall closes
+            // the race line at the Touristenfahrten exit (the M4 hit it at
+            // 255 km/h); always-on containers named for another layout of
+            // this track stay out unless the layout's table lists them
+            if !layout_set.is_empty() && !in_set {
+                let n = scene_basename(&c);
+                let ours = chosen_layout.as_deref().unwrap_or("");
+                // by the other layout's own words (5+ letters, not in ours):
+                // nordschleife_touristenfahrten -> touristenfahrten
+                let theirs = layout_names.iter().filter(|l| l.as_str() != ours).flat_map(|l| l.split('_')).find(|w| w.len() >= 5 && !ours.split('_').any(|o| o == *w) && n.contains(*w));
+                if let Some(w) = theirs {
+                    println!("layout {ours}: {c} left out (another layout's: {w}; not in the table)");
+                    continue;
+                }
             }
             if on_demand && !in_set && !world_bit && !container_for_layout(&c, chosen_layout.as_deref()) {
                 continue;

@@ -1321,8 +1321,13 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
     }
     if let Some(secs) = flag("--drive-test").and_then(|v| v.parse::<f32>().ok()) {
         // follow the racing line unless --drive-script weave is asked for
-        let driver = (flag("--drive-script").as_deref() != Some("weave"))
-            .then(|| trackdrive::LineDriver::new(trackdrive::racing_line(pkg, track)));
+        // (a track without a racing line - interns - gets the weave)
+        let line = trackdrive::racing_line(pkg, track);
+        if line.len() < 3 {
+            println!("drive-test: {track} has no racing line; the scripted weave instead");
+        }
+        let driver = (flag("--drive-script").as_deref() != Some("weave") && line.len() >= 3)
+            .then(|| trackdrive::LineDriver::new(line));
         // --wav out.wav: the racing-line drive through the car's sound,
         // rendered offline with a chase-camera listener
         if let Some(wav) = flag("--wav") {
@@ -1433,7 +1438,7 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
             focus: Some(td.pos),
             pkg: Some(pkg.clone()),
             track_drive: Some(td),
-            line_driver: std::env::var_os("EVOVIEW_DRIVE_LINE").map(|_| trackdrive::LineDriver::new(trackdrive::racing_line(pkg, track))),
+            line_driver: std::env::var_os("EVOVIEW_DRIVE_LINE").map(|_| trackdrive::racing_line(pkg, track)).filter(|l| l.len() >= 3).map(trackdrive::LineDriver::new),
             tv: Some(cams::TvDirector::new(cams::load_tv(pkg, track))),
             car_id: Some(car_id.to_string()),
             pits,
