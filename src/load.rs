@@ -612,17 +612,23 @@ pub fn track_mip_skip(w: u32, h: u32) -> u32 {
             return n;
         }
     }
-    // Only the genuinely huge maps give up their top level. A 2K map is 1/4
-    // the memory of a 4K one and is most of what a track's surfaces actually
-    // use, so full resolution there costs little and is the whole difference
-    // in how sharp the render looks.
+    // Only the genuinely huge maps can give up their top level, and only
+    // past a budget: the first EVOVIEW_TEX_4K_BUDGET (64, ~1 GB) keep it.
+    // ⚠ Every 4K map used to drop it, on every track, to keep the Ring
+    // (hundreds of them) in memory - so Monza's asphalt and grass sheets,
+    // ~a dozen maps and ~190 MB, rendered at half resolution for nothing.
     let big = w.max(h);
     if big >= 4096 {
-        1
+        let budget = std::env::var("EVOVIEW_TEX_4K_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(64u32);
+        let n = TRACK_4K_SEEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n < budget { 0 } else { 1 }
     } else {
         0
     }
 }
+
+/// 4K track maps decided so far for the track being loaded (track_mip_skip).
+pub static TRACK_4K_SEEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// `skip_mips` drops the largest levels (1 = start at half-res).
 fn read_texture_lod(hdr: &[u8], raw: &[u8], skip_mips: u32) -> Option<Tex> {
@@ -1978,6 +1984,7 @@ pub fn load_track_from_package_opts(
     base: Option<&Path>,
     world: Option<bool>,
 ) -> Result<Loaded, String> {
+    TRACK_4K_SEEN.store(0, std::sync::atomic::Ordering::Relaxed);
     let pkg = crate::pkg::Package::open(pkg_path)?;
     let want = folder.to_lowercase();
     if !pkg.tracks().iter().any(|t| t.eq_ignore_ascii_case(&want))
