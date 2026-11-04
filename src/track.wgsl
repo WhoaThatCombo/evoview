@@ -776,7 +776,14 @@ fn haze(p: vec3<f32>) -> vec4<f32> {
     // direction, so distant hills melt into the sky rather than into grey
     let hd = normalize(vec3<f32>(dir.x, max(dir.y, 0.0) * 0.35 + 0.04, dir.z));
     // the haze itself is whiter than the sky behind it (Mie, not Rayleigh)
-    let ins = mix(sky_radiance(hd), vec3<f32>(0.78, 0.80, 0.82) * frame.haze.w, 0.35);
+    var ins = mix(sky_radiance(hd), vec3<f32>(0.78, 0.80, 0.82) * frame.haze.w, 0.35);
+    if (frame.atm.w > 0.5) {
+        // the physical sky's own horizon, a little whiter (aerosol): warm
+        // toward a low sun, blue away from it, dim at dusk - the constant
+        // grey stayed noon-grey at every hour
+        let hz = sky_radiance(hd);
+        ins = mix(hz, vec3<f32>(dot(hz, vec3<f32>(0.2126, 0.7152, 0.0722))) * 1.12, 0.3);
+    }
     return vec4<f32>(ins, t);
 }
 
@@ -1698,7 +1705,13 @@ fn shade(in: VsOut, front: bool) -> vec4<f32> {
         let rk = clamp(r * 1.2, 0.0, 1.0);
         var env_c = sky_avg;
         if (rk < 0.98) {
-            env_c = mix(sky_radiance(rd), sky_avg, rk);
+            var sky_d = sky_radiance(rd);
+            if (frame.atm.w > 0.5) {
+                // glass, wet and polished surfaces mirror the cloud deck too
+                let cl = textureSampleLevel(t_pano_cloud, s_cloud, pano_uv(rd, f32(textureDimensions(t_pano_cloud).y)), 0.0);
+                sky_d = sky_d * cl.a + cl.rgb;
+            }
+            env_c = mix(sky_d, sky_avg, rk);
         }
         // the sun's shadow blocks the sun, hardly the sky: shaded asphalt still
         // shows the sky's sheen at a grazing view
