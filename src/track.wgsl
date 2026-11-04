@@ -80,6 +80,16 @@ struct Frame {
     // x texture LOD bias: TAA's (taa.rs mip_bias) for the main view, 0 for
     // the mirrors, the probe and the rear camera, which have no TAA
     lod: vec4<f32>,
+    // physical sky (track.rs FrameUniform.atm): xyz true sun direction, w on
+    atm: vec4<f32>,
+    // x cloud panorama history blend, y radiance scale, z panorama march
+    // steps, w falling rain
+    atm2: vec4<f32>,
+    // cloud light: x sun gain, y ambient gain, z extinction scale toward
+    // the sun, w powder strength
+    atm3: vec4<f32>,
+    // x the deck's extinction as seen over its shadow's
+    atm4: vec4<f32>,
 };
 
 struct Lamp {
@@ -156,6 +166,10 @@ struct TrackMat {
 @group(0) @binding(14) var<storage, read> track_bones: array<mat4x4<f32>>;
 // the clouds' shadow on the ground around the eye (fs_cloud_map)
 @group(0) @binding(15) var t_cmap: texture_2d<f32>;
+// the sky panorama (fs_sky_pano, read copy): clear sky radiance, and the
+// cloud deck as (in-scattered rgb, transmittance)
+@group(0) @binding(17) var t_pano_sky: texture_2d<f32>;
+@group(0) @binding(18) var t_pano_cloud: texture_2d<f32>;
 // the dry line cars leave in the wet (rain.rs dry_map): per 1 m cell, how
 // much drier than the rest of the track, wrapped at 256 cells
 @group(0) @binding(16) var t_dry: texture_2d<f32>;
@@ -521,7 +535,7 @@ fn hg(mu: f32, g: f32) -> f32 {
 /// Clear daytime sky radiance along `d`, without the sun disc. Deliberately
 /// cheap: a Rayleigh-ish zenith-to-horizon gradient whose horizon whitens with
 /// the haze, plus a Mie glow around the sun. Scaled by haze.w.
-fn sky_radiance(d: vec3<f32>) -> vec3<f32> {
+fn sky_radiance_old(d: vec3<f32>) -> vec3<f32> {
     let sun = frame.sun.xyz;
     let y = clamp(d.y, -1.0, 1.0);
     let up = max(y, 0.0);
@@ -544,6 +558,197 @@ fn sky_radiance(d: vec3<f32>) -> vec3<f32> {
     let low = 1.0 - clamp(sun.y * 2.5, 0.0, 1.0);
     c *= mix(vec3<f32>(1.0), vec3<f32>(1.08, 0.96, 0.82), low * (1.0 - up));
     return c * frame.haze.w;
+}
+
+// --------------------------------------------------- physical sky ----
+//
+// Single scattering through a spherical Rayleigh + Mie + ozone atmosphere
+// (Hillaire 2020's Earth constants), sun transmittance marched per sample,
+// and a flat multiple-scattering term (half the local scattering, isotropic)
+// for the twilight blues. Radiance for a sun of illuminance 1, scaled by
+// frame.atm2.y so a 60-degree sun's zenith matches the gradient sky's.
+
+const ATM_R0: f32 = 6360000.0;
+const ATM_R1: f32 = 6460000.0;
+const ATM_RAY: vec3<f32> = vec3<f32>(5.802e-6, 13.558e-6, 33.1e-6);
+const ATM_OZ: vec3<f32> = vec3<f32>(0.650e-6, 1.881e-6, 0.085e-6);
+const ATM_MIE_S: f32 = 3.996e-6;
+const ATM_MIE_E: f32 = 4.40e-6;
+// eye altitude above the planet's surface: the track's own height is not
+// known, and a couple of hundred metres is where most circuits sit
+const ATM_EYE: f32 = 200.0;
+
+fn atm_ext(h: f32) -> vec3<f32> {
+    return ATM_RAY * exp(-h / 8000.0) + vec3<f32>(ATM_MIE_E * exp(-h / 1200.0))
+         + ATM_OZ * max(0.0, 1.0 - abs(h - 25000.0) / 15000.0);
+}
+
+/// (near, far) distances from radius `r`, cosine of the zenith angle `mu`,
+/// to the sphere of radius `rad`; both negative when the ray misses.
+fn atm_hit(r: f32, mu: f32, rad: f32) -> vec2<f32> {
+    let b = r * mu;
+    let c = (r - rad) * (r + rad);
+    let d = b * b - c;
+    if (d < 0.0) {
+        return vec2<f32>(-1.0);
+    }
+    let q = sqrt(d);
+    return vec2<f32>(-b - q, -b + q);
+}
+
+/// Sunlight left at radius `r` for a sun at cosine-zenith `mus`.
+fn atm_sun_tr(r: f32, mus: f32) -> vec3<f32> {
+    if (atm_hit(r, mus, ATM_R0).x > 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let far = atm_hit(r, mus, ATM_R1).y;
+    var od = vec3<f32>(0.0);
+    for (var i = 0; i < 8; i = i + 1) {
+        let f0 = f32(i) / 8.0;
+        let f1 = f32(i + 1) / 8.0;
+        let t = far * (f0 * f0 + f1 * f1) * 0.5;
+        let rr = sqrt(r * r + t * t + 2.0 * r * t * mus);
+        od += atm_ext(rr - ATM_R0) * (far * (f1 * f1 - f0 * f0));
+    }
+    return exp(-od);
+}
+
+/// Sky radiance along `d` for the sun toward `sun` (illuminance 1).
+fn atmosphere(d: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
+    let r0 = ATM_R0 + ATM_EYE;
+    var tmax = atm_hit(r0, d.y, ATM_R1).y;
+    let g = atm_hit(r0, d.y, ATM_R0);
+    if (g.x > 0.0) {
+        tmax = g.x;
+    }
+    let nu = dot(d, sun);
+    let ph_r = 3.0 / (16.0 * PI) * (1.0 + nu * nu);
+    let ph_m = hg(nu, 0.8);
+    var l = vec3<f32>(0.0);
+    var tr = vec3<f32>(1.0);
+    let n = 24;
+    for (var i = 0; i < n; i = i + 1) {
+        let f0 = f32(i) / f32(n);
+        let f1 = f32(i + 1) / f32(n);
+        let t = tmax * (f0 * f0 + f1 * f1) * 0.5;
+        let dt = tmax * (f1 * f1 - f0 * f0);
+        let p = vec3<f32>(0.0, r0, 0.0) + d * t;
+        let rr = length(p);
+        let h = rr - ATM_R0;
+        let sr = ATM_RAY * exp(-h / 8000.0);
+        let sm = ATM_MIE_S * exp(-h / 1200.0);
+        let e = atm_ext(h);
+        let ts = atm_sun_tr(rr, dot(p / rr, sun));
+        let src = ts * (sr * ph_r + vec3<f32>(sm * ph_m) + 0.5 * (sr + vec3<f32>(sm)) / (4.0 * PI));
+        let st = exp(-e * dt);
+        l += tr * src * (vec3<f32>(1.0) - st) / max(e, vec3<f32>(1e-12));
+        tr *= st;
+    }
+    return l;
+}
+
+/// The physical clear sky in evoview's units: the atmosphere for the true
+/// sun, the old night sky (stars glow, moonlight) faded in below the
+/// horizon, and rain's flat grey.
+fn sky_physical(d: vec3<f32>) -> vec3<f32> {
+    let sun = frame.atm.xyz;
+    var c = atmosphere(d, sun) * frame.atm2.y;
+    // the gradient sky still carries the night (moon key, night floor)
+    let night = 1.0 - smoothstep(-0.14, -0.02, sun.y);
+    c += sky_radiance_old(d) * night;
+    let r = frame.atm2.w;
+    if (r > 0.0) {
+        let l = dot(c, vec3<f32>(0.3, 0.59, 0.11));
+        c = mix(c, vec3<f32>(l * 0.85), 0.8 * r) * (1.0 - 0.25 * r);
+    }
+    return c;
+}
+
+const PANO_LO: f32 = -0.1;
+const PANO_SPAN: f32 = 1.6707963;
+
+/// Panorama uv of direction `d` (track.rs SkyPano) in a panorama `hgt`
+/// texels high (kept off the top and bottom rows' outer halves: the
+/// sampler repeats).
+fn pano_uv(d: vec3<f32>, hgt: f32) -> vec2<f32> {
+    let el = asin(clamp(d.y, -1.0, 1.0));
+    let v = sqrt(clamp((el - PANO_LO) / PANO_SPAN, 0.0, 1.0));
+    let u = atan2(d.x, d.z) / (2.0 * PI) + 0.5;
+    return vec2<f32>(u, clamp(1.0 - v, 0.5 / hgt, 1.0 - 0.5 / hgt));
+}
+
+fn pano_dir(uv: vec2<f32>) -> vec3<f32> {
+    let v = 1.0 - uv.y;
+    let el = v * v * PANO_SPAN + PANO_LO;
+    let az = (uv.x - 0.5) * 2.0 * PI;
+    return vec3<f32>(cos(el) * sin(az), sin(el), cos(el) * cos(az));
+}
+
+fn sky_radiance(d: vec3<f32>) -> vec3<f32> {
+    if (frame.atm.w > 0.5) {
+        return textureSampleLevel(t_pano_sky, s_cloud, pano_uv(d, f32(textureDimensions(t_pano_sky).y)), 0.0).rgb;
+    }
+    return sky_radiance_old(d);
+}
+
+/// The cloud panorama at `uv`, Catmull-Rom filtered (five bilinear taps,
+/// the corners dropped): the panorama is coarser than the screen, and
+/// bilinear magnification softens every cloud edge.
+fn pano_cloud_cr(uv: vec2<f32>) -> vec4<f32> {
+    let size = vec2<f32>(textureDimensions(t_pano_cloud));
+    let sp = uv * size;
+    let tc = floor(sp - 0.5) + 0.5;
+    let f = sp - tc;
+    let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    let w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    let w3 = f * f * (-0.5 + 0.5 * f);
+    let w12 = w1 + w2;
+    let lo = 0.5 / size.y;
+    let t0 = vec2<f32>((tc.x - 1.0) / size.x, clamp((tc.y - 1.0) / size.y, lo, 1.0 - lo));
+    let t3 = vec2<f32>((tc.x + 2.0) / size.x, clamp((tc.y + 2.0) / size.y, lo, 1.0 - lo));
+    let t12 = vec2<f32>((tc.x + w2.x / w12.x) / size.x, clamp((tc.y + w2.y / w12.y) / size.y, lo, 1.0 - lo));
+    let r = textureSampleLevel(t_pano_cloud, s_cloud, vec2<f32>(t12.x, t0.y), 0.0) * (w12.x * w0.y)
+          + textureSampleLevel(t_pano_cloud, s_cloud, vec2<f32>(t0.x, t12.y), 0.0) * (w0.x * w12.y)
+          + textureSampleLevel(t_pano_cloud, s_cloud, t12, 0.0) * (w12.x * w12.y)
+          + textureSampleLevel(t_pano_cloud, s_cloud, vec2<f32>(t3.x, t12.y), 0.0) * (w3.x * w12.y)
+          + textureSampleLevel(t_pano_cloud, s_cloud, vec2<f32>(t12.x, t3.y), 0.0) * (w12.x * w3.y);
+    let wsum = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
+    let c = r / wsum;
+    return vec4<f32>(max(c.rgb, vec3<f32>(0.0)), clamp(c.a, 0.0, 1.0));
+}
+
+/// The cloud deck along `d`: the panorama, or marched here without one.
+fn clouds_at(d: vec3<f32>, px: vec2<f32>) -> vec4<f32> {
+    if (frame.atm.w > 0.5) {
+        return pano_cloud_cr(pano_uv(d, f32(textureDimensions(t_pano_cloud).y)));
+    }
+    return clouds(d, px, 0);
+}
+
+/// One texel of the clear-sky panorama.
+@fragment
+fn fs_sky_atm(in: SkyOut) -> @location(0) vec4<f32> {
+    let uv = vec2<f32>(in.ndc.x * 0.5 + 0.5, 0.5 - in.ndc.y * 0.5);
+    return vec4<f32>(sky_physical(pano_dir(uv)), 1.0);
+}
+
+/// One texel of the cloud panorama: the deck marched with this frame's
+/// jitter and averaged into what the texel held. A quarter of the texels a
+/// frame (one of each 2x2), all of them on a fresh start.
+@fragment
+fn fs_sky_pano(in: SkyOut) -> @location(0) vec4<f32> {
+    let q = vec2<u32>(in.clip.xy) & vec2<u32>(1u);
+    let fresh = frame.atm2.x >= 1.0;
+    let prev = textureLoad(t_pano_cloud, vec2<i32>(in.clip.xy), 0);
+    // ⚠ not discard: naga's discard demotes to a helper that still runs
+    // the whole march (2.75 ms instead of ~0.4)
+    if (!fresh && q.x + 2u * q.y != (u32(frame.haze2.w) & 3u)) {
+        return prev;
+    }
+    let uv = vec2<f32>(in.ndc.x * 0.5 + 0.5, 0.5 - in.ndc.y * 0.5);
+    let c = clouds(pano_dir(uv), in.clip.xy * 0.5, i32(frame.atm2.z));
+    return mix(prev, c, frame.atm2.x);
 }
 
 /// Haze between the eye and `p`: (transmittance, inscattered radiance).
@@ -1591,7 +1796,7 @@ fn fs_cloud_map(in: SkyOut) -> @location(0) vec4<f32> {
 }
 
 /// (in-scattered colour, transmittance) of the deck along `d` from the eye.
-fn clouds(d: vec3<f32>, px: vec2<f32>) -> vec4<f32> {
+fn clouds(d: vec3<f32>, px: vec2<f32>, steps_in: i32) -> vec4<f32> {
     if (frame.clouds3.w < 0.5 || frame.clouds.z <= 0.0 || d.y < 0.02) {
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
@@ -1607,7 +1812,10 @@ fn clouds(d: vec3<f32>, px: vec2<f32>) -> vec4<f32> {
     // single-frame captures, where TAA is not there to integrate the dither
     let mode = floor(frame.haze2.y / 1000.0);
     let steps = frame.haze2.y - mode * 1000.0;
-    let n = select(40, i32(steps), steps > 0.5);
+    var n = select(40, i32(steps), steps > 0.5);
+    if (steps_in > 0) {
+        n = steps_in;
+    }
     let dt = (t1 - t0) / f32(n);
     // per-pixel, per-frame start offset: TAA integrates the banding away
     // IGN stepped 5.588 px a frame (Jimenez's temporal IGN). The old
@@ -1629,7 +1837,7 @@ fn clouds(d: vec3<f32>, px: vec2<f32>) -> vec4<f32> {
     let amb_top = sky_radiance(vec3<f32>(0.0, 1.0, 0.0));
     let amb_bot = sky_radiance(normalize(vec3<f32>(1.0, 0.15, 0.0))) * 0.35;
     // extinction per metre at density 1 (from globalDensity)
-    let sigma = frame.clouds.w * 0.16;
+    let sigma = frame.clouds.w * 0.16 * frame.atm4.x;
     var tr = 1.0;
     var col = vec3<f32>(0.0);
     for (var i = 0; i < n; i = i + 1) {
@@ -1660,16 +1868,16 @@ fn clouds(d: vec3<f32>, px: vec2<f32>) -> vec4<f32> {
             var gk = 1.0;
             for (var o = 0; o < 4; o = o + 1) {
                 let ph = mix(hg(mu, -0.15 * gk), hg(mu, 0.7 * gk), 0.6);
-                ms += ak * exp(-od * sigma * bk) * ph;
+                ms += ak * exp(-od * sigma * bk * frame.atm3.z) * ph;
                 ak *= 0.6;
                 bk *= select(0.3, frame.clouds5.w, frame.clouds5.w > 0.0);
                 gk *= 0.5;
             }
-            let powder = mix(1.0, 1.0 - exp(-den * sigma * 300.0), 0.5);
-            let amb = mix(amb_bot, amb_top, h);
+            let powder = mix(1.0, 1.0 - exp(-den * sigma * 300.0), frame.atm3.w);
+            let amb = mix(amb_bot, amb_top, h) * frame.atm3.y;
             let s = den * sigma;
             let step_tr = exp(-s * dt);
-            let lum = sun_rad * ms * powder * 2.5 + amb;
+            let lum = sun_rad * ms * powder * frame.atm3.x + amb;
             // energy-conserving integration (Hillaire)
             col += tr * lum * (1.0 - step_tr);
             tr *= step_tr;
@@ -1685,7 +1893,21 @@ fn clouds(d: vec3<f32>, px: vec2<f32>) -> vec4<f32> {
 
 /// The cirrus deck along `d`: (colour, opacity). A flat layer high above the
 /// cumulus, in the game's own cirrus texture, drifting with the wind.
-fn cirrus(d: vec3<f32>) -> vec4<f32> {
+/// The cirrus layer's base uv along `d` (unbounded where the ray never
+/// reaches it; cirrus() rejects those).
+fn cirrus_uv(d: vec3<f32>) -> vec2<f32> {
+    let e = frame.eye.xyz;
+    let t = (frame.haze.z + frame.clouds4.y - e.y) / max(d.y, 0.01);
+    let p = e + d * t;
+    let wind = frame.clouds3.yz * frame.clouds3.x * 2.5;
+    return (p.xz + wind) / 24000.0;
+}
+
+/// `g`: the screen derivatives of cirrus_uv (xy along x, zw along y),
+/// taken by the caller in uniform control flow. ⚠ It sampled level 0
+/// only: toward the horizon each pixel covers many texels, and the
+/// streaky texture aliased into thin hard lines across the whole sky.
+fn cirrus(d: vec3<f32>, g: vec4<f32>) -> vec4<f32> {
     if (frame.clouds4.z < 0.5 || frame.clouds4.x <= 0.0 || d.y < 0.01) {
         return vec4<f32>(0.0);
     }
@@ -1698,8 +1920,8 @@ fn cirrus(d: vec3<f32>) -> vec4<f32> {
     let wind = frame.clouds3.yz * frame.clouds3.x * 2.5;
     // one 1024 texture over 24 km, a second octave over 7 km
     let uv = (p.xz + wind) / 24000.0;
-    let a = textureSampleLevel(t_cirrus, s_cloud, uv, 0.0);
-    let b = textureSampleLevel(t_cirrus, s_cloud, uv * 3.4 + vec2<f32>(0.37, 0.61), 0.0);
+    let a = textureSampleGrad(t_cirrus, s_cloud, uv, g.xy, g.zw);
+    let b = textureSampleGrad(t_cirrus, s_cloud, uv * 3.4 + vec2<f32>(0.37, 0.61), g.xy * 3.4, g.zw * 3.4);
     let m = clamp(dot(a.rgb, vec3<f32>(0.65, 0.0, 0.35)) * 1.15 - 0.08, 0.0, 1.0)
           * (0.65 + 0.35 * b.r);
     // thin toward the horizon (long path through haze, and foreshortening)
@@ -1726,9 +1948,11 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
     let disc = smoothstep(0.99995, 0.999975, mu);
     c += frame.sun_color.rgb * frame.sun.w * disc * 8.0;
     // cirrus sits above the cumulus: composite it first
-    let ci = cirrus(d);
+    let cuv = cirrus_uv(d);
+    // a level softer than the footprint: wisps, not texel detail
+    let ci = cirrus(d, vec4<f32>(dpdx(cuv), dpdy(cuv)) * 2.0);
     c = mix(c, ci.rgb, ci.a);
-    let cl = clouds(d, in.clip.xy);
+    let cl = clouds_at(d, in.clip.xy);
     c = c * cl.a + cl.rgb;
     return vec4<f32>(tonemap(c * frame.sun_color.w), 1.0);
 }

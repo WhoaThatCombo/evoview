@@ -893,11 +893,93 @@ pub struct FrameUniform {
     pub shadow_hero: [f32; 4],
     /// x texture LOD bias (TAA's in the main view, 0 in the others)
     pub lod: [f32; 4],
+    /// physical sky (sky_pano_pass): xyz the true sun direction (the key
+    /// light is the moon at night), w 1 = on
+    pub atm: [f32; 4],
+    /// x the cloud panorama's history blend (1 = no history), y radiance
+    /// scale, z cloud march steps in the panorama, w falling rain
+    pub atm2: [f32; 4],
+    /// cloud light: x sun gain, y ambient gain, z extinction scale toward
+    /// the sun, w powder strength
+    pub atm3: [f32; 4],
+    /// x the deck's extinction as seen (not as shadow) over the shadow's
+    pub atm4: [f32; 4],
 }
 
 /// The cloud shadow map: texels across, and the ground it spans (m). The
 /// noise itself is ~16 m a texel (8 km over 512), so 16 m texels lose nothing.
 pub const CMAP_DIM: u32 = 512;
+
+/// The sky panorama (track.wgsl pano_uv): azimuth across, elevation down
+/// from the zenith to 0.1 rad below the horizon, rows spaced by the square
+/// root so the horizon band gets the most of them.
+pub struct SkyPano {
+    pub on: bool,
+    /// the cloud panorama's size; the clear sky's is `sky_w` x `sky_h`
+    /// (smooth, so small)
+    w: u32,
+    h: u32,
+    sky_w: u32,
+    sky_h: u32,
+    sky: wgpu::Texture,
+    cloud: wgpu::Texture,
+    sky_hist_tex: wgpu::Texture,
+    cloud_hist_tex: wgpu::Texture,
+    sky_view: wgpu::TextureView,
+    cloud_view: wgpu::TextureView,
+    pub sky_hist: wgpu::TextureView,
+    pub cloud_hist: wgpu::TextureView,
+    sun: std::cell::Cell<glam::Vec3>,
+    frames: std::cell::Cell<u32>,
+}
+
+pub const PANO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+impl SkyPano {
+    fn new(device: &wgpu::Device) -> SkyPano {
+        // EVOVIEW_SKY_MODEL=old: the gradient sky, clouds marched per pixel
+        let on = std::env::var("EVOVIEW_SKY_MODEL").map_or(true, |v| v != "old");
+        let (w, h, sky_w, sky_h) = if on {
+            (env_f32("EVOVIEW_PANO_W", 4096.0) as u32, env_f32("EVOVIEW_PANO_H", 1024.0) as u32,
+             env_f32("EVOVIEW_ATM_W", 512.0) as u32, env_f32("EVOVIEW_ATM_H", 256.0) as u32)
+        } else {
+            (1, 1, 1, 1)
+        };
+        let mk = |label: &str, w: u32, h: u32, usage: wgpu::TextureUsages| device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: PANO_FORMAT,
+            usage,
+            view_formats: &[],
+        });
+        let out = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
+        let hist = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
+        let sky = mk("sky pano", sky_w, sky_h, out);
+        let cloud = mk("cloud pano", w, h, out);
+        let sky_hist_tex = mk("sky pano (read)", sky_w, sky_h, hist);
+        let cloud_hist_tex = mk("cloud pano (read)", w, h, hist);
+        SkyPano {
+            on,
+            w,
+            h,
+            sky_w,
+            sky_h,
+            sky_view: sky.create_view(&Default::default()),
+            cloud_view: cloud.create_view(&Default::default()),
+            sky_hist: sky_hist_tex.create_view(&Default::default()),
+            cloud_hist: cloud_hist_tex.create_view(&Default::default()),
+            sky,
+            cloud,
+            sky_hist_tex,
+            cloud_hist_tex,
+            sun: std::cell::Cell::new(glam::Vec3::ZERO),
+            frames: std::cell::Cell::new(0),
+        }
+    }
+}
 pub const CMAP_SPAN: f32 = 8192.0;
 
 /// Lamps on the GPU: 3 vec4 each (pos+radius, colour*intensity+falloff,
@@ -1438,6 +1520,14 @@ pub struct TrackRender {
     cmap_view: wgpu::TextureView,
     cmap_bg: wgpu::BindGroup,
     cmap_pipe: wgpu::RenderPipeline,
+    /// the sky as a panorama around the eye (sky_pano_pass): the physical
+    /// atmosphere and the cloud deck, marched once per texel instead of once
+    /// per screen pixel, and averaged over frames so the march's jitter
+    /// never reaches the screen
+    pano: SkyPano,
+    pano_bg: wgpu::BindGroup,
+    pano_pipe: wgpu::RenderPipeline,
+    atm_pipe: wgpu::RenderPipeline,
     /// indexed by the scene's material index (the same index Materials uses)
     mats: Vec<Option<TrackMat>>,
     pub sun_dir: glam::Vec3,
@@ -1860,6 +1950,9 @@ impl TrackRender {
                 tex_entry(15, wgpu::TextureViewDimension::D2),
                 // the dry line (rain::dry_map)
                 tex_entry(16, wgpu::TextureViewDimension::D2),
+                // the sky panorama (sky_pano_pass): clear sky, cloud deck
+                tex_entry(17, wgpu::TextureViewDimension::D2),
+                tex_entry(18, wgpu::TextureViewDimension::D2),
                 wgpu::BindGroupLayoutEntry {
                     binding: 11,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -2016,6 +2109,7 @@ impl TrackRender {
             None => (storage("track lamps", &[0u8; 64]), storage("track lamp cells", &[0u8; 8]),
                      storage("track lamp index", &[0u8; 4]), [0.0; 4], [0.0; 2]),
         };
+        let pano = SkyPano::new(device);
         let cmap_view = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("cloud shadow map"),
             size: wgpu::Extent3d { width: CMAP_DIM, height: CMAP_DIM, depth_or_array_layers: 1 },
@@ -2058,6 +2152,8 @@ impl TrackRender {
                 wgpu::BindGroupEntry { binding: 14, resource: bone_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(&cmap_view) },
                 wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(&dry_view) },
+                wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::TextureView(&pano.sky_hist) },
+                wgpu::BindGroupEntry { binding: 18, resource: wgpu::BindingResource::TextureView(&pano.cloud_hist) },
             ],
         });
         // the car's mirrors (render.rs): the same frame, another camera
@@ -2088,6 +2184,8 @@ impl TrackRender {
                 wgpu::BindGroupEntry { binding: 14, resource: bone_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(&cmap_view) },
                 wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(&dry_view) },
+                wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::TextureView(&pano.sky_hist) },
+                wgpu::BindGroupEntry { binding: 18, resource: wgpu::BindingResource::TextureView(&pano.cloud_hist) },
             ],
         });
 
@@ -2119,6 +2217,8 @@ impl TrackRender {
                 wgpu::BindGroupEntry { binding: 14, resource: bone_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(&cmap_view) },
                 wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(&dry_view) },
+                wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::TextureView(&pano.sky_hist) },
+                wgpu::BindGroupEntry { binding: 18, resource: wgpu::BindingResource::TextureView(&pano.cloud_hist) },
             ],
         });
 
@@ -2150,6 +2250,8 @@ impl TrackRender {
                 wgpu::BindGroupEntry { binding: 14, resource: bone_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(&cmap_view) },
                 wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(&dry_view) },
+                wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::TextureView(&pano.sky_hist) },
+                wgpu::BindGroupEntry { binding: 18, resource: wgpu::BindingResource::TextureView(&pano.cloud_hist) },
             ],
         });
 
@@ -2193,6 +2295,8 @@ impl TrackRender {
                 wgpu::BindGroupEntry { binding: 14, resource: bone_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::TextureView(&cmap_view) },
                 wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(&dry_view) },
+                wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::TextureView(&pano.sky_hist) },
+                wgpu::BindGroupEntry { binding: 18, resource: wgpu::BindingResource::TextureView(&pano.cloud_hist) },
             ],
         }));
 
@@ -2794,6 +2898,94 @@ impl TrackRender {
             cache: None,
         });
 
+        // the sky panorama: the frame, the cloud textures and last frame's
+        // panorama (its history), into two targets
+        let pano_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sky pano bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                tex_entry(10, wgpu::TextureViewDimension::D2Array),
+                tex_entry(13, wgpu::TextureViewDimension::D2),
+                tex_entry(17, wgpu::TextureViewDimension::D2),
+                tex_entry(18, wgpu::TextureViewDimension::D2),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let pano_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sky pano bg"),
+            layout: &pano_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: frame_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(cloud_view) },
+                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::Sampler(cloud_samp) },
+                wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(weather_view) },
+                wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::TextureView(&pano.sky_hist) },
+                wgpu::BindGroupEntry { binding: 18, resource: wgpu::BindingResource::TextureView(&pano.cloud_hist) },
+            ],
+        });
+        let pano_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sky pano layout"),
+            bind_group_layouts: &[&pano_bgl],
+            push_constant_ranges: &[],
+        });
+        let pano_target = Some(wgpu::ColorTargetState { format: PANO_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL });
+        let pano_pipe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sky pano"),
+            layout: Some(&pano_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_sky",
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_sky_pano",
+                compilation_options: Default::default(),
+                targets: &[pano_target.clone()],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
+        let atm_pipe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sky atmosphere"),
+            layout: Some(&pano_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_sky",
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_sky_atm",
+                compilation_options: Default::default(),
+                targets: &[pano_target],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
+
         // ---- sun ----
         // ⚠ The base renders its shadow map from render::SUN; the lighting
         // has to use the very same direction or every surface self-shadows.
@@ -2842,6 +3034,10 @@ impl TrackRender {
             cmap_view,
             cmap_bg,
             cmap_pipe,
+            pano,
+            pano_bg,
+            pano_pipe,
+            atm_pipe,
             frame_buf,
             mats,
             sun_dir,
@@ -3164,6 +3360,31 @@ impl TrackRender {
             light_vp_hero: cam.light_vp_hero,
             shadow_hero: cam.shadow_hero,
             lod: [self.mip_bias, 0.0, 0.0, 0.0],
+            atm: {
+                let d = if timed { crate::sky::now().sun } else { self.sun_dir };
+                [d.x, d.y, d.z, if self.pano.on { 1.0 } else { 0.0 }]
+            },
+            atm2: {
+                // full replacement on the first frame and after a time-of-day
+                // jump; otherwise a running average that integrates the
+                // march's per-frame jitter into smooth clouds
+                // (the clock runs, so the sky's generation moves every frame:
+                // only a jump of the sun of over half a degree counts)
+                let d = if timed { crate::sky::now().sun } else { self.sun_dir };
+                let last = self.pano.sun.replace(d);
+                let fresh = last.dot(d) < 0.99996 || self.pano.frames.get() == 0;
+                self.pano.frames.set(self.pano.frames.get() + 1);
+                [if fresh { 1.0 } else { env_f32("EVOVIEW_PANO_BLEND", 0.3) },
+                 env_f32("EVOVIEW_ATM_K", 12.0) * env_f32("EVOVIEW_SKY", 1.0),
+                 env_f32("EVOVIEW_PANO_STEPS", 24.0), crate::rain::rain()]
+            },
+            atm3: [env_f32("EVOVIEW_CLOUD_SUN", 2.5), env_f32("EVOVIEW_CLOUD_AMB", if self.pano.on { 0.6 } else { 1.0 }),
+                   env_f32("EVOVIEW_CLOUD_SUN_EXT", 1.0), env_f32("EVOVIEW_CLOUD_POWDER", 0.5)],
+            // ⚠ The 0.16 extinction scale is a guess (strict SKY4); seen
+            // through, it gave thin, fuzzy, uniformly white puffs. Real
+            // cumulus is optically thick (crisp edges, grey bases): 8x as
+            // seen. The ground shadow keeps the old scale.
+            atm4: [if self.pano.on { env_f32("EVOVIEW_CLOUD_VIEW_DENSITY", 8.0) } else { 1.0 }, 0.0, 0.0, 0.0],
         };
         queue.write_buffer(&self.frame_buf, 0, bytemuck::bytes_of(&u));
         self.last_frame.set(Some(u));
@@ -3301,6 +3522,41 @@ impl TrackRender {
         p.set_pipeline(&self.cmap_pipe);
         p.set_bind_group(0, &self.cmap_bg, &[]);
         p.draw(0..3, 0..1);
+    }
+
+    /// The sky panorama for this frame's constants (after `update`, before
+    /// anything samples the track's frame): drawn into the output pair, then
+    /// copied to the pair every other pass reads, which is also the next
+    /// frame's history.
+    pub fn sky_pano_pass(&self, enc: &mut wgpu::CommandEncoder) {
+        let pn = &self.pano;
+        if !pn.on {
+            return;
+        }
+        // the clear sky first: the clouds take their ambient light from it.
+        // The cloud target keeps its texels (a quarter is redrawn a frame).
+        let passes = [
+            (&self.atm_pipe, &pn.sky_view, &pn.sky, &pn.sky_hist_tex, pn.sky_w, pn.sky_h, wgpu::LoadOp::Clear(wgpu::Color::BLACK)),
+            (&self.pano_pipe, &pn.cloud_view, &pn.cloud, &pn.cloud_hist_tex, pn.w, pn.h, wgpu::LoadOp::Load),
+        ];
+        for (pipe, view, a, b, w, h, load) in passes {
+            {
+                let mut p = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("sky pano"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
+                    })],
+                    ..Default::default()
+                });
+                p.set_pipeline(pipe);
+                p.set_bind_group(0, &self.pano_bg, &[]);
+                p.draw(0..3, 0..1);
+            }
+            let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+            enc.copy_texture_to_texture(a.as_image_copy(), b.as_image_copy(), size);
+        }
     }
 
     pub fn draw_sky<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {

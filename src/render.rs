@@ -4496,6 +4496,8 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         if let Some(t) = track.as_ref() {
                             t.cloud_map_pass(&mut enc);
                             crate::bench::mark(&mut enc, "cloudmap");
+                            t.sky_pano_pass(&mut enc);
+                            crate::bench::mark(&mut enc, "skypano");
                         }
                         {
                             let clear = if opts.start_fly {

@@ -92,6 +92,9 @@ impl CloudGpu {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            // the cirrus layer has mips (the noise and the weather map are
+            // sampled at level 0 only)
+            mipmap_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
         CloudGpu {
