@@ -640,6 +640,11 @@ impl PitCar {
             }).unwrap_or(0)
         });
         let names: Vec<&str> = compounds.iter().map(|c| c.name.as_str()).collect();
+        if std::env::var_os("EVOVIEW_TYRE_LOG").is_some() {
+            for c in &compounds {
+                println!("TYRE compound {} kind {}: {:?}", c.name, c.kind, c.fit.iter().map(|f| f.as_ref().map(|(m, _)| (m.dy0, m.dx0, m.fz0, m.ls_y))).collect::<Vec<_>>());
+            }
+        }
         println!("pits: fuel {fuel:.0} / {max_fuel:.0} L ({kg_per_l} kg/L), tyres {names:?} (fitted {:?}{}), pressures {:.1}-{:.1} psi",
             fitted, if single { ", one compound" } else { "" }, psi.min, psi.max);
         PitCar { max_fuel, kg_per_l, fuel, compounds, fitted, single, psi, setup_psi, arb, damage: Damage::default(),

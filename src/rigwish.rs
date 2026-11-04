@@ -1,5 +1,7 @@
 //! The rig car's double wishbones as AC EVO builds them in ODE
-//! (EVOVIEW_RIG_ODE=links; SPEC_PHYS "Double wishbone in ODE"):
+//! (the default; EVOVIEW_RIG_ODE=0 explicit, =1 slider; SPEC_PHYS "Double
+//! wishbone in ODE"). A car without double wishbones and tie rods on both
+//! axles falls back to the explicit path:
 //!
 //! - each hub one rigid body (a box of the unsprung mass, 0.2 x 0.6 x 0.6)
 //!   at the wheel centre, held to the chassis by five DBall rods - the two
@@ -88,7 +90,7 @@ pub struct Links {
 
 impl Links {
     pub fn enabled() -> bool {
-        std::env::var("EVOVIEW_RIG_ODE").map_or(false, |v| v == "links")
+        std::env::var("EVOVIEW_RIG_ODE").map_or(true, |v| v == "links")
     }
 
     /// None unless both axles are double wishbones with tie rods.

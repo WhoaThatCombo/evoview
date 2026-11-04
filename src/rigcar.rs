@@ -24,8 +24,9 @@
 //! launch; ODE's constraint solver is replaced by explicit forces - unless
 //! EVOVIEW_RIG_ODE=1, which integrates the chassis and hubs as ODE bodies
 //! on slider joints with the game's world settings (rigode.rs);
-//! EVOVIEW_RIG_ODE=links builds the double wishbones the game's way, five
-//! DBall rods a corner (rigwish.rs).
+//! by default (or EVOVIEW_RIG_ODE=links) the double wishbones are built the
+//! game's way, five DBall rods a corner (rigwish.rs); EVOVIEW_RIG_ODE=0 keeps
+//! the explicit path.
 
 use crate::carphys::Assists;
 use crate::evophys::{Brakes, Coilover, Diff};
@@ -182,6 +183,12 @@ pub struct RigCar {
     vib_phase: f32,
     vib_gain: f32,
     m_unsprung: [f32; 2],
+    /// across up the hubs move with the body (EVOVIEW_RIG_HUBRIDE=0: off)
+    hub_ride: bool,
+    /// engine torque reaching the axle (EVOVIEW_RIG_DRIVE_EFF). 1: the
+    /// game's M4 GT3 replays (full throttle, per gear and speed) match the
+    /// power curve with no loss within ~3%; 0.9 was 10-16% short
+    drive_eff: f32,
     /// static camber per axle, rad (BasicSuspensionData; no camber gain
     /// with travel yet)
     camber: [f32; 2],
@@ -229,7 +236,7 @@ pub struct RigCar {
     phys: crate::carphys::Physics,
     /// EVOVIEW_RIG_ODE=1: the bodies integrated by ODE (rigode.rs)
     ode: Option<Box<crate::rigode::OdeRig>>,
-    /// EVOVIEW_RIG_ODE=links: the wishbones as ODE rods (rigwish.rs)
+    /// the wishbones as ODE rods (rigwish.rs): the default, EVOVIEW_RIG_ODE=links
     links: Option<Box<crate::rigwish::Links>>,
     /// the four tyres' road forces (world, summed) in the last substep
     f_tyres: Vec3,
@@ -311,6 +318,12 @@ impl RigCar {
             x_static[k] = 0.5 * (lo + hi);
         }
         if std::env::var_os("EVOVIEW_RIG_DBG").is_some() {
+            let kw: Vec<String> = (10..=80).step_by(5).map(|r| {
+                let rpm = r as f32 * 100.0;
+                format!("{rpm:.0}:{:.0}Nm/{:.0}kW", p.engine_torque(rpm, 1.0).unwrap_or(0.0), p.engine_torque(rpm, 1.0).unwrap_or(0.0) * rpm * 0.10472e-3)
+            }).collect();
+            eprintln!("RIGCOIL front {:?} rear {:?} diff {:?}", p.coil[0], p.coil[1], p.diff);
+            eprintln!("RIGENGINE peak {:?} limiter {} power_mult {} gears {:?} final {} curve {}", p.peak_torque(), p.limiter_rpm, p.power_mult, p.gears, p.final_drive, kw.join(" "));
             eprintln!("RIGGEO front low {:?} up {:?} strut {:?} kingpin {:?} | rear low {:?}", p.geo[0].low, p.geo[0].up, p.geo[0].strut_top, p.geo[0].kingpin(), p.geo[1].low);
             eprintln!("RIGINFO toe_gain {:?} deg/10cm camber_gain {:?} deg/10cm base_y {:?} radius {:?} camber {camber:?} unsprung {m_unsprung:?} mass {mass:.0} cgf {cgf:.3} cg_h {cg_h:.2} inertia {inertia:?} arb {:?} mr {mr:?} geo {:?} x_static {x_static:?} anchors {centres:?}", [p.geo[0].toe_gain().to_degrees() * 0.1, p.geo[1].toe_gain().to_degrees() * 0.1], [p.geo[0].camber_gain().to_degrees() * 0.1, p.geo[1].camber_gain().to_degrees() * 0.1], p.base_y, [tyre[0].map(|t| t.radius), tyre[1].map(|t| t.radius)], [p.coil[0].arb, p.coil[1].arb], [(p.geo[0].kind, p.geo[0].coil.is_some(), p.geo[0].low.is_some()), (p.geo[1].kind, p.geo[1].coil.is_some(), p.geo[1].low.is_some())]);
         }
@@ -365,7 +378,11 @@ impl RigCar {
             cg_local,
             x_static,
             coil,
-            arb: [p.coil[0].arb, p.coil[1].arb],
+            // EVOVIEW_RIG_ARB_SCALE="front,rear": diagnostic multipliers
+            arb: {
+                let s: Vec<f32> = std::env::var("EVOVIEW_RIG_ARB_SCALE").ok().map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default();
+                [p.coil[0].arb * s.first().copied().unwrap_or(1.0), p.coil[1].arb * s.get(1).copied().unwrap_or(1.0)]
+            },
             mr,
             tyre,
             therm_data: p.thermal.clone(),
@@ -398,6 +415,8 @@ impl RigCar {
             vib_phase: 0.0,
             vib_gain: env_t("EVOVIEW_FLATSPOT_FFB", 0.05),
             m_unsprung,
+            hub_ride: std::env::var("EVOVIEW_RIG_HUBRIDE").map_or(true, |v| v != "0"),
+            drive_eff: env_t("EVOVIEW_RIG_DRIVE_EFF", 1.0),
             camber,
             toe,
             toe_gain: [0, 1].map(|ax| if std::env::var_os("EVOVIEW_RIG_NOBUMPSTEER").is_some() { 0.0 } else { p.geo[ax].toe_gain().clamp(-0.5, 0.5) }),
@@ -1088,7 +1107,7 @@ impl RigCar {
             }
         }
         self.rpm = rpm.min(self.limiter);
-        let t_axle = t_gear * ratio * 0.9;
+        let t_axle = t_gear * ratio * self.drive_eff;
 
         // ---- per corner: hub, tyre contact, forces
         // with ODE the world's gravity pulls the chassis and the hubs
@@ -1493,7 +1512,7 @@ impl RigCar {
             let iw = tl.inertia + ie * 0.5;
             let dw = self.c[lk].omega - self.c[rk].omega;
             let need = dw * iw / dt;
-            let lock = self.diff.lock(t_axle, self.c[lk].fx, self.c[rk].fx);
+            let lock = self.diff.lock(t_axle, self.c[lk].fx, self.c[rk].fx) * diff_scale();
             let td = need.clamp(-lock, lock) * 0.5;
             self.c[lk].omega -= td * dt / iw;
             self.c[rk].omega += td * dt / iw;
@@ -1542,7 +1561,21 @@ impl RigCar {
             return;
         }
         // ---- body integration (semi-implicit Euler)
-        let acc = f_body / self.mass;
+        // The hubs slide only along up, so across up they move with the
+        // body: forces there accelerate body + hubs, and the hubs' weight
+        // across up (on a slope) pulls too. Without this the tyres pushed
+        // only the sprung mass - ~13% free grip, traction and braking
+        // against the ODE modes, whose hubs are bodies.
+        // EVOVIEW_RIG_HUBRIDE=0: the old body-only sum.
+        let acc = if self.hub_ride {
+            let up = self.up();
+            let mu = 2.0 * (self.m_unsprung[0] + self.m_unsprung[1]);
+            let g = Vec3::new(0.0, -G, 0.0);
+            let (fa, ga) = (up * f_body.dot(up), up * g.dot(up));
+            fa / self.mass + (f_body - fa + (g - ga) * mu) / (self.mass + mu)
+        } else {
+            f_body / self.mass
+        };
         self.v += acc * dt;
         self.acc_prev = acc;
         self.cg += self.v * dt;
@@ -1895,6 +1928,9 @@ pub fn pad_test(rc: &mut RigCar) {
     let (mut t, mut t100, mut t200) = (0.0f32, None, None);
     while t < 40.0 && t200.is_none() {
         run(rc, &mut acc, full, 0.05);
+        if std::env::var_os("EVOVIEW_PAD_TRACE").is_some() {
+            println!("PADTRACE t {t:.2} {:.1} km/h gear {} rpm {:.0} omega R {:.1} {:.1} (v/r {:.1}) Fx R {:.0} {:.0} Fz R {:.0} {:.0}", rc.speed() * 3.6, rc.gear, rc.rpm, rc.c[2].omega, rc.c[3].omega, rc.speed() / 0.2888, rc.c[2].fx, rc.c[3].fx, rc.c[2].fz, rc.c[3].fz);
+        }
         t += 0.05;
         let kmh = rc.speed() * 3.6;
         if t100.is_none() && kmh >= 100.0 {
@@ -2288,7 +2324,9 @@ pub fn steady_test(rc: &mut RigCar) {
     let g = flat_pad();
     rc.auto_box = true;
     let mut acc = 0.0;
-    for (kmh, deg) in [(60.0f32, 4.0f32), (80.0, 3.0), (80.0, 5.0), (100.0, 2.5)] {
+    // EVOVIEW_STEADY_SET="kmh:deg,kmh:deg,..." replaces the four corners
+    let set: Vec<(f32, f32)> = std::env::var("EVOVIEW_STEADY_SET").ok().map(|s| s.split(',').filter_map(|p| { let (a, b) = p.split_once(':')?; Some((a.trim().parse().ok()?, b.trim().parse().ok()?)) }).collect()).unwrap_or_else(|| vec![(60.0, 4.0), (80.0, 3.0), (80.0, 5.0), (100.0, 2.5)]);
+    for (kmh, deg) in set {
         rc.place(Vec3::new(0.0, 0.0, -1800.0), 0.0);
         rc.roll(kmh / 3.6);
         let n = (10.0 / DT) as usize;
@@ -2341,6 +2379,14 @@ pub fn steady_test(rc: &mut RigCar) {
         let a: Vec<f64> = sum.iter().map(|s| s / cnt).collect();
         println!("STEADY {kmh:.0} km/h road wheels {deg:.1} deg: v {:.1} km/h r {:+.3} ay {:.2} g beta {:+.2} | alpha F {:+.2} R {:+.2} deg | Fy F {:.0} R {:.0} | Fz FR {:.0} FL {:.0} RR {:.0} RL {:.0} | thr {:.2} Fx R {:.0} | roll {:+.2} deg x {:+.3} {:+.3} {:+.3} {:+.3} | Fx F {:.0} along-path {:.0}",
             a[0] * 3.6, a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15], a[16], a[17], a[18], a[19], a[20]);
+        if std::env::var_os("EVOVIEW_STEADY_UTIL").is_some() {
+            let u: Vec<String> = (0..4).map(|k| {
+                let c = &rc.c[k];
+                let dy = rc.tyre[k / 2].as_ref().map_or(f32::NAN, |t| t.d_y(c.fz));
+                format!("k{k} fz {:.0} fy {:.0} fx {:.0} D {:.3} grip {:.3} alpha {:.2} camber? util {:.2}", c.fz, c.fy, c.fx, dy, c.grip, c.alpha.to_degrees(), (c.fy * c.fy + c.fx * c.fx).sqrt() / (dy * c.fz * c.grip).max(1.0))
+            }).collect();
+            println!("STEADYUTIL {}", u.join(" | "));
+        }
         // full throttle for 1.5 s from there
         let mut peak = (0.0f32, 0.0f32, 0.0f32);
         for _ in 0..(1.5 / DT) as usize {
@@ -2354,4 +2400,10 @@ pub fn steady_test(rc: &mut RigCar) {
         println!("STEADY   + full throttle 1.5 s: rear alpha peak {:+.1} deg (front {:+.1}, r {:+.2}), end beta {:+.1} deg, gear {}",
             peak.0, peak.1, peak.2, rc.v.dot(rc.left()).atan2(rc.speed()).to_degrees(), rc.gear);
     }
+}
+
+/// EVOVIEW_RIG_DIFF_SCALE: diagnostic multiplier on the diff's lock torque
+fn diff_scale() -> f32 {
+    static V: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_t("EVOVIEW_RIG_DIFF_SCALE", 1.0))
 }

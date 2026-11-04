@@ -1673,6 +1673,16 @@ impl Physics {
                 }
             }
         }
+        // EVOVIEW_COMPOUND=<part of a name>: one of the car's compatible
+        // compounds instead (the stock MX-5 NA setup fits ECO; a time
+        // attack lap is on SUPERCAR)
+        if let Ok(want) = std::env::var("EVOVIEW_COMPOUND") {
+            let want = want.to_ascii_lowercase();
+            if let Some((_, t)) = compatible_tyres(vfs, &key).into_iter().find(|(_, t)| t[0].to_ascii_lowercase().contains(&want)) {
+                p.notes.push(format!("tyres from EVOVIEW_COMPOUND: {} / {}", t[0], t[1]));
+                tyre_paths = [Some(t[0].clone()), Some(t[1].clone())];
+            }
+        }
         // each axle's tyre model: TyresCompoundData f4 TyresModelData
         for (ax, tp) in tyre_paths.iter().enumerate() {
             let Some(k) = tp.as_ref().and_then(|t| vfs.find(t, None)) else { continue };

@@ -625,6 +625,12 @@ impl TrackDrive {
     pub fn set_aero(&mut self, k: [f32; 3]) {
         if let Some((rc, _)) = self.rig.as_mut() {
             rc.aero = std::env::var("EVOVIEW_RIG_AERO").ok().and_then(|v| v.parse::<f32>().ok()).map_or(k, |m| k.map(|x| x * m));
+            // EVOVIEW_RIG_AERO_FRONT=0..1: diagnostic downforce balance
+            if let Some(f) = std::env::var("EVOVIEW_RIG_AERO_FRONT").ok().and_then(|v| v.parse::<f32>().ok()) {
+                let t = rc.aero[0] + rc.aero[1];
+                rc.aero[0] = t * f;
+                rc.aero[1] = t * (1.0 - f);
+            }
             println!("rigcar: aero front {:.3} rear {:.3} drag {:.3} N/(m/s)^2 = {:.0} N downforce at 200 km/h", rc.aero[0], rc.aero[1], rc.aero[2], (rc.aero[0] + rc.aero[1]) * 3086.4);
         }
     }
@@ -1844,11 +1850,11 @@ impl LineDriver {
                 // the hubs' sideways mass: links (the geometry's roll centres
                 // and camber) laps clean at 0.38; the slider (no camber from a
                 // linkage) ran wide into Villeneuve (MX-5) and out of Variante
-                // Alta (M4) until 0.36
+                // Alta (M4) until 0.36. Explicit was 0.43 until its hubs rode with
+                // the body (rigcar hub_ride): now it corners like the slider
                 let k_rig = match std::env::var("EVOVIEW_RIG_ODE").as_deref() {
-                    Ok("links") => 0.38,
-                    Ok(v) if v != "0" => 0.36,
-                    _ => 0.43,
+                    Ok("links") | Err(_) => 0.38,
+                    _ => 0.36,
                 };
                 let k = if td.rig.is_some() { std::env::var("EVOVIEW_LINE_K").ok().and_then(|v| v.parse().ok()).unwrap_or(k_rig) } else { 0.85 };
                 // over a crest the road falls away under the car and takes
@@ -2216,6 +2222,33 @@ pub fn test_run(td: &mut TrackDrive, secs: f32, mut driver: Option<LineDriver>, 
         c.auto_box = std::env::var("EVOVIEW_AUTO_SHIFT").map_or(true, |v| v != "0");
         if let Some(p) = probe.as_mut() {
             p.controls(td, t, &mut c);
+        }
+        // EVOVIEW_DRIVE_START_XZ="x,z,run_up_m": start on the line the run-up
+        // before the line point nearest (x, z) - to replay one spot of a long
+        // track (the Nordschleife's out lap is ~11 min)
+        if t == 0.0 {
+            if let (Some(d), Some(v)) = (driver.as_mut(), std::env::var("EVOVIEW_DRIVE_START_XZ").ok()) {
+                let n: Vec<f32> = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                if n.len() >= 2 {
+                    let len = d.line.len();
+                    let near = (0..len).min_by(|&a, &b| {
+                        let da = Vec2::new(d.line[a].x - n[0], d.line[a].z - n[1]).length();
+                        let db = Vec2::new(d.line[b].x - n[0], d.line[b].z - n[1]).length();
+                        da.total_cmp(&db)
+                    }).unwrap_or(0);
+                    let (mut j, mut back) = (near, 0.0);
+                    while back < n.get(2).copied().unwrap_or(300.0) && j != (near + 1) % len {
+                        let pj = (j + len - 1) % len;
+                        back += (d.line[j] - d.line[pj]).length();
+                        j = pj;
+                    }
+                    let p = d.line[j];
+                    let q = d.line[(j + 3) % len];
+                    td.place_from(p, (q.x - p.x).atan2(q.z - p.z), 3.0);
+                    d.i = j;
+                    println!("START at line point {j} ({:.1}, {:.1}, {:.1}), {back:.0} m before ({:.0}, {:.0})", p.x, p.y, p.z, n[0], n[1]);
+                }
+            }
         }
         td.step(&c, dt);
         // out of the world (Mount Panorama: a car slid off a bank under a
