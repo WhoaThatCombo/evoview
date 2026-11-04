@@ -17,8 +17,10 @@
 //!
 //! Simplifications against the game, each one a known gap: the suspension
 //! moves along the body's up axis with motion ratio 1 (EVOVIEW_RIG_MR), not
-//! the ODE wishbone links; tyre in-plane forces act on the body at a roll
-//! centre a fixed height above the contact patch; the clutch slips only to
+//! the ODE wishbone links; tyre in-plane forces act on the body at the
+//! contact patch (EVOVIEW_RIG_RC lifts that point: at the old 6 cm it cut
+//! the load transfer ~12%), not through the linkage's own roll centres;
+//! the clutch slips only to
 //! launch; ODE's constraint solver is replaced by explicit forces - unless
 //! EVOVIEW_RIG_ODE=1, which integrates the chassis and hubs as ODE bodies
 //! on slider joints with the game's world settings (rigode.rs);
@@ -221,6 +223,8 @@ pub struct RigCar {
     pub max_steer: f32,
     /// steering-wheel degrees per road-wheel degree (setup steer_ratio)
     pub steer_ratio: f32,
+    /// height over the patch where the tyre's road-plane force goes into
+    /// the body (EVOVIEW_RIG_RC; default 0, the patch, as the game's tyre)
     rc_height: f32,
     phys: crate::carphys::Physics,
     /// EVOVIEW_RIG_ODE=1: the bodies integrated by ODE (rigode.rs)
@@ -428,7 +432,7 @@ impl RigCar {
             aero,
             max_steer,
             steer_ratio: if p.steer_ratio.abs() > 1.0 { p.steer_ratio.abs() } else { 15.0 },
-            rc_height: std::env::var("EVOVIEW_RIG_RC").ok().and_then(|v| v.parse().ok()).unwrap_or(0.06),
+            rc_height: std::env::var("EVOVIEW_RIG_RC").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0),
             phys: p.clone(),
             ode: crate::rigode::OdeRig::enabled().then(|| Box::new(crate::rigode::OdeRig::new(mass, inertia, m_unsprung, &centres, cg_local))),
             links: crate::rigwish::Links::enabled()

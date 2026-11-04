@@ -1669,14 +1669,13 @@ impl LineDriver {
                 // a real-tyre car (rigcar) loses grip to load transfer: aim lower
                 // (0.5: at 0.72 it ran wide into Tamburello's gravel every
                 // lap; at 0.5 it laps Imola clean - EVOVIEW_LINE_K overrides)
-                // the ODE modes carry the hubs' sideways mass, and links
-                // also the full load transfer (tyre force at the patch,
-                // the geometry's roll centres): less grip than the explicit
-                // path's 0.5 was tuned on (Imola clean at 0.43 / 0.38)
+                // 0.5 was tuned while the explicit path pushed the tyres 6 cm
+                // over the patch (~12% less load transfer); with the force at
+                // the patch it and the slider mode clear Imola at 0.43; links
+                // (the geometry's own roll centres) at 0.38
                 let k_rig = match std::env::var("EVOVIEW_RIG_ODE").as_deref() {
                     Ok("links") => 0.38,
-                    Ok(v) if v != "0" => 0.43,
-                    _ => 0.5,
+                    _ => 0.43,
                 };
                 let k = if td.rig.is_some() { std::env::var("EVOVIEW_LINE_K").ok().and_then(|v| v.parse().ok()).unwrap_or(k_rig) } else { 0.85 };
                 let mut vr = (k * td.grip_estimate() * G * r).sqrt() * self.pace;
