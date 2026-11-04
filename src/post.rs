@@ -287,11 +287,14 @@ impl Post {
             // off: Natural 7 (Josh's preset) has no eyeParameters, so the
             // game draws no eye-focus vignette. EVOVIEW_VIGNETTE=1 brings it back.
             vignette: env_f("EVOVIEW_VIGNETTE", 0.0),
-            // 1.0 (CAS's full strength): with the limiter fixed (1 - mx) 0.5
-            // came out softer than before; 1.0 brings distant edges in
-            // motion to 36.7 against 38.3 with no TAA history (34.2 at 0.5),
-            // no halos on Imola's straight
-            sharpen: env_f("EVOVIEW_SHARPEN", 1.0),
+            // 0.5. ⚠ Was 1.0, tuned on edge sharpness alone: against a 4x
+            // supersampled no-TAA reference of the same moving frame it put
+            // 1.25x the reference's fine-detail energy on screen and the
+            // surplus was TAA's jitter residue made into grain - textures
+            // read low-quality / compressed. 0.5 lands on the reference's
+            // detail (1.01x) with the best match to it (correlation 0.794
+            // vs 0.762; road 0.889 vs 0.856). gfx/score.py measures it.
+            sharpen: env_f("EVOVIEW_SHARPEN", 0.5),
             // the shutter as a share of a 60 Hz frame (4 ms), whatever the
             // frame rate: it was a share of the frame itself, so the smear
             // grew as fps fell. Camera rotation blurs at 35 %: turning in a
