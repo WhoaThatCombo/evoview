@@ -1727,6 +1727,22 @@ impl LineDriver {
             ..Default::default()
         };
         let mut c = c;
+        // a driver's right foot (the rigid-body car): the throttle was
+        // all-or-nothing on the speed alone, and an MX-5 floored mid-way
+        // through Imola's Variante Alta (2nd gear, ~1.5 g, inside front in
+        // the air) lit up its rears and spun every lap. Ease off as the rear
+        // slides (all of it to 5 deg of slip, none from 10) and keep some of
+        // the tyres for the corner (friction circle on the lateral g asked
+        // of them); EVOVIEW_LINE_FOOT=0: the old foot
+        if std::env::var("EVOVIEW_LINE_FOOT").map_or(true, |v| v != "0") {
+            if let Some((rc, _)) = td.rig.as_ref() {
+                let ar = rc.c[2].alpha.abs().max(rc.c[3].alpha.abs()).to_degrees();
+                let slide = ((10.0 - ar) / 5.0).clamp(0.0, 1.0);
+                let ay = (v * td.r).abs() / (G * td.grip_estimate().max(0.5));
+                let circle = (1.0 - 0.7 * ay * ay).max(0.3);
+                c.throttle = c.throttle.min(slide.min(circle));
+            }
+        }
         // a spun car going backwards: stop first (it held full throttle at
         // full lock, rolling back, and wheelspun donuts in the gravel)
         // Only slow (under ~29 km/h back): braking a fast backwards slide
