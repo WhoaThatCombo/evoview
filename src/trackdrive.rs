@@ -1671,10 +1671,14 @@ impl LineDriver {
                 // lap; at 0.5 it laps Imola clean - EVOVIEW_LINE_K overrides)
                 // 0.5 was tuned while the explicit path pushed the tyres 6 cm
                 // over the patch (~12% less load transfer); with the force at
-                // the patch it and the slider mode clear Imola at 0.43; links
-                // (the geometry's own roll centres) at 0.38
+                // the patch it clears Imola at 0.43. The ODE modes also carry
+                // the hubs' sideways mass: links (the geometry's roll centres
+                // and camber) laps clean at 0.38; the slider (no camber from a
+                // linkage) ran wide into Villeneuve (MX-5) and out of Variante
+                // Alta (M4) until 0.36
                 let k_rig = match std::env::var("EVOVIEW_RIG_ODE").as_deref() {
                     Ok("links") => 0.38,
+                    Ok(v) if v != "0" => 0.36,
                     _ => 0.43,
                 };
                 let k = if td.rig.is_some() { std::env::var("EVOVIEW_LINE_K").ok().and_then(|v| v.parse().ok()).unwrap_or(k_rig) } else { 0.85 };
