@@ -56,6 +56,8 @@ pub struct Ground {
     names: Vec<String>,
     /// per surface: has a surface_id (see probe)
     tagged: Vec<bool>,
+    /// EVOVIEW_GROUND_ODE=1: probes through the ODE ray collider
+    ode: Option<crate::groundode::OdeGround>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -194,8 +196,21 @@ impl Ground {
             let _ = std::fs::write(&p, b);
         }
         let tagged = if std::env::var_os("EVOVIEW_UNTAGGED_GROUND").is_some() { vec![false; c.surfaces.len()] } else { c.surfaces.iter().map(|s| !s.is_empty()).collect() };
+        // the same triangles the grid keeps (no walls, nothing steep)
+        let ode = crate::groundode::OdeGround::enabled().then(|| {
+            let keep = |ti: usize| {
+                if std::env::var_os("EVOVIEW_WALLS_AS_GROUND").is_none() && c.tri_surf.get(ti).map_or(false, |&s| wall_surf.get(s as usize).copied().unwrap_or(false)) {
+                    return false;
+                }
+                let p = c.tris[ti].map(|i| Vec3::from(c.verts[i as usize]));
+                let n = (p[1] - p[0]).cross(p[2] - p[0]);
+                n.length_squared() >= 1e-12 && n.y.abs() / n.length() >= 0.35
+            };
+            let tg = |ti: usize| c.tri_surf.get(ti).map_or(false, |&s| tagged.get(s as usize).copied().unwrap_or(false));
+            crate::groundode::OdeGround::build(&c.verts, &c.tris, keep, tg)
+        });
         Ground { walls: c.walls.clone(), wall_src: c.wall_src.clone(), wall_grid, verts: c.verts.clone(), tris: c.tris.clone(),
-                 surf: c.tri_surf.clone(), grid, grip, bump, rain, kind, vib, names: c.surfaces.clone(), tagged }
+                 surf: c.tri_surf.clone(), grid, grip, bump, rain, kind, vib, names: c.surfaces.clone(), tagged, ode }
     }
 
     /// Walls near `p` (XZ) whose height range overlaps [y0, y1]: each as
@@ -301,6 +316,9 @@ impl Ground {
     /// still counts where nothing tagged is near (terrain beyond the run-off).
     /// EVOVIEW_UNTAGGED_GROUND=1: the highest of either, as before.
     pub fn probe(&self, x: f32, z: f32, top: f32) -> Option<Hit> {
+        if let Some(o) = self.ode.as_ref() {
+            return o.probe(x, z, top).map(|(y, n, ti)| Hit { y, n, surf: self.surf[ti as usize] });
+        }
         let cell = ((x / CELL).floor() as i32, (z / CELL).floor() as i32);
         let list = self.grid.get(&cell)?;
         let (mut best, mut best_t): (Option<Hit>, Option<Hit>) = (None, None);
