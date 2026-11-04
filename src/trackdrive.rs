@@ -27,7 +27,7 @@
 use crate::replay::Pose;
 use crate::replayscene::Slot;
 use crate::track::{Collision, SurfaceDef};
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec2, Vec3};
 use std::collections::HashMap;
 
 const CELL: f32 = 6.0;
@@ -1513,7 +1513,8 @@ impl LineDriver {
     /// with a wall closer sideways than half a car plus margin (`need`)
     /// moves away (at most 1.2 m), spread smoothly along the line.
     /// EVOVIEW_LINE_CLEAR=0: the line as shipped.
-    pub fn clear_walls(&mut self, ground: &Ground) {
+    /// `half_w`: the car's half width as the wall collision sees it.
+    pub fn clear_walls(&mut self, ground: &Ground, half_w: f32) {
         if std::env::var("EVOVIEW_LINE_CLEAR").map_or(false, |v| v == "0") {
             return;
         }
@@ -1521,7 +1522,10 @@ impl LineDriver {
         if n < 3 {
             return;
         }
-        let need = 1.6f32;
+        // the car's half width and ~0.8 m of tracking error (1.6 was the
+        // MX-5's; Bathurst's Esses wall 1.72 m from the line took the
+        // wider M4 GT3's flank every lap)
+        let need = (half_w + 0.8).max(1.6);
         let mut push = vec![0.0f32; n];
         let mut hits = Vec::new();
         for i in 0..n {
@@ -1530,6 +1534,9 @@ impl LineDriver {
             let tan = Vec3::new(-left.z, 0.0, left.x);
             ground.walls_near(c, need + 0.5, c.y + 0.15, c.y + 1.2, &mut hits);
             let (mut l, mut r) = (0.0f32, 0.0f32);
+            if std::env::var("EVOVIEW_CLEAR_DBG").ok().and_then(|v| v.parse::<usize>().ok()) == Some(i) {
+                println!("CLEAR {i} at ({:.1} {:.1} {:.1}) left {left:?}: {:?}", c.x, c.y, c.z, hits.iter().map(|h| (h.0.x, h.0.z, h.1)).collect::<Vec<_>>());
+            }
             for &(q, _, _) in hits.iter() {
                 let d = Vec3::new(q.x - c.x, 0.0, q.z - c.z);
                 if d.dot(tan).abs() > 1.5 {
@@ -1648,7 +1655,8 @@ impl LineDriver {
     pub fn controls(&mut self, td: &TrackDrive, dt: f32) -> Controls {
         if !self.cleared {
             self.cleared = true;
-            self.clear_walls(&td.ground);
+            let half_w = td.slot.centres.iter().map(|c| c.x.abs()).fold(0.6f32, f32::max) + 0.12;
+            self.clear_walls(&td.ground, half_w);
         }
         Controls { auto_box: true, ..self.controls_line(td, dt) }
     }
@@ -1763,13 +1771,60 @@ impl LineDriver {
             let kd = std::env::var("EVOVIEW_LINE_DAMP").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5f32);
             let r_des = v * 2.0 * local_x / (local_x * local_x + local_z * local_z);
             let damp = if v > 5.0 { -kd * ((td.r - r_des) * self.a_b(td) / v).atan() } else { 0.0 };
-            (steer_angle + damp + (1.2 * lat).atan2(v + 3.0)).clamp(-lim, lim)
+            // catch a slide: the rears past their peak (6 deg) and slipping
+            // 2 deg more than the fronts - point the fronts down the road,
+            // no more than 3 deg of slip into the slide (a cap off the
+            // fronts' slip with the wheels straight, so it does not feed on
+            // its own countersteer). The path terms countersteered only as
+            // the line drifted: the slider-mode MX-5 swung through
+            // Hatzenbach's downhill flick, rears 6 -> 20 deg in a second,
+            // and spun into the wall every lap (EVOVIEW_LINE_CATCH=0: off)
+            let cap = match td.rig.as_ref() {
+                Some((rc, _)) if v > 8.0 && std::env::var("EVOVIEW_LINE_CATCH").map_or(true, |v| v != "0") => {
+                    let af = 0.5 * (rc.c[0].alpha + rc.c[1].alpha);
+                    let ar = 0.5 * (rc.c[2].alpha + rc.c[3].alpha);
+                    (ar.abs() > 6f32.to_radians() && ar.abs() > af.abs() + 2f32.to_radians())
+                        .then(|| (ar.signum(), -(af - rc.steer) + ar.signum() * 3f32.to_radians()))
+                }
+                _ => None,
+            };
+            let mut s = (steer_angle + damp + (1.2 * lat).atan2(v + 3.0)).clamp(-lim, lim);
+            // and no more lock than the fronts can use: their slip held to
+            // the tyre's peak (~11 deg: the MX-5's front force still grows
+            // at 11 and falls past it). Into COTA's esses it wound the
+            // fronts to 15-19 deg, lost force, and ran 10 m wide
+            // (EVOVIEW_LINE_FPEAK, degrees; 0 = off)
+            let fpeak = std::env::var("EVOVIEW_LINE_FPEAK").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(11.0).to_radians();
+            if let Some((rc, _)) = td.rig.as_ref().filter(|_| v > 8.0 && fpeak > 0.0) {
+                let af0 = 0.5 * (rc.c[0].alpha + rc.c[1].alpha) - rc.steer;
+                s = s.clamp(-fpeak - af0, fpeak - af0);
+            }
+            match cap {
+                Some((sg, c)) if sg > 0.0 => s.min(c),
+                Some((_, c)) => s.max(c),
+                None => s,
+            }
         } else {
             steer_angle
         };
         // curvature over the next ~(v^2 / 2a + 30) m
         let look = 30.0 + v * v / 12.0;
         let mut vmax = f32::MAX;
+        // an S: a corner turning against the one the car has just been
+        // in (the strongest turn over the last ~35 m of line). The swing
+        // from one to the other unloads the rear and the car arrives with
+        // its yaw going the wrong way; out of COTA's ~1 g left straight
+        // into the long right the MX-5 ran 7-10 m wide in every mode.
+        // Take the second one slower (EVOVIEW_LINE_SBEND: speed factor,
+        // 1 = off; 0.9 still weaved the MX-5 off at the Nordschleife 3.4 km)
+        let turn = |j: usize| {
+            let (p0, p1, p2) = (self.line[j], self.line[(j + 4) % n], self.line[(j + 8) % n]);
+            let (a, b) = ((p1 - p0) * Vec3::new(1.0, 0.0, 1.0), (p2 - p1) * Vec3::new(1.0, 0.0, 1.0));
+            let ang = a.normalize_or_zero().dot(b.normalize_or_zero()).clamp(-1.0, 1.0).acos();
+            (a.x * b.z - a.z * b.x).signum() * ang / (a.length() + b.length()).max(0.1)
+        };
+        let sbend = if td.rig.is_some() { std::env::var("EVOVIEW_LINE_SBEND").ok().and_then(|v| v.parse().ok()).unwrap_or(0.85f32) } else { 1.0 };
+        let behind = (0..20usize).map(|k| turn((self.i + n - k) % n)).fold(0.0f32, |m, t| if t.abs() > m.abs() { t } else { m });
         let (mut j, mut d) = (self.i, 0.0);
         while d < look {
             let (p0, p1, p2) = (self.line[j], self.line[(j + 4) % n], self.line[(j + 8) % n]);
@@ -1778,6 +1833,7 @@ impl LineDriver {
             let seg = (a.length() + b.length()).max(0.1);
             if ang > 1e-3 {
                 let r = seg / ang;
+                let s_f = if behind.abs() > 1.0 / 700.0 && r < 700.0 && behind * (a.x * b.z - a.z * b.x) < 0.0 { sbend } else { 1.0 };
                 // allowed speed at that radius, and what braking to it from here needs
                 // a real-tyre car (rigcar) loses grip to load transfer: aim lower
                 // (0.5: at 0.72 it ran wide into Tamburello's gravel every
@@ -1795,17 +1851,38 @@ impl LineDriver {
                     _ => 0.43,
                 };
                 let k = if td.rig.is_some() { std::env::var("EVOVIEW_LINE_K").ok().and_then(|v| v.parse().ok()).unwrap_or(k_rig) } else { 0.85 };
-                let mut vr = (k * td.grip_estimate() * G * r).sqrt() * self.pace;
+                // over a crest the road falls away under the car and takes
+                // load off the tyres (v^2 x the vertical curvature): Mount
+                // Panorama's Skyline (7 -> 13 % down in ~40 m) at 135 km/h
+                // is ~20 % lighter, and the MX-5 ran wide into the Esses.
+                // v^2 = k mu g r / (1 + k mu r kv) (EVOVIEW_LINE_CREST=0: off)
+                let kv = if td.rig.is_some() && std::env::var("EVOVIEW_LINE_CREST").map_or(true, |v| v != "0") {
+                    let (q0, q1, q2) = (self.line[j], self.line[(j + 12) % n], self.line[(j + 24) % n]);
+                    let h = |a: Vec3, b: Vec3| Vec2::new(b.x - a.x, b.z - a.z).length().max(0.5);
+                    let (d1, d2) = (h(q0, q1), h(q1, q2));
+                    (((q1.y - q0.y) / d1 - (q2.y - q1.y) / d2) / (0.5 * (d1 + d2))).max(0.0)
+                } else {
+                    0.0
+                };
+                let mut vr = (k * td.grip_estimate() * G * r / (1.0 + k * td.grip_estimate() * r * kv)).sqrt() * self.pace * s_f;
                 // in the wet the grip falls with speed (the tyre model's
                 // water term): settle on the speed that grip allows
                 let w = crate::rain::track_wetness();
                 let wet_f = |v: f32| (1.0 - (1.0 - td.groove()) * crate::sctm::WET_K * w * v).clamp(0.15, 1.0) * crate::rain::rubber_grip(w);
                 if w > 0.0 {
                     for _ in 0..4 {
-                        vr = (k * td.grip_estimate() * wet_f(vr) * G * r).sqrt() * self.pace;
+                        vr = (k * td.grip_estimate() * wet_f(vr) * G * r).sqrt() * self.pace * s_f;
                     }
                 }
-                let brake_g = if w > 0.0 { 6.5 * wet_f(v) } else { 6.5 } * self.brake_k;
+                let mut brake_g = if w > 0.0 { 6.5 * wet_f(v) } else { 6.5 } * self.brake_k;
+                // downhill, gravity pulls against the brakes: Mount
+                // Panorama's drop from Skyline into the Esses (~13 %) left
+                // the MX-5 5-8 m wide at full lock into the tyre stacks
+                // (rigid-body car; EVOVIEW_LINE_SLOPE=0: flat braking)
+                if td.rig.is_some() && d > 5.0 && std::env::var("EVOVIEW_LINE_SLOPE").map_or(true, |v| v != "0") {
+                    let drop = (self.line[self.i].y - self.line[j].y) / d;
+                    brake_g = (brake_g - G * drop.max(0.0)).max(2.0);
+                }
                 let reach = (vr * vr + 2.0 * brake_g * d).sqrt();
                 vmax = vmax.min(reach);
             }
@@ -1830,6 +1907,18 @@ impl LineDriver {
             if td.snd.grip_f.min(td.snd.grip_r) < 0.85 {
                 vmax = vmax.min(18.0);
                 thr_max = 0.5;
+            }
+        }
+        // understeer: the fronts saturated (past ~9 deg and 3 more than
+        // the rears) - lift, and brake a little past 13 deg, as a driver
+        // does when the wheel goes light (EVOVIEW_LINE_LIFT=0: off)
+        if std::env::var("EVOVIEW_LINE_LIFT").map_or(true, |v| v != "0") {
+            if let Some((rc, _)) = td.rig.as_ref().filter(|_| v > 8.0) {
+                let af = (0.5 * (rc.c[0].alpha + rc.c[1].alpha)).abs().to_degrees();
+                let ar = (0.5 * (rc.c[2].alpha + rc.c[3].alpha)).abs().to_degrees();
+                if af > 9.0 && af > ar + 3.0 {
+                    vmax = vmax.min(v - 0.5 - 0.5 * (af - 11.0).max(0.0));
+                }
             }
         }
         let over = v - vmax;
@@ -1858,6 +1947,14 @@ impl LineDriver {
                 let ay = (v * td.r).abs() / (G * td.grip_estimate().max(0.5));
                 let circle = (1.0 - 0.7 * ay * ay).max(0.3);
                 c.throttle = c.throttle.min(slide.min(circle));
+                // and the left foot: braking hard into Brands Hatch's
+                // Clearways while already turning (0.9 g) locked the MX-5's
+                // rears (9-16 deg of slide every lap; the third spun into
+                // the wall). Trail off the brake as the corner loads the
+                // tyres and as the rear steps out; never below 0.3 of it
+                let slide_b = ((10.0 - ar) / 6.0).clamp(0.3, 1.0);
+                let circle_b = (1.0 - ay * ay).max(0.0).sqrt().max(0.3);
+                c.brake = c.brake.min(slide_b.min(circle_b).max(if c.brake > 0.0 { 0.3 } else { 0.0 }));
             }
         }
         // a spun car going backwards: stop first (it held full throttle at
@@ -2121,6 +2218,19 @@ pub fn test_run(td: &mut TrackDrive, secs: f32, mut driver: Option<LineDriver>, 
             p.controls(td, t, &mut c);
         }
         td.step(&c, dt);
+        // out of the world (Mount Panorama: a car slid off a bank under a
+        // wall's height band, past the collision mesh's edge, fell for
+        // kilometres and its numbers ran wild): put it back on the line,
+        // like a game's reset to track
+        if let Some(d) = driver.as_mut() {
+            let p = d.line[d.i];
+            if td.pos.y < p.y - 15.0 || !td.pos.is_finite() {
+                let q = d.line[(d.i + 3) % d.line.len()];
+                let yaw = (q.x - p.x).atan2(q.z - p.z);
+                println!("FELL t {t:.1} at ({:.1}, {:.1}, {:.1}): back on the line at ({:.1}, {:.1}, {:.1})", td.pos.x, td.pos.y, td.pos.z, p.x, p.y, p.z);
+                td.place_from(p, yaw, 3.0);
+            }
+        }
         if let Some(l) = laps.as_deref_mut() {
             l.step(td, false, dt);
         }

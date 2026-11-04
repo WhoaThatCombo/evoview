@@ -168,6 +168,17 @@ impl Links {
         Some(Links { w, body, link, last: (Vec3::ZERO, Quat::IDENTITY, Vec3::ZERO, Vec3::ZERO) })
     }
 
+    /// At rest at (cg, q): the hubs back where they were built, nothing
+    /// moving (a reset to the track)
+    pub fn reset(&mut self, cg: Vec3, q: Quat) {
+        for k in 0..4 {
+            let (hub, href) = (self.link[k].hub, self.link[k].href);
+            self.put(hub, cg + q * href, q, Vec3::ZERO, Vec3::ZERO);
+        }
+        self.put(self.body, cg, q, Vec3::ZERO, Vec3::ZERO);
+        self.last = (cg, q, Vec3::ZERO, Vec3::ZERO);
+    }
+
     fn get(&self, b: BodyId) -> (Vec3, Quat, Vec3, Vec3) {
         let b = &self.w.bodies[b];
         (f3(&b.pos), Quat::from_xyzw(b.q[1] as f32, b.q[2] as f32, b.q[3] as f32, b.q[0] as f32).normalize(), f3(&b.lvel), f3(&b.avel))

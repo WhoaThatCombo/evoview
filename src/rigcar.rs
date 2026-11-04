@@ -499,6 +499,10 @@ impl RigCar {
         self.running = true;
         self.crank = 0.0;
         self.engine_w = self.idle * std::f32::consts::TAU / 60.0;
+        let (cg, q) = (self.cg, self.q);
+        if let Some(l) = self.links.as_mut() {
+            l.reset(cg, q);
+        }
     }
 
     /// After `place`: rolling straight ahead at `v` m/s, wheels turning with
