@@ -46,6 +46,110 @@ pub struct Remote {
     pub at: Instant,
 }
 
+/// One remote car's recent packets, for playback a little in the past
+/// (a jitter buffer): (its own clock, s; state), oldest first.
+/// ⚠ Each car stamps its packets with ITS OWN clock (offsets between cars
+/// on one server ran 1000-4700 s apart), so the local <-> packet clock
+/// offset is per car: the smallest arrival - stamp seen (the least delayed
+/// packet), let drift up slowly.
+struct Hist {
+    buf: std::collections::VecDeque<(f64, CarState)>,
+    /// local seconds - packet seconds, for the quickest packet
+    off: f64,
+    /// the offset playback runs at, slewed toward `off` at up to 5% of
+    /// real time (a quicker packet lowering `off` 60 ms jumped the car
+    /// ~2 m in one frame); and the local time it was last moved
+    play: Option<(f64, f64)>,
+}
+
+/// How far behind the newest packet remote cars are played (s): two
+/// packet intervals (the game sends every 57 ms), so a late or lost packet
+/// is still interpolated, not guessed. EVOVIEW_MP_DELAY overrides.
+fn interp_delay() -> f64 {
+    std::env::var("EVOVIEW_MP_DELAY").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.12)
+}
+
+impl Hist {
+    fn push(&mut self, local: f64, t: f64, st: CarState) {
+        let newest = self.buf.back().map(|b| b.0);
+        // a clock jump (the sender rejoined, a reset): start over
+        if newest.map_or(false, |n| t < n - 2.0 || t > n + 10.0) {
+            self.buf.clear();
+        }
+        let o = local - t;
+        if self.buf.is_empty() || o < self.off {
+            self.off = o;
+        } else {
+            // route latency can grow: follow it, slowly (~2 s)
+            self.off += (o - self.off) * 0.02;
+        }
+        // in order; a duplicate or a stale reorder is dropped
+        match newest {
+            Some(n) if t <= n => {
+                if !self.buf.iter().any(|b| (b.0 - t).abs() < 1e-4) {
+                    let i = self.buf.iter().position(|b| b.0 > t).unwrap_or(self.buf.len());
+                    self.buf.insert(i, (t, st));
+                }
+            }
+            _ => self.buf.push_back((t, st)),
+        }
+        while self.buf.len() > 32 {
+            self.buf.pop_front();
+        }
+    }
+
+    /// The car at local time `local` minus the playback delay: Hermite
+    /// between the packets around it (their velocities as tangents), else
+    /// carried on from the newest for at most 0.25 s.
+    fn sample(&mut self, local: f64) -> Option<CarState> {
+        let off = match self.play {
+            Some((o, at)) if (o - self.off).abs() < 0.5 => {
+                let k = (local - at).max(0.0) * 0.05;
+                o + (self.off - o).clamp(-k, k)
+            }
+            _ => self.off,
+        };
+        self.play = Some((off, local));
+        let t = local - off - interp_delay();
+        let last = self.buf.back()?;
+        if t >= last.0 {
+            let mut s = last.1;
+            let dt = (t - last.0).min(0.25) as f32;
+            s.pos += s.vel * dt;
+            return Some(s);
+        }
+        let i = self.buf.iter().position(|b| b.0 > t)?;
+        if i == 0 {
+            return Some(self.buf[0].1);
+        }
+        let ((t0, a), (t1, b)) = (self.buf[i - 1], self.buf[i]);
+        let h = (t1 - t0).max(1e-4);
+        let u = ((t - t0) / h).clamp(0.0, 1.0) as f32;
+        let h = h as f32;
+        let mut s = if u < 0.5 { a } else { b };
+        s.pos = if h < 0.5 {
+            let (u2, u3) = (u * u, u * u * u);
+            a.pos * (2.0 * u3 - 3.0 * u2 + 1.0) + a.vel * (h * (u3 - 2.0 * u2 + u))
+                + b.pos * (-2.0 * u3 + 3.0 * u2) + b.vel * (h * (u3 - u2))
+        } else {
+            // a gap (lost packets): straight between
+            a.pos.lerp(b.pos, u)
+        };
+        let ang = |x: f32, y: f32| {
+            let d = (y - x + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+            x + d * u
+        };
+        s.ypr = Vec3::new(ang(a.ypr.x, b.ypr.x), ang(a.ypr.y, b.ypr.y), ang(a.ypr.z, b.ypr.z));
+        s.vel = a.vel.lerp(b.vel, u);
+        s.steer = a.steer + (b.steer - a.steer) * u;
+        s.throttle = a.throttle + (b.throttle - a.throttle) * u;
+        s.brake = a.brake + (b.brake - a.brake) * u;
+        s.wheel = a.wheel + (b.wheel - a.wheel) * u;
+        s.rpm = (a.rpm as f32 + (b.rpm as f32 - a.rpm as f32) * u) as u16;
+        Some(s)
+    }
+}
+
 #[derive(Default)]
 struct Shared {
     status: String,
@@ -54,6 +158,10 @@ struct Shared {
     /// our car's state, to send
     me: Option<CarState>,
     remotes: HashMap<u16, Remote>,
+    /// each remote car's recent packets (jitter buffer)
+    hist: HashMap<u16, Hist>,
+    /// local clock origin for `hist`
+    epoch: Option<Instant>,
     slot: u16,
     /// the other cars by number: (car folder, driver), from CreateNetcarCommand
     roster: HashMap<u16, (String, String)>,
@@ -405,6 +513,7 @@ impl Mp {
         let mut g = self.sh.lock().unwrap();
         g.remotes.retain(|_, r| r.at.elapsed() < Duration::from_secs(5));
         let live: std::collections::HashSet<u16> = g.remotes.keys().copied().collect();
+        g.hist.retain(|n, _| live.contains(n));
         for a in g.ai.iter_mut() {
             if a.1.map_or(false, |n| !live.contains(&n)) {
                 a.1 = None;
@@ -435,7 +544,18 @@ impl Mp {
                 g.ai[i].1 = Some(n);
             }
         }
-        g.ai.iter().map(|a| a.1.and_then(|n| g.remotes.get(&n).copied())).collect()
+        // played from the jitter buffer (EVOVIEW_MP_DELAY=0: the newest
+        // packet carried on by its age, as before)
+        let now = g.epoch.map_or(0.0, |e| e.elapsed().as_secs_f64());
+        let smooth = interp_delay() > 0.0;
+        let g = &mut *g;
+        g.ai.iter().map(|a| a.1.and_then(|n| {
+            let r = g.remotes.get(&n).copied()?;
+            match g.hist.get_mut(&n).filter(|_| smooth).and_then(|h| h.sample(now)) {
+                Some(st) => Some(Remote { state: st, at: Instant::now() }),
+                None => Some(r),
+            }
+        })).collect()
     }
 
     /// The chat, oldest first: (seconds ago, sender, text, kind 0 normal ..
@@ -1002,6 +1122,10 @@ fn run(addr: &str, user: &str, name: &str, fs: &[u8], mech: &str, sh: &Mutex<Sha
                 let mut g = sh.lock().unwrap();
                 if slot != g.slot {
                     g.remotes.insert(slot, Remote { state: st, at: Instant::now() });
+                    let ms = i32::from_le_bytes([ub[3], ub[4], ub[5], ub[6]]);
+                    let local = g.epoch.get_or_insert_with(Instant::now).elapsed().as_secs_f64();
+                    g.hist.entry(slot).or_insert_with(|| Hist { buf: Default::default(), off: 0.0, play: None })
+                        .push(local, ms as f64 / 1000.0, st);
                     // a car with no netcar yet: ask (UDP `u16 0xB, u32 number`;
                     // the server answers only clients driving a car, and only for
                     // players' cars - a local server's vAI car never answers)
@@ -1096,5 +1220,63 @@ mod tests {
         assert_eq!(r.rpm, 5000);
         assert!((r.steer - 0.25).abs() < 1e-3);
         assert!((r.wheel - 88.0).abs() / 88.0 < 0.15);
+    }
+
+    /// A car on a 60 m circle at 30 m/s, a packet every 57 ms (its own clock
+    /// 4000 s off ours) arriving 20-80 ms late at random, one in ten lost:
+    /// played back at 60 Hz it stays on the circle and never jumps.
+    #[test]
+    fn jitter_buffer_is_smooth() {
+        let (r, v) = (60.0f32, 30.0f32);
+        let at = |t: f32| {
+            let a = t * v / r;
+            (Vec3::new(r * a.cos(), 0.0, r * a.sin()), Vec3::new(-v * a.sin(), 0.0, v * a.cos()))
+        };
+        let mut seed = 12345u32;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32
+        };
+        // (arrival, stamp, state)
+        let mut pk: Vec<(f64, f64, CarState)> = Vec::new();
+        for i in 0..200 {
+            let t = i as f32 * 0.057;
+            if rnd() < 0.1 {
+                continue;
+            }
+            let (p, vel) = at(t);
+            pk.push((t as f64 + 0.02 + 0.06 * rnd() as f64, 4000.0 + t as f64, CarState { pos: p, vel, ..Default::default() }));
+        }
+        pk.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut h = Hist { buf: Default::default(), off: 0.0, play: None };
+        let (mut k, mut prev, mut worst_off, mut worst_step) = (0usize, None::<Vec3>, 0.0f32, 0.0f32);
+        let mut local = 1.0f64;
+        // the old way for comparison: the newest packet carried on by its age
+        let (mut newest, mut old_prev, mut old_step) = (None::<(f64, CarState)>, None::<Vec3>, 0.0f32);
+        while local < 10.0 {
+            while k < pk.len() && pk[k].0 <= local {
+                h.push(pk[k].0, pk[k].1, pk[k].2);
+                newest = Some((pk[k].0, pk[k].2));
+                k += 1;
+            }
+            if let Some((t0, n)) = newest {
+                let p = n.pos + n.vel * ((local - t0) as f32).min(0.3);
+                if let Some(q) = old_prev {
+                    old_step = old_step.max(((p - q).length() - 0.5).abs());
+                }
+                old_prev = Some(p);
+            }
+            let s = h.sample(local).unwrap();
+            worst_off = worst_off.max((s.pos.length() - r).abs());
+            if let Some(p) = prev {
+                // 30 m/s at 60 Hz = 0.5 m a frame
+                worst_step = worst_step.max(((s.pos - p).length() - 0.5).abs());
+            }
+            prev = Some(s.pos);
+            local += 1.0 / 60.0;
+        }
+        eprintln!("jitter buffer: worst {worst_off:.3} m off the path, worst frame step error {worst_step:.3} m (old way: {old_step:.3} m)");
+        assert!(worst_off < 0.05, "off the circle by {worst_off} m");
+        assert!(worst_step < 0.1, "a frame's step off 0.5 m by {worst_step} m");
     }
 }

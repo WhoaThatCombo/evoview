@@ -368,6 +368,12 @@ pub static ENV_MAX_LOD: std::sync::atomic::AtomicI32 =
 /// the game's LUT, after TAA, fog, bloom and auto exposure (grade.y = 2).
 pub static HDR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// The view is from inside the car (cockpit or dash camera).
+/// seconds since the first call (EVOVIEW_MP_TRACE)
+pub fn trace_clock() -> f64 {
+    static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    T0.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
+}
+
 pub static INTERIOR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
@@ -3557,6 +3563,12 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                                 format!("{k}:{:?}@{:.0},{:.0}", m.who(k).map(|w| w.0), x.state.pos.x, x.state.pos.z)
                                             })).collect();
                                             println!("mp placed ({} of {}): {}", on.len(), placed.len(), on.join(" "));
+                                        }
+                                    }
+                                    // EVOVIEW_MP_TRACE=1: the first other car as drawn, every frame
+                                    if std::env::var_os("EVOVIEW_MP_TRACE").is_some() {
+                                        if let Some(x) = placed.iter().flatten().next() {
+                                            println!("MPTRACE {:.4} {:.3} {:.3} {:.3}", crate::render::trace_clock(), x.state.pos.x, x.state.pos.z, x.at.elapsed().as_secs_f32());
                                         }
                                     }
                                     for (k, a) in r.ai.iter_mut().enumerate() {
