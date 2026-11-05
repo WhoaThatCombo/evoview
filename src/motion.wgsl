@@ -22,9 +22,10 @@ struct U {
 
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var t_depth: DEPTH_TEXTURE;
-struct Bones { m: array<mat4x4<f32>, 128> };
-@group(0) @binding(2) var<uniform> bones: Bones;
-@group(0) @binding(3) var<uniform> prev_bones: Bones;
+// shader.wgsl's bone blocks: 256 a car, block 0 the driven car, 1 + i
+// replay car i (instance facing.x = -(1 + i))
+@group(0) @binding(2) var<storage, read> bones: array<mat4x4<f32>>;
+@group(0) @binding(3) var<storage, read> prev_bones: array<mat4x4<f32>>;
 // per bone: xyz the rest origin in mesh space, w 1 = a wheel bone (spins)
 struct Spin { b: array<vec4<f32>, 256> };
 @group(0) @binding(4) var<uniform> spin: Spin;
@@ -84,6 +85,7 @@ struct VsIn {
     @location(7) inst1: vec4<f32>,
     @location(8) inst2: vec4<f32>,
     @location(9) inst3: vec4<f32>,
+    @location(10) facing: vec4<f32>,
     @location(11) prev0: vec4<f32>,
     @location(12) prev1: vec4<f32>,
     @location(13) prev2: vec4<f32>,
@@ -99,6 +101,10 @@ struct ObjVs {
     @location(3) @interpolate(flat) wheel: f32,
 };
 
+fn bone_base(in: VsIn) -> u32 {
+    return u32(max(-in.facing.x, 0.0) + 0.5) * 256u;
+}
+
 // shader.wgsl's linear blend skinning, with either bone table
 fn skin(in: VsIn, prev: bool) -> vec3<f32> {
     let total = in.bone_wgt.x + in.bone_wgt.y + in.bone_wgt.z + in.bone_wgt.w;
@@ -106,16 +112,16 @@ fn skin(in: VsIn, prev: bool) -> vec3<f32> {
         return in.position;
     }
     var p = vec3<f32>(0.0);
+    let base = bone_base(in);
     for (var k = 0u; k < 4u; k = k + 1u) {
         let w = in.bone_wgt[k];
         if (w <= 0.0) { continue; }
         let bi = u32(max(in.bone_idx[k], 0.0));
-        // as shader.wgsl: indices past its 256 skipped, past the 128-entry
-        // table clamped (what the uniform's bounds check does there)
+        // as shader.wgsl: indices past its 256 skipped
         if (bi >= 256u) { continue; }
-        var m = bones.m[min(bi, 127u)];
+        var m = bones[base + bi];
         if (prev) {
-            m = prev_bones.m[min(bi, 127u)];
+            m = prev_bones[base + bi];
         }
         p = p + (m * vec4<f32>(in.position, 1.0)).xyz * w;
     }
@@ -134,10 +140,11 @@ fn vs_obj(in: VsIn) -> ObjVs {
     // a wheel (rigidly on one spinning bone): the surface moved with the
     // wheel centre only
     let bi = u32(max(in.bone_idx.x, 0.0));
-    if (in.bone_wgt.x > 0.99 && bi < 128u && spin.b[bi].w > 0.5) {
+    // (the driven car's: the spin table is its bones)
+    if (bone_base(in) == 0u && in.bone_wgt.x > 0.99 && bi < 256u && spin.b[bi].w > 0.5) {
         let c = vec4<f32>(spin.b[bi].xyz, 1.0);
-        let c_now = (world * (bones.m[bi] * c)).xyz;
-        let c_was = (prev * (prev_bones.m[bi] * c)).xyz;
+        let c_now = (world * (bones[bi] * c)).xyz;
+        let c_was = (prev * (prev_bones[bi] * c)).xyz;
         o.prev_free = o.world - (c_now - c_was);
         o.wheel = 1.0;
     }

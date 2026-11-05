@@ -600,12 +600,20 @@ pub fn demo_run(d: &mut Drive, rig: &Rig, from: f32, to: f32) {
 pub struct ReplayFeed {
     pub rep: crate::replay::Replay,
     pub car: usize,
+    st: ReplayRig,
+    /// matrix-frame time per telemetry second (see `ReplayRig::new`)
+    pub warp: f32,
+}
+
+/// One recorded car's rig state (rest heights, wheel spin, last speed),
+/// without the replay itself: a replay's every car shares one `Replay`.
+pub struct ReplayRig {
+    pub car: usize,
     /// mean wheel and CoM heights in the car's own (wheel-plane) frame
     rest_wheel_y: [f32; 4],
     rest_com_y: f32,
     last_speed: Option<f32>,
     spin: [f32; 4],
-    /// matrix-frame time per telemetry second (see `new`)
     pub warp: f32,
 }
 
@@ -619,6 +627,27 @@ fn local_heights(p: &crate::replay::Pose) -> ([f32; 4], f32) {
 
 impl ReplayFeed {
     pub fn new(rep: crate::replay::Replay, car: usize) -> ReplayFeed {
+        let st = ReplayRig::new(&rep, car, true);
+        let warp = st.warp;
+        ReplayFeed { rep, car, st, warp }
+    }
+
+    pub fn length(&self) -> f32 {
+        self.rep.cars.get(self.car).map_or(0.0, |c| c.n_matrix as f32 / self.rep.rate() / self.warp)
+    }
+
+    /// Set `d` to the replay at time `t` (seconds), advancing its spring
+    /// model by `dt`.
+    pub fn apply(&mut self, d: &mut Drive, rig: &Rig, t: f32, dt: f32) {
+        self.st.apply(&self.rep, d, rig, t, dt);
+    }
+}
+
+impl ReplayRig {
+    /// `find_warp`: line the matrix frames' time up with the base frames'
+    /// (below); off for a whole grid, whose cars are placed at the matrix
+    /// frames' own time
+    pub fn new(rep: &crate::replay::Replay, car: usize, find_warp: bool) -> ReplayRig {
         let n = rep.cars.get(car).map_or(0, |c| c.n_matrix as usize);
         let mut w = [0.0f32; 4];
         let mut c = 0.0f32;
@@ -637,6 +666,9 @@ impl ReplayFeed {
                 *v /= k;
             }
             c /= k;
+        }
+        if !find_warp {
+            return ReplayRig { car, rest_wheel_y: w, rest_com_y: c, last_speed: None, spin: [0.0; 4], warp: 1.0 };
         }
         // ⚠ The matrix frames do not always tick at the 60 ms replay.rs
         // assumes: on some sessions their speed curve runs ~20% fast and
@@ -672,22 +704,18 @@ impl ReplayFeed {
         }
         let warp = if (best.1 - 1.0).abs() > 0.02 { best.1 } else { 1.0 };
         println!("replay feed: matrix time warp {warp:.2} (speed correlation {:.2})", best.0);
-        ReplayFeed { rep, car, rest_wheel_y: w, rest_com_y: c, last_speed: None, spin: [0.0; 4], warp }
+        ReplayRig { car, rest_wheel_y: w, rest_com_y: c, last_speed: None, spin: [0.0; 4], warp }
     }
 
-    pub fn length(&self) -> f32 {
-        self.rep.cars.get(self.car).map_or(0.0, |c| c.n_matrix as f32 / self.rep.rate() / self.warp)
-    }
-
-    /// Set `d` to the replay at time `t` (seconds), advancing its spring
-    /// model by `dt`.
-    pub fn apply(&mut self, d: &mut Drive, rig: &Rig, t: f32, dt: f32) {
+    /// Set `d` to car `self.car` of `rep` at time `t` (seconds), advancing
+    /// its spring model by `dt`.
+    pub fn apply(&mut self, rep: &crate::replay::Replay, d: &mut Drive, rig: &Rig, t: f32, dt: f32) {
         let dt = dt.clamp(1e-4, 0.05);
         d.time = t;
-        let speed = self.rep.speed(self.car, t * self.warp) * self.warp;
+        let speed = rep.speed(self.car, t * self.warp) * self.warp;
         let accel = self.last_speed.map_or(0.0, |s| (speed - s) / dt);
         self.last_speed = Some(speed);
-        if let Some(tel) = self.rep.telemetry(self.car, t) {
+        if let Some(tel) = rep.telemetry(self.car, t) {
             d.cs.rpm = tel.rpm;
             d.cs.throttle = tel.throttle;
             d.cs.brake = tel.brake;
@@ -705,7 +733,7 @@ impl ReplayFeed {
         }
         d.cs.speed_mps = speed;
         d.accel_long = accel.clamp(-30.0, 30.0);
-        if let Some(p) = self.rep.sample(self.car, t * self.warp) {
+        if let Some(p) = rep.sample(self.car, t * self.warp) {
             let (h, com) = local_heights(&p);
             // the body sinking toward the wheel plane is bump on every corner;
             // a wheel standing proud of the plane is bump on that corner

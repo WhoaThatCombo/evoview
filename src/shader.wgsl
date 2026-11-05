@@ -205,8 +205,9 @@ struct Material {
 // therefore exactly the transpose we need, and `bone * v` is correct. Do not
 // "fix" the order.
 const MAX_BONES: u32 = 256u;
-struct Bones { m: array<mat4x4<f32>, 128> };
-@group(2) @binding(0) var<uniform> bones: Bones;
+// one block of MAX_BONES per car: block 0 the driven / studio car, block
+// 1 + i replay car i (its instance's facing.x = -(1 + i))
+@group(2) @binding(0) var<storage, read> bones: array<mat4x4<f32>>;
 
 struct VsIn {
     @location(0) position: vec3<f32>,
@@ -252,6 +253,7 @@ fn vs_main(in: VsIn) -> VsOut {
     // track's own bone buffer, not this car table (drawn at rest here: the
     // shadow pass)
     if (total > 0.0001 && in.facing.y < 0.5) {
+        let bone_base = u32(max(-in.facing.x, 0.0) + 0.5) * MAX_BONES;
         var p = vec3<f32>(0.0);
         var n = vec3<f32>(0.0);
         var t = vec3<f32>(0.0);
@@ -260,7 +262,7 @@ fn vs_main(in: VsIn) -> VsOut {
             if (w <= 0.0) { continue; }
             let bi = u32(max(in.bone_idx[k], 0.0));
             if (bi >= MAX_BONES) { continue; }
-            let m = bones.m[bi];
+            let m = bones[bone_base + bi];
             p = p + (m * vec4<f32>(in.position, 1.0)).xyz * w;
             n = n + (m * vec4<f32>(in.normal, 0.0)).xyz * w;
             t = t + (m * vec4<f32>(in.tangent.xyz, 0.0)).xyz * w;

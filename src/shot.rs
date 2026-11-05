@@ -202,7 +202,7 @@ impl Still {
         let bone_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("bones"),
             contents: bytemuck::cast_slice(&bones),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
         let pipes = crate::render::build_pipeline(
             &device, format, &uniform_buf, 4, &materials.layout, &bone_buf,

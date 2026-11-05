@@ -297,7 +297,7 @@ impl Mirrors {
         let bone_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("mirror bones"),
             layout: &bone_bgl,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: bone_buf.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: bone_buf, offset: 0, size: std::num::NonZeroU64::new(128 * 64) }) }],
         });
         let cam_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mirror glass camera"),

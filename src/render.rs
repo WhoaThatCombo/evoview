@@ -1187,7 +1187,7 @@ pub fn build_pipeline(
             binding: 0,
             visibility: wgpu::ShaderStages::VERTEX,
             ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
                 has_dynamic_offset: false,
                 min_binding_size: None,
             },
@@ -1419,6 +1419,8 @@ pub struct Playback {
     pub replay: crate::replay::Replay,
     pub slots: Vec<crate::replayscene::Slot>,
     pub wheels: crate::replayscene::Wheels,
+    /// where playback starts, seconds (--time)
+    pub start: f32,
 }
 
 pub struct ViewOpts {
@@ -1708,10 +1710,13 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     let identity: [f32; 16] = [
         1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
     ];
+    // ...and one more block of MAX_BONES per replay car (shader.wgsl), each
+    // car's own rig posed from its recording
+    let bone_blocks = 1 + opts.playback.as_ref().map_or(0, |pb| pb.replay.cars.len());
     let bone_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("bones"),
-        contents: bytemuck::cast_slice(&vec![identity; MAX_BONES]),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+        contents: bytemuck::cast_slice(&vec![identity; MAX_BONES * bone_blocks]),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
     });
     // Tracks used to run without MSAA: every foliage card, fence and kerb edge
     // crawled and the user read it as "track quality is far below cars".
@@ -1916,6 +1921,9 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     let mut demo_t = 0.0f32;
     let mut shadow_tick = 0u32;
     let mut feed = opts.replay_feed.take();
+    // replay cars with a rig: each one's Drive + recording state (replayscene
+    // Slot::skel), made on first sight
+    let mut rep_rigs: std::collections::HashMap<usize, (crate::drive::Drive, crate::drive::ReplayRig)> = Default::default();
     let n_modes: u8 = if feed.is_some() { 4 } else { 3 };
     if drive.is_some() {
         let _ = ();
@@ -1976,7 +1984,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     // (DLSS / FSR need them: always on with either, plus their RG16 copy)
     let ext_up = dlss.is_some() || fsr.is_some();
     let mut motion = taa.as_ref().filter(|_| crate::motion::wanted() || ext_up)
-        .map(|_| crate::motion::Motion::new(&device, rw, rh, samples, ext_up));
+        .map(|_| crate::motion::Motion::new(&device, rw, rh, samples, ext_up, bone_buf.size()));
     // the driven car's wheel bones and their centres (fast spin, motion.wgsl)
     if let (Some(mo), Some(s)) = (motion.as_ref(), skeleton.as_ref()) {
         let spin: Vec<(usize, glam::Vec3)> = s.rig.as_deref().map_or(Vec::new(), |r| {
@@ -2262,7 +2270,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     let mut fps_clock = std::time::Instant::now();
     let mut fps_now: f32 = 0.0;
     // Replay playhead, in seconds of captured motion.
-    let mut play_t = 0.0f32;
+    let mut play_t = opts.playback.as_ref().map_or(0.0f32, |pb| pb.start.max(0.0));
     let mut playing = true;
     let mut play_speed = 1.0f32;
     let mut follow = if opts.track_drive.is_some() && std::env::var_os("EVOVIEW_FLY").is_none() {
@@ -3249,10 +3257,15 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             } else {
                                 0.0
                             };
+                            // how far the recording moved this frame (the rigs'
+                            // springs and wheel spin advance by it)
+                            let mut play_dt = 0.0f32;
                             if scrub != 0.0 {
                                 play_t += scrub * dt * 10.0 * play_speed;
+                                play_dt = dt * 10.0 * play_speed;
                             } else if playing {
                                 play_t += dt * play_speed;
+                                play_dt = dt * play_speed;
                             }
                             // Loop, so a replay left running keeps showing
                             // something rather than freezing on the last frame.
@@ -3264,10 +3277,18 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             // own suspension travel, so they cannot share the
                             // body's matrix.
                             let mut body: Vec<f32> = Vec::new();
+                            // the driver meshes' copy: the watched car's driver
+                            // hidden while the onboard camera sits in its head
+                            let mut body_drv: Vec<f32> = Vec::new();
+                            let hide_drv = drivers.get(watched).map(|&(ci, _)| ci).filter(|&ci| {
+                                follow == crate::camera::Follow::Onboard
+                                    && pb.slots.iter().any(|s| s.cars.contains(&ci) && s.cockpit.is_some())
+                            });
                             let mut wheel: [Vec<f32>; 4] = Default::default();
                             let mut smokers: Vec<crate::particles::CarIn> = Vec::new();
                             for (si, slot) in pb.slots.iter().enumerate() {
                                 body.clear();
+                                body_drv.clear();
                                 for w in wheel.iter_mut() {
                                     w.clear();
                                 }
@@ -3276,9 +3297,29 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     // to a zero matrix - every vertex lands on
                                     // one point, so the car simply is not
                                     // there, with no branch in the shader.
-                                    let (b, wm) = crate::replayscene::car_pose(
+                                    let (b, mut wm) = crate::replayscene::car_pose(
                                         &pb.replay, &pb.wheels, slot, ci, play_t)
                                         .unwrap_or((glam::Mat4::ZERO, [glam::Mat4::ZERO; 4]));
+                                    // EVOVIEW_REPLAY_MAX_CARS=n: only the first n cars (measuring)
+                                    let b = if std::env::var("EVOVIEW_REPLAY_MAX_CARS").ok().and_then(|v| v.parse::<usize>().ok()).map_or(false, |n| ci >= n) { glam::Mat4::ZERO } else { b };
+                                    // the car's own rig, posed from its recording:
+                                    // everything rides the body, the bones turn,
+                                    // spin and spring the wheels, lean the hull,
+                                    // steer the wheel and the driver's arms
+                                    let mut tail = [0.0f32; 4];
+                                    if let (Some(rig), true) = (slot.skel.as_ref().and_then(|k| k.rig.as_deref()), b != glam::Mat4::ZERO) {
+                                        let (d, st) = rep_rigs.entry(ci).or_insert_with(|| {
+                                            (crate::drive::Drive::new(rig), crate::drive::ReplayRig::new(&pb.replay, ci, false))
+                                        });
+                                        st.apply(&pb.replay, d, rig, play_t, play_dt);
+                                        let mut pose = rig.pose(&d.inputs(rig));
+                                        pose.resize(MAX_BONES, identity);
+                                        queue.write_buffer(&bone_buf, ((1 + ci) * MAX_BONES * 64) as u64, bytemuck::cast_slice(&pose));
+                                        wm = [b; 4];
+                                        tail[0] = -((1 + ci) as f32);
+                                    }
+                                    // brake lights: drawn as an AI car's (shader fn_i)
+                                    tail[2] = 1.0 + pb.replay.telemetry(ci, play_t).map_or(0.0, |t| t.brake).clamp(0.0, 1.0);
                                     // tyre smoke from the slide: nose off the
                                     // direction of travel, at speed
                                     if let (Some(p0), Some(p1)) = (pb.replay.sample(ci, (play_t - 0.06).max(0.0)), pb.replay.sample(ci, play_t)) {
@@ -3319,15 +3360,22 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                         }
                                     }
                                     body.extend_from_slice(&b.to_cols_array());
-                                    body.extend_from_slice(&[0.0f32; 4]);
+                                    body.extend_from_slice(&tail);
+                                    if hide_drv == Some(ci) {
+                                        body_drv.extend_from_slice(&[0.0f32; 20]);
+                                    } else {
+                                        body_drv.extend_from_slice(&b.to_cols_array());
+                                        body_drv.extend_from_slice(&tail);
+                                    }
                                     for k in 0..4 {
                                         wheel[k].extend_from_slice(&wm[k].to_cols_array());
-                                        wheel[k].extend_from_slice(&[0.0f32; 4]);
+                                        wheel[k].extend_from_slice(&tail);
                                     }
                                 }
                                 for &gi in &slot_gpu[si].0 {
+                                    let rows = if driver_meshes.contains(&gi) { &body_drv } else { &body };
                                     queue.write_buffer(&meshes[gi].instances, 0,
-                                        bytemuck::cast_slice(&body));
+                                        bytemuck::cast_slice(rows));
                                 }
                                 for k in 0..4 {
                                     for &gi in &slot_gpu[si].1[k] {
@@ -3972,9 +4020,19 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             if follow != crate::camera::Follow::Free {
                                 if let Some(&(ci, _)) = drivers.get(watched) {
                                     if let Some(p) = pb.replay.sample(ci, play_t) {
-                                        let (vp, e) = follow.view_proj(
-                                            aspect, p.pos, p.forward, p.up, p.right,
-                                            last_frame.elapsed().as_secs_f32() + play_t);
+                                        // onboard: the car's own cockpit camera, where
+                                        // the model has one (the wheel, the hands,
+                                        // the dash), else the generic eye point
+                                        let slot = pb.slots.iter().find(|s| s.cars.contains(&ci));
+                                        let cockpit = slot.and_then(|s| s.cockpit.as_ref().map(|c| (c, s.offset)))
+                                            .filter(|_| follow == crate::camera::Follow::Onboard);
+                                        INTERIOR.store(cockpit.is_some(), std::sync::atomic::Ordering::Relaxed);
+                                        let (vp, e) = match cockpit {
+                                            Some((c, off)) => crate::cams::car_view(c, crate::replayscene::car_matrix(&p, off), aspect),
+                                            None => follow.view_proj(
+                                                aspect, p.pos, p.forward, p.up, p.right,
+                                                last_frame.elapsed().as_secs_f32() + play_t),
+                                        };
                                         view_proj = vp;
                                         eye = e;
                                     }
@@ -4105,8 +4163,8 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             fxst.smoke = smoke_was + (want - smoke_was) * (dt * 6.0).min(1.0);
                         }
                         cam_u.fx = crate::lights::fx_block(car_fx.as_deref(), &fxst, opts.start_fly);
-                        if opts.race.is_some() {
-                            // the AI's lamps: lit at night and in the rain (the
+                        if opts.race.is_some() || opts.playback.is_some() {
+                            // the AI's (and replay cars') lamps: lit at night and in the rain (the
                             // rain light too), EVOVIEW_AI_LIGHTS=0..3 forces a stage
                             let night = fxst.night || crate::sky::now().night > 0.5;
                             let wet = fxst.rain > 0.0;

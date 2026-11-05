@@ -1166,7 +1166,7 @@ fn play_loaded(rep: replay::Replay, mut scene: replayscene::Scene, name: String,
             ground: false,
             title,
             playback: Some(render::Playback {
-                replay: rep, slots: scene.slots, wheels,
+                replay: rep, slots: scene.slots, wheels, start: at,
             }),
             drive: 0,
             replay_feed: None,

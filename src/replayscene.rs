@@ -38,6 +38,13 @@ pub struct Slot {
     pub offset: Vec3,
     /// Which replay cars are drawn with this model, in instance order.
     pub cars: Vec<usize>,
+    /// The model's skeleton with its rig (replays): each car's rig is posed
+    /// from its own recording - steering wheel, driver, needles, suspension,
+    /// body roll - and the wheels ride their bones, not `wheel_matrix`
+    pub skel: Option<std::sync::Arc<crate::load::Skeleton>>,
+    /// The model's own cockpit camera (actor cameras, mesh space): the
+    /// replay's onboard view
+    pub cockpit: Option<crate::fxdata::CarCam>,
 }
 
 /// Mesh-name corner code -> replay wheel index. The replay stores wheels
@@ -455,12 +462,24 @@ impl Scene {
                     radius: 0.33,
                     offset: Vec3::ZERO,
                     cars: vec![i],
+                    skel: None,
+                    cockpit: None,
                 }),
             }
         }
 
         let mut kept: Vec<Slot> = Vec::new();
         let mut first_fx = None;
+        // big grids: the cars' textures a mip or two down. A 75-car Ring
+        // replay of ~10 models took 9 GB at full size on a 12 GB card, it
+        // paged, and every pass ran 15-30x slow (4 fps; TAA alone 11 ms).
+        // EVOVIEW_REPLAY_TEX_SKIP=n overrides.
+        let skip = std::env::var("EVOVIEW_REPLAY_TEX_SKIP").ok().and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(match slots.len() { 0..=2 => 0, 3..=6 => 1, _ => 2 });
+        if skip > 0 {
+            println!("replay: {} car models, their textures {skip} mip(s) down", slots.len());
+        }
+        crate::load::CAR_TEX_SKIP.store(skip, std::sync::atomic::Ordering::Relaxed);
         for (k, mut s) in slots.into_iter().enumerate() {
             // a mod car is in its own package (Saved Games/ACE/mods/<model>
             // .kspkg) over the base game, as the race path (below) opens it
@@ -547,8 +566,17 @@ impl Scene {
                 eprintln!("  {}: only {} wheel corner(s) found; they will not turn",
                           s.model, s.wheels.iter().filter(|w| !w.is_empty()).count());
             }
+            s.cockpit = loaded.car.fx.as_ref().and_then(|f| {
+                let c = &f.actor.cameras;
+                c.iter().find(|c| c.name.eq_ignore_ascii_case("cockpit")).or_else(|| c.iter().find(|c| c.mode == 1)).cloned()
+            });
+            // EVOVIEW_REPLAY_RIG=0: the old rigid bodies and wheels
+            if loaded.skeleton.rig.is_some() && std::env::var("EVOVIEW_REPLAY_RIG").map_or(true, |v| v != "0") {
+                s.skel = Some(std::sync::Arc::new(loaded.skeleton));
+            }
             kept.push(s);
         }
+        crate::load::CAR_TEX_SKIP.store(0, std::sync::atomic::Ordering::Relaxed);
         if kept.is_empty() {
             return Err("none of the replay's cars could be loaded".into());
         }
@@ -862,6 +890,8 @@ fn measure_slot(meshes: &mut [MeshEntry], range: std::ops::Range<usize>, src: &C
         radius: 0.0,
         offset: Vec3::ZERO,
         cars: (0..n).collect(),
+        skel: None,
+        cockpit: None,
     };
     let ident = Mat4::IDENTITY.to_cols_array();
     for i in range.clone() {

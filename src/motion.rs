@@ -58,7 +58,8 @@ pub struct Motion {
 
 impl Motion {
     /// `rg`: also write the RG16F copy DLSS reads.
-    pub fn new(device: &wgpu::Device, rw: u32, rh: u32, samples: u32, rg: bool) -> Motion {
+    /// `bone_bytes`: the size of the renderer's bone buffer (all its blocks)
+    pub fn new(device: &wgpu::Device, rw: u32, rh: u32, samples: u32, rg: bool, bone_bytes: u64) -> Motion {
         // EVOVIEW_WHEEL_MV_PX: a wheel spinning more than this many render
         // px a frame moves with its centre only (0 / EVOVIEW_WHEEL_MV=0: off)
         let wheel_px = if std::env::var("EVOVIEW_WHEEL_MV").map_or(false, |v| v == "0") { 0.0 }
@@ -83,6 +84,12 @@ impl Motion {
             ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
             count: None,
         };
+        let sto = |b: u32| wgpu::BindGroupLayoutEntry {
+            binding: b,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
+            count: None,
+        };
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("motion bgl"),
             entries: &[
@@ -94,8 +101,8 @@ impl Motion {
                         view_dimension: wgpu::TextureViewDimension::D2, multisampled: samples > 1 },
                     count: None,
                 },
-                ubo(2),
-                ubo(3),
+                sto(2),
+                sto(3),
                 ubo(4),
             ],
         });
@@ -140,7 +147,7 @@ impl Motion {
                     wgpu::VertexBufferLayout {
                         array_stride: 80,
                         step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &wgpu::vertex_attr_array![6 => Float32x4, 7 => Float32x4, 8 => Float32x4, 9 => Float32x4],
+                        attributes: &wgpu::vertex_attr_array![6 => Float32x4, 7 => Float32x4, 8 => Float32x4, 9 => Float32x4, 10 => Float32x4],
                     },
                     wgpu::VertexBufferLayout {
                         array_stride: 80,
@@ -164,8 +171,8 @@ impl Motion {
         });
         let prev_bones = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("motion prev bones"),
-            size: (crate::render::MAX_BONES * 64) as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            size: bone_bytes.max((crate::render::MAX_BONES * 64) as u64),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         // per bone: xyz its rest origin in mesh space, w 1 = it spins (a
