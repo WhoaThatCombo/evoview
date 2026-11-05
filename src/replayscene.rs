@@ -495,107 +495,141 @@ impl Scene {
             println!("replay: {} car models, their textures {skip} mip(s) down", slots.len());
         }
         crate::load::CAR_TEX_SKIP.store(skip, std::sync::atomic::Ordering::Relaxed);
-        crate::load::set_car_lods(true);
-        for (k, mut s) in slots.into_iter().enumerate() {
+        // The models load on worker threads (EVOVIEW_LOAD_THREADS, 2: a load
+        // is half disk, half decode) and are merged here strictly in order,
+        // so the scene is the same as loading them one by one.
+        let models: Vec<String> = slots.iter().map(|s| s.model.clone()).collect();
+        let load_one = |model: &str| -> Result<crate::load::Loaded, String> {
             // a mod car is in its own package (Saved Games/ACE/mods/<model>
             // .kspkg) over the base game, as the race path (below) opens it
-            let loaded = crate::load::load_from_package(pkg, &s.model, base).or_else(|e| {
+            crate::load::set_car_lods(true);
+            let r = crate::load::load_from_package(pkg, model, base).or_else(|e| {
                 let m = crate::envc::var_os("USERPROFILE").map(|h| std::path::Path::new(&h).join("Saved Games")
-                    .join("ACE").join("mods").join(format!("{}.kspkg", s.model)));
+                    .join("ACE").join("mods").join(format!("{}.kspkg", model)));
                 match m.filter(|m| m.exists()) {
                     Some(m) => {
-                        println!("car {}: the mod {}", s.model, m.display());
-                        crate::load::load_from_package(&m, &s.model, Some(pkg))
+                        println!("car {}: the mod {}", model, m.display());
+                        crate::load::load_from_package(&m, model, Some(pkg))
                     }
                     None => Err(e),
                 }
             });
-            let loaded = match loaded {
-                Ok(l) => l,
-                Err(e) => {
-                    // One missing car must not sink the whole replay.
-                    eprintln!("  skipping {}: {e}", s.model);
-                    continue;
-                }
-            };
-            if first_fx.is_none() {
-                // ⚠ the effects' texture indices are into THIS car's table,
-                // which merge appends after the track's: unshifted, the smoke
-                // sampled asphalt and line paint (dark square shards)
-                let base = textures.len();
-                first_fx = loaded.car.fx.clone().map(|fx| shift_fx_textures(fx, base));
+            crate::load::set_car_lods(false);
+            r
+        };
+        let threads = crate::envc::var("EVOVIEW_LOAD_THREADS").ok().and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(2).clamp(1, 4).min(models.len().max(1));
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Result<crate::load::Loaded, String>)>(threads);
+        std::thread::scope(|sc| {
+            for _ in 0..threads {
+                let tx = tx.clone();
+                let (models, load_one, next) = (&models, &load_one, &next);
+                sc.spawn(move || loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(m) = models.get(i) else { break };
+                    if tx.send((i, load_one(m))).is_err() {
+                        break;
+                    }
+                });
             }
-            let tag = format!("c{k}");
-            let range = merge(&mut meshes, &mut textures, &mut tex_src, &mut materials, &mut blob,
-                &loaded.car, Some(&tag));
-            // One instance per driver using this model. build_scene sizes the
-            // instance buffer from `xforms`, so seeding them here is what makes
-            // room for the per-frame rewrite; the values are replaced on the
-            // first frame.
-            let ident = Mat4::IDENTITY.to_cols_array();
-            collect_lods(&meshes, range.clone(), &mut s.lods);
-            for i in range.clone() {
-                meshes[i].xforms = vec![ident; s.cars.len()];
-                if crate::load::car_lod_of(&meshes[i].name).is_some() {
-                    continue;
-                }
-                match corner_index(&meshes[i].name) {
-                    Some(k) => {
-                        // Wheel meshes are authored AT the wheel bone, so their
-                        // bounds give both the centre to rotate about and the
-                        // rolling radius - no skeleton lookup needed here.
-                        //
-                        // ⚠ Measure the SOURCE mesh, not the merged one: the
-                        // merged copy's blob ranges have already been shifted
-                        // to index the combined blob, so reading them against
-                        // the source car's blob returns garbage bounds and the
-                        // wheels fly off the car.
-                        let (lo, hi) =
-                            mesh_bounds(&loaded.car, &loaded.car.meshes[i - range.start]);
-                        s.centres[k] = (lo + hi) * 0.5;
-                        if meshes[i].name.starts_with("tyre_") {
-                            s.radius = s.radius.max((hi.y - lo.y) * 0.5);
-                            s.axles[k] = tyre_axle(&loaded.car, &loaded.car.meshes[i - range.start]);
+            drop(tx);
+            let mut want = 0usize;
+            let mut slots = slots.into_iter().enumerate();
+            let mut pending: std::collections::BTreeMap<usize, Result<crate::load::Loaded, String>> = Default::default();
+            for (i, r) in rx {
+                pending.insert(i, r);
+                while let Some(loaded) = pending.remove(&want) {
+                    want += 1;
+                    let Some((k, mut s)) = slots.next() else { break };
+                    let loaded = match loaded {
+                        Ok(l) => l,
+                        Err(e) => {
+                            // One missing car must not sink the whole replay.
+                            eprintln!("  skipping {}: {e}", s.model);
+                            continue;
                         }
-                        s.wheels[k].push(i);
+                    };
+                    if first_fx.is_none() {
+                        // ⚠ the effects' texture indices are into THIS car's table,
+                        // which merge appends after the track's: unshifted, the smoke
+                        // sampled asphalt and line paint (dark square shards)
+                        let base = textures.len();
+                        first_fx = loaded.car.fx.clone().map(|fx| shift_fx_textures(fx, base));
                     }
-                    None => s.meshes.push(i),
+                    let tag = format!("c{k}");
+                    let range = merge(&mut meshes, &mut textures, &mut tex_src, &mut materials, &mut blob,
+                        &loaded.car, Some(&tag));
+                    // One instance per driver using this model. build_scene sizes the
+                    // instance buffer from `xforms`, so seeding them here is what makes
+                    // room for the per-frame rewrite; the values are replaced on the
+                    // first frame.
+                    let ident = Mat4::IDENTITY.to_cols_array();
+                    collect_lods(&meshes, range.clone(), &mut s.lods);
+                    for i in range.clone() {
+                        meshes[i].xforms = vec![ident; s.cars.len()];
+                        if crate::load::car_lod_of(&meshes[i].name).is_some() {
+                            continue;
+                        }
+                        match corner_index(&meshes[i].name) {
+                            Some(k) => {
+                                // Wheel meshes are authored AT the wheel bone, so their
+                                // bounds give both the centre to rotate about and the
+                                // rolling radius - no skeleton lookup needed here.
+                                //
+                                // ⚠ Measure the SOURCE mesh, not the merged one: the
+                                // merged copy's blob ranges have already been shifted
+                                // to index the combined blob, so reading them against
+                                // the source car's blob returns garbage bounds and the
+                                // wheels fly off the car.
+                                let (lo, hi) =
+                                    mesh_bounds(&loaded.car, &loaded.car.meshes[i - range.start]);
+                                s.centres[k] = (lo + hi) * 0.5;
+                                if meshes[i].name.starts_with("tyre_") {
+                                    s.radius = s.radius.max((hi.y - lo.y) * 0.5);
+                                    s.axles[k] = tyre_axle(&loaded.car, &loaded.car.meshes[i - range.start]);
+                                }
+                                s.wheels[k].push(i);
+                            }
+                            None => s.meshes.push(i),
+                        }
+                    }
+                    // Line the body up with its own wheels: average, over the four
+                    // corners, of where the replay puts the wheel minus where the mesh
+                    // has it. Measured per model rather than hard-coded, because the
+                    // gap between mesh origin and centre of mass differs per car.
+                    {
+                        let p = rep.pose(s.cars[0], 0);
+                        let basis = car_basis(&p).transpose();
+                        let mut d = Vec3::ZERO;
+                        for k in 0..4 {
+                            let local = basis.transform_vector3(p.wheels[k] - p.pos);
+                            d += local - s.centres[k];
+                            if crate::envc::var("EVOVIEW_REPLAY_LOG").is_ok() {
+                                eprintln!(
+                                    "{} wheel{k}: mesh ({:6.3},{:6.3},{:6.3})  replay ({:6.3},{:6.3},{:6.3})  r={:.3}",
+                                    s.model, s.centres[k].x, s.centres[k].y, s.centres[k].z,
+                                    local.x, local.y, local.z, s.radius);
+                            }
+                        }
+                        s.offset = d / 4.0;
+                    }
+                    if s.wheels.iter().any(|w| w.is_empty()) {
+                        eprintln!("  {}: only {} wheel corner(s) found; they will not turn",
+                                  s.model, s.wheels.iter().filter(|w| !w.is_empty()).count());
+                    }
+                    s.cockpit = loaded.car.fx.as_ref().and_then(|f| {
+                        let c = &f.actor.cameras;
+                        c.iter().find(|c| c.name.eq_ignore_ascii_case("cockpit")).or_else(|| c.iter().find(|c| c.mode == 1)).cloned()
+                    });
+                    // EVOVIEW_REPLAY_RIG=0: the old rigid bodies and wheels
+                    if loaded.skeleton.rig.is_some() && crate::envc::var("EVOVIEW_REPLAY_RIG").map_or(true, |v| v != "0") {
+                        s.skel = Some(std::sync::Arc::new(loaded.skeleton));
+                    }
+                    kept.push(s);
                 }
             }
-            // Line the body up with its own wheels: average, over the four
-            // corners, of where the replay puts the wheel minus where the mesh
-            // has it. Measured per model rather than hard-coded, because the
-            // gap between mesh origin and centre of mass differs per car.
-            {
-                let p = rep.pose(s.cars[0], 0);
-                let basis = car_basis(&p).transpose();
-                let mut d = Vec3::ZERO;
-                for k in 0..4 {
-                    let local = basis.transform_vector3(p.wheels[k] - p.pos);
-                    d += local - s.centres[k];
-                    if crate::envc::var("EVOVIEW_REPLAY_LOG").is_ok() {
-                        eprintln!(
-                            "{} wheel{k}: mesh ({:6.3},{:6.3},{:6.3})  replay ({:6.3},{:6.3},{:6.3})  r={:.3}",
-                            s.model, s.centres[k].x, s.centres[k].y, s.centres[k].z,
-                            local.x, local.y, local.z, s.radius);
-                    }
-                }
-                s.offset = d / 4.0;
-            }
-            if s.wheels.iter().any(|w| w.is_empty()) {
-                eprintln!("  {}: only {} wheel corner(s) found; they will not turn",
-                          s.model, s.wheels.iter().filter(|w| !w.is_empty()).count());
-            }
-            s.cockpit = loaded.car.fx.as_ref().and_then(|f| {
-                let c = &f.actor.cameras;
-                c.iter().find(|c| c.name.eq_ignore_ascii_case("cockpit")).or_else(|| c.iter().find(|c| c.mode == 1)).cloned()
-            });
-            // EVOVIEW_REPLAY_RIG=0: the old rigid bodies and wheels
-            if loaded.skeleton.rig.is_some() && crate::envc::var("EVOVIEW_REPLAY_RIG").map_or(true, |v| v != "0") {
-                s.skel = Some(std::sync::Arc::new(loaded.skeleton));
-            }
-            kept.push(s);
-        }
+        });
         crate::load::CAR_TEX_SKIP.store(0, std::sync::atomic::Ordering::Relaxed);
         crate::load::set_car_lods(false);
         if kept.is_empty() {
