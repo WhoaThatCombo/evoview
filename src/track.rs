@@ -2622,6 +2622,9 @@ impl TrackRender {
                     // per view from the frame uniform (`lod`)
                     crate::taa::with_mip_bias_expr(&src, "lod_bias()")
                         .replace("MV_DEPTH", if samples > 1 { "texture_depth_multisampled_2d" } else { "texture_depth_2d" })
+                        // EVOVIEW_PANO_VIEW=0: every direction of the cloud
+                        // panorama refreshed at the in-view rate
+                        .replace("PANO_VIEW_ALL", if crate::envc::var("EVOVIEW_PANO_VIEW").map_or(false, |v| v == "0") { "true" } else { "false" })
                         .into()
                 }),
         });

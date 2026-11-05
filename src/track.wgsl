@@ -747,13 +747,23 @@ fn fs_sky_pano(in: SkyOut) -> @location(0) vec4<f32> {
     let q = vec2<u32>(in.clip.xy) & vec2<u32>(1u);
     let fresh = frame.atm2.x >= 1.0;
     let prev = textureLoad(t_pano_cloud, vec2<i32>(in.clip.xy), 0);
+    let uv = vec2<f32>(in.ndc.x * 0.5 + 0.5, 0.5 - in.ndc.y * 0.5);
+    let dir = pano_dir(uv);
+    // A direction the camera does not see (with a wide margin: the turn
+    // between refreshes, the filter's reach) is refreshed a quarter as
+    // often: one texel of each 4x4 a frame. Mirrors and the probe look
+    // there; the deck drifts a texel or so a second.
+    let cv = frame.view_proj * vec4<f32>(frame.eye.xyz + dir * 1000.0, 1.0);
+    let seen = PANO_VIEW_ALL || (cv.w > 0.0 && all(abs(cv.xy) < vec2<f32>(1.6 * cv.w)));
+    let f = u32(frame.haze2.w);
+    let q4 = vec2<u32>(in.clip.xy) & vec2<u32>(3u);
+    let due = select(q4.x + 4u * q4.y == (f & 15u), q.x + 2u * q.y == (f & 3u), seen);
     // ⚠ not discard: naga's discard demotes to a helper that still runs
     // the whole march (2.75 ms instead of ~0.4)
-    if (!fresh && q.x + 2u * q.y != (u32(frame.haze2.w) & 3u)) {
+    if (!fresh && !due) {
         return prev;
     }
-    let uv = vec2<f32>(in.ndc.x * 0.5 + 0.5, 0.5 - in.ndc.y * 0.5);
-    let c = clouds(pano_dir(uv), in.clip.xy * 0.5, i32(frame.atm2.z));
+    let c = clouds(dir, in.clip.xy * 0.5, i32(frame.atm2.z));
     return mix(prev, c, frame.atm2.x);
 }
 
