@@ -1463,8 +1463,11 @@ pub struct Vfs {
 
 impl Vfs {
     fn insert(&mut self, key: String, src: Src) {
-        let base = key.rsplit('/').next().unwrap_or("").to_string();
-        self.by_base.entry(base).or_default().push(key.clone());
+        // (an override of a key already present keeps its one index entry)
+        if !self.entries.contains_key(&key) {
+            let base = key.rsplit('/').next().unwrap_or("").to_string();
+            self.by_base.entry(base).or_default().push(key.clone());
+        }
         self.entries.insert(key, src);
     }
 
@@ -1530,6 +1533,35 @@ impl Vfs {
             self.insert(k, Src::Pkg(e, owner));
         }
         self.extra.push(base);
+    }
+
+    /// Mount the game's loose override root for `prefix` (e.g.
+    /// "content/cars/<id>/") OVER this archive: files there win, as they do
+    /// in the game (`[fastStorage] Opening non-packed file`).
+    ///
+    /// ⚠ Mods that carry their own textures ship the `.texturemips` LOOSE
+    /// under Saved Games/ACE/mods/content/ (DirectStorage cannot read the
+    /// encrypted ones in a package) - read from the package alone, every
+    /// texture of such a mod came out empty (ks_bmw_m8_comp_mod_v1: 98 of 98).
+    pub fn over_loose(&mut self, prefix: &str) {
+        let Some(home) = std::env::var_os("USERPROFILE") else { return };
+        let root = Path::new(&home).join("Saved Games").join("ACE").join("mods");
+        let dir = root.join(prefix.trim_end_matches('/').replace('/', std::path::MAIN_SEPARATOR_STR));
+        if !dir.is_dir() {
+            return;
+        }
+        let mut files = Vec::new();
+        collect_all(&dir, &mut files);
+        let n = files.len();
+        for f in files {
+            if let Ok(rel) = f.strip_prefix(&root) {
+                let key = rel.to_string_lossy().replace('\\', "/").to_lowercase();
+                self.insert(key, Src::File(f.clone()));
+            }
+        }
+        if n > 0 {
+            println!("loose overrides: {n} file(s) from {}", dir.display());
+        }
     }
 
     pub fn under(&mut self, base: crate::pkg::Package) {
@@ -2049,6 +2081,7 @@ pub fn load_track_from_package_opts(
         return Err(format!("{folder} is not in {}", pkg_path.display()));
     }
     let mut vfs = Vfs::package_track(pkg, folder);
+    vfs.over_loose(&format!("content/tracks/{}/", folder.to_lowercase()));
     if let Some(b) = base {
         if b != pkg_path {
             vfs.under(crate::pkg::Package::open(b)?);
@@ -4259,6 +4292,7 @@ pub fn package_vfs(
         return Err(format!("{car_id} is not in {}", pkg_path.display()));
     }
     let mut vfs = Vfs::package(pkg, car_id);
+    vfs.over_loose(&format!("content/cars/{}/", car_id.to_lowercase()));
     if let Some(b) = base {
         if b != pkg_path {
             vfs.under(crate::pkg::Package::open(b)?);
@@ -7034,28 +7068,70 @@ mod node_xf_tests {
 /// content is left out, and so are the formats with loaders of their own (30
 /// irradiance volumes, 8 / 11 the IBL tables) and the short chains that
 /// mipfill.rs completes at upload. Rerun after a game update.
+///
+/// `pkg_path` may also be a folder of loose files (a mods folder, an unpacked
+/// mod): every `.texture` under it, keyed by its path below the folder.
 pub fn tex_audit(pkg_path: &Path) {
-    let Ok(pkg) = crate::pkg::Package::open_filtered(pkg_path, &["content\\"]) else {
-        eprintln!("tex-audit: cannot open {}", pkg_path.display());
-        return;
+    // (key -> package entry) or (key -> file on disk)
+    let pkg = if pkg_path.is_dir() { None } else {
+        match crate::pkg::Package::open_filtered(pkg_path, &["content\\"]) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                println!("TEXAUDIT cannot-open {} {e}", pkg_path.display());
+                println!("TEXAUDIT PROBLEMS 1");
+                return;
+            }
+        }
     };
-    let mut keys: Vec<String> = pkg.by_path.keys().filter(|k| k.ends_with(".texture")).cloned().collect();
+    let mut files: HashMap<String, PathBuf> = HashMap::new();
+    if pkg.is_none() {
+        let mut stack = vec![pkg_path.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if let Ok(rel) = p.strip_prefix(pkg_path) {
+                    files.insert(rel.to_string_lossy().to_lowercase().replace('/', "\\"), p);
+                }
+            }
+        }
+    }
+    let read = |k: &str| -> Vec<u8> {
+        match pkg.as_ref() {
+            Some(pk) => pk.by_path.get(k).map(|e| pk.read(*e)).unwrap_or_default(),
+            None => files.get(k).and_then(|p| std::fs::read(p).ok()).unwrap_or_default(),
+        }
+    };
+    let mut keys: Vec<String> = match pkg.as_ref() {
+        Some(pk) => pk.by_path.keys().filter(|k| k.ends_with(".texture")).cloned().collect(),
+        None => files.keys().filter(|k| k.ends_with(".texture")).cloned().collect(),
+    };
     keys.sort();
     let mut counts: std::collections::BTreeMap<&'static str, usize> = Default::default();
     let mut fmts: std::collections::BTreeMap<u64, usize> = Default::default();
     let mut bump = |c: &mut std::collections::BTreeMap<&'static str, usize>, k: &'static str| *c.entry(k).or_default() += 1;
     let mut problems = 0usize;
     for key in &keys {
-        let rendered = !key.starts_with(r"content\editor\") && !key.starts_with(r"content\devui\");
+        let rendered = !key.contains(r"content\editor\") && !key.contains(r"content\devui\");
         let mut problem = |what: &str, detail: String| {
             println!("TEXAUDIT {what} {key} {detail}");
             if rendered {
                 problems += 1;
             }
         };
-        let hdr = pkg.read(pkg.by_path[key]);
+        let hdr = read(key);
         let mk = key.replace(".texture", ".texturemips");
-        let raw = pkg.by_path.get(&mk).map(|e| pkg.read(*e)).unwrap_or_default();
+        let mut raw = read(&mk);
+        // a package's missing payload may sit in the game's loose override
+        // root (Vfs::over_loose), as mods with their own textures ship it
+        if raw.is_empty() && pkg.is_some() {
+            if let Some(home) = std::env::var_os("USERPROFILE") {
+                let p = Path::new(&home).join("Saved Games").join("ACE").join("mods").join(&mk);
+                raw = std::fs::read(p).unwrap_or_default();
+            }
+        }
         let (mut w, mut h, mut mips, mut fmt, mut faces) = (0u64, 0u64, 1u64, 0u64, 1u64);
         fields(&hdr, 0, hdr.len(), |f, v| match (f, v) {
             (1, Val::Varint(n)) => w = n,
@@ -7076,6 +7152,12 @@ pub fn tex_audit(pkg_path: &Path) {
             continue;
         }
         if raw.is_empty() {
+            // a car's generated thumbnail: the game renders its own, and
+            // nothing in evoview draws it
+            if key.contains(r"\generated\thumbnails\") {
+                bump(&mut counts, "generated thumbnail header only (game renders it)");
+                continue;
+            }
             problem("no-payload", format!("{w}x{h} fmt {fmt}"));
             bump(&mut counts, "no payload");
             continue;
@@ -7139,4 +7221,64 @@ pub fn tex_audit(pkg_path: &Path) {
         println!("TEXAUDIT   format {f} ({}): {n}", format_of(*f).map_or("UNKNOWN", |x| x.0));
     }
     println!("TEXAUDIT PROBLEMS {problems}");
+}
+
+/// `--mat-audit <content.kspkg | mod .kspkg | folder>`: every `.material`'s
+/// shader template, counted per tree (cars / tracks / other), each marked
+/// whether evoview models it (track.rs KNOWN, material.rs CAR_SHADERS) or
+/// falls back to a generic PBR surface. Materials with no shader of their
+/// own inherit one (f20 base material) and are counted under "(inherits)".
+pub fn mat_audit(path: &Path, known_track: &[&str], known_car: &[&str]) {
+    let pkg = if path.is_dir() { None } else {
+        match crate::pkg::Package::open_filtered(path, &["content\\"]) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                println!("MATAUDIT cannot-open {} {e}", path.display());
+                return;
+            }
+        }
+    };
+    let mut files: HashMap<String, PathBuf> = HashMap::new();
+    if pkg.is_none() {
+        let mut stack = vec![path.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if let Ok(rel) = p.strip_prefix(path) {
+                    files.insert(rel.to_string_lossy().to_lowercase().replace('/', "\\"), p);
+                }
+            }
+        }
+    }
+    let keys: Vec<String> = match pkg.as_ref() {
+        Some(pk) => pk.by_path.keys().filter(|k| k.ends_with(".material")).cloned().collect(),
+        None => files.keys().filter(|k| k.ends_with(".material")).cloned().collect(),
+    };
+    let mut counts: std::collections::BTreeMap<(String, String), (usize, String)> = Default::default();
+    for k in &keys {
+        let d = match pkg.as_ref() {
+            Some(pk) => pk.read(pk.by_path[k]),
+            None => std::fs::read(&files[k]).unwrap_or_default(),
+        };
+        let tree = if k.contains(r"\cars\") { "cars" } else if k.contains(r"\tracks\") { "tracks" } else { "other" };
+        let sh = read_material(&d, k).and_then(|m| m.shader).map(|s| s.to_lowercase())
+            .unwrap_or_else(|| "(inherits)".to_string());
+        let e = counts.entry((tree.to_string(), sh)).or_insert((0, k.clone()));
+        e.0 += 1;
+    }
+    let mut unmodelled = 0usize;
+    for ((tree, sh), (n, ex)) in &counts {
+        let known = sh == "(inherits)" || sh.contains("glass") || match tree.as_str() {
+            "cars" => known_car.contains(&sh.as_str()) || known_track.contains(&sh.as_str()),
+            _ => known_track.contains(&sh.as_str()) || known_car.contains(&sh.as_str()),
+        };
+        if !known {
+            unmodelled += n;
+        }
+        println!("MATAUDIT {tree:6} {:9} {n:6}  {sh}  e.g. {ex}", if known { "modelled" } else { "GENERIC" });
+    }
+    println!("MATAUDIT {} materials, {unmodelled} on a shader evoview draws as generic PBR", keys.len());
 }

@@ -1149,6 +1149,10 @@ fn track_cull() -> bool {
     std::env::var("EVOVIEW_TRACK_CULL").map_or(true, |v| v != "0")
 }
 
+/// Track shader templates evoview models (others: a generic surface; strict TR25).
+pub const KNOWN_SHADERS: &[&str] = &["uberbiplanarmaterial", "ubermaterial", "uberinteriormaterial", "dynamictrackmultilayer",
+    "dynamictrack", "defaultmaterial", "fence", "subsurface", "grass", "interiormapping", "semaphore", "particle"];
+
 impl TrackMatUniform {
     fn from_entry(m: &MaterialEntry, s: &Slots, grass: bool) -> (Self, Blend) {
         let shader = m.shader.as_deref().unwrap_or("").to_lowercase();
@@ -1170,9 +1174,7 @@ impl TrackMatUniform {
             0.0
         };
         let w = |id: &'static str, d: String| crate::strict::note(id, &m.file, d);
-        const KNOWN: &[&str] = &["uberbiplanarmaterial", "ubermaterial", "uberinteriormaterial", "dynamictrackmultilayer",
-            "dynamictrack", "defaultmaterial", "fence", "subsurface", "grass", "interiormapping", "semaphore", "particle"];
-        if !shader.is_empty() && !KNOWN.contains(&shader.as_str()) && !shader.contains("glass") {
+        if !shader.is_empty() && !KNOWN_SHADERS.contains(&shader.as_str()) && !shader.contains("glass") {
             w("TR25", m.shader.clone().unwrap_or_default());
         }
         if kind == 2.0 {

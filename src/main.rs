@@ -258,6 +258,16 @@ fn main() {
         let only: Vec<String> = args[i + 1..].iter().take_while(|a| !a.starts_with("--")).cloned().collect();
         return wheel::setup_wizard(&only);
     }
+    // --tex-audit <content.kspkg | mod .kspkg | folder of loose files>:
+    // every texture through the renderer's decoder (load::tex_audit)
+    if let Some(i) = args.iter().position(|a| a == "--mat-audit") {
+        let target = args.get(i + 1).filter(|a| !a.starts_with("--")).or_else(|| args.get(1)).cloned().unwrap_or_default();
+        return load::mat_audit(&PathBuf::from(target), track::KNOWN_SHADERS, material::CAR_SHADERS);
+    }
+    if let Some(i) = args.iter().position(|a| a == "--tex-audit") {
+        let target = args.get(i + 1).filter(|a| !a.starts_with("--")).or_else(|| args.get(1)).cloned().unwrap_or_default();
+        return load::tex_audit(&PathBuf::from(target));
+    }
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("evoview {}", env!("CARGO_PKG_VERSION"));
         return;
@@ -391,10 +401,6 @@ fn main() {
         // `--lapsim <track> --car <id> [--layout <l>]`: an ideal lap from
         // the car's physics data (lapsim.rs)
         // --pkg-cat <entry> <out file>: one archive entry, decoded, to a file
-        // --tex-audit: every texture in the package through the decoder
-        if args.iter().any(|a| a == "--tex-audit") {
-            return load::tex_audit(&path);
-        }
         if let Some(i) = args.iter().position(|a| a == "--pkg-cat") {
             let key = args[i + 1].to_lowercase().replace('/', "\\");
             if let Ok(p) = pkg::Package::open_filtered(&path, &[key.as_str()]) {

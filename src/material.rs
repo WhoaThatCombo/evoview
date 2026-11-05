@@ -2290,7 +2290,7 @@ pub fn key_of(name: &str) -> String {
 /// have "ext" in the name.
 /// The car shader templates the viewer models (what stock and converted
 /// cars use). Anything else on a car is drawn as generic PBR - a guess.
-const CAR_SHADERS: &[&str] = &[
+pub const CAR_SHADERS: &[&str] = &[
     "ubervehiclematerial", "ubervehicleinteriormaterial", "vehicleglass", "vehicleglassinterior",
     "vehiclerim", "vehicleled", "vehiclelight", "vehicledisc", "vehicletyre", "vehiclewindshield", "vehiclewindow",
     "evoviewcontactshadow",
