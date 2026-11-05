@@ -100,10 +100,21 @@ fn from_ycocg(c: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
 }
 
+/// `v` with NaN as 0 and +-Inf / anything past f16's range clamped. One bad
+/// value from any texture or shader would otherwise enter the history and
+/// spread as a black or white blot for frames. By the bits, not `x != x`,
+/// which a compiler is free to fold away.
+fn finite3(v: vec3<f32>) -> vec3<f32> {
+    let b = bitcast<vec3<u32>>(v);
+    let bad = (b & vec3<u32>(0x7f800000u)) == vec3<u32>(0x7f800000u);
+    let nan = bad & ((b & vec3<u32>(0x007fffffu)) != vec3<u32>(0u));
+    return clamp(select(v, vec3<f32>(0.0), nan), vec3<f32>(0.0), vec3<f32>(65000.0));
+}
+
 // p in render pixels
 fn load_cur(p: vec2<i32>) -> vec3<f32> {
     let m = vec2<i32>(i32(u.rsize.x) - 1, i32(u.rsize.y) - 1);
-    return textureLoad(t_cur, clamp(p, vec2<i32>(0), m), 0).rgb;
+    return finite3(textureLoad(t_cur, clamp(p, vec2<i32>(0), m), 0).rgb);
 }
 
 /// Catmull-Rom history fetch from 9 bilinear taps (the full 4x4 kernel).
@@ -135,7 +146,7 @@ fn hist_cr(uv: vec2<f32>) -> vec3<f32> {
             wsum += wt;
         }
     }
-    return max(r / max(wsum, 1e-4), vec3<f32>(0.0));
+    return finite3(r / max(wsum, 1e-4));
 }
 
 // q in render pixels
@@ -692,7 +703,7 @@ fn fs_main(in: VsOut) -> FsOut {
     let near_w = select(1.0, exp(-2.0 * dot(dd, dd)) * u.size.x * u.size.y * u.rsize.z * u.rsize.w, up);
     let c = load_cur(k);
     // the unjittered colour here (bilinear), for pixels with no history
-    let cb = select(c, textureSampleLevel(t_cur, s_lin, (pr + u.jit.xy) * u.rsize.zw, 0.0).rgb, up);
+    let cb = select(c, finite3(textureSampleLevel(t_cur, s_lin, (pr + u.jit.xy) * u.rsize.zw, 0.0).rgb), up);
     var o: FsOut;
     // this pixel's view depth, kept in history.a for the next frame's
     // disocclusion test

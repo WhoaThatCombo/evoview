@@ -1126,6 +1126,9 @@ struct Slots {
     /// inheritance): base = Base_BaseMap (packed n n a r), detail =
     /// Detail_Map (a r a o), red = Variation_Map, red_n = Detail_NormalMap
     dt: bool,
+    /// the Variation_Map has a g channel (r colour, g roughness); a
+    /// one-channel BC4 reads g = 0
+    red_rg: bool,
 }
 
 fn v2(m: &MaterialEntry, name: &str, d: [f32; 2]) -> [f32; 2] {
@@ -1468,6 +1471,18 @@ impl TrackMatUniform {
             u.red_uv = [if vuv[0] != 0.0 { vuv[0] } else { 1.0 }, if vuv[1] != 0.0 { vuv[1] } else { 1.0 },
                         p("Variation_UVchannel", 1.0), p("Variation_ModulateBaseColor", 0.0)];
             u.green = [dc[0], dc[1], dc[2], p("Detail_ModulateBaseColor", 0.0)];
+            // the variation map's roughness (its g): x Variation_Roughness,
+            // y Variation_ModulateRoughness, z 1 = the map has a g channel
+            // w: Vertex_UseVertexVariation - the variation only where the
+            // vertex colour marks it, by saturate((c + offset) x intensity):
+            // 0 off, else 1 + Vertex_VariationChannel (0 r .. 3 a, the lift's
+            // switch). Offset / intensity ride in ao.zw (a road has no
+            // cutout, so cutout_drop never reads them)
+            u.layer_rough = [p("Variation_Roughness", 1.0), p("Variation_ModulateRoughness", 0.0),
+                             if s.red_rg { 1.0 } else { 0.0 },
+                             if p("Vertex_UseVertexVariation", 0.0) > 0.5 { 1.0 + p("Vertex_VariationChannel", 0.0).clamp(0.0, 3.0).round() } else { 0.0 }];
+            u.ao[2] = p("Vertex_VariationOffset", 0.0);
+            u.ao[3] = p("Vertex_VariationIntensity", 1.0);
             u.green_uv = [ds[0] + 0.01, ds[2] + 0.01, p("Detail_NormalScale", 0.8),
                           if s.red_n.is_some() { p("Detail_HasNormalMap", 1.0) } else { 0.0 }];
             u.blue = [p("Base_Roughness", 0.7), p("Detail_Roughness", 1.0), p("Base_NormalScale", 0.75),
@@ -2364,6 +2379,7 @@ impl TrackRender {
                 ao: None,
                 base_is_road_fallback: false,
                 base_is_tx: false,
+                red_rg: false,
                 dt: false,
             };
             let mut slots = slots;
@@ -2374,6 +2390,7 @@ impl TrackRender {
                     slots.base = Some(bm);
                     slots.detail = Some(dm);
                     slots.red = m.slot(&["Variation_Map"]);
+                    slots.red_rg = slots.red.and_then(|i| car.textures.get(i)).map_or(false, |t| t.format != "bc4");
                     slots.red_n = m.slot(&["Detail_NormalMap"]);
                     slots.base_n = None;
                     slots.base_r = None;

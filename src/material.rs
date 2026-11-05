@@ -167,7 +167,7 @@ fn wgpu_format(kind: &str, srgb: bool) -> wgpu::TextureFormat {
         ("rgba8", true) => wgpu::TextureFormat::Rgba8UnormSrgb,
         // ⚠ format 9: 8 bytes a pixel. Uploaded as Rgba8 with a 4-byte row
         // it came out as garbage (half-width, smeared halves)
-        ("rgba16f", _) => wgpu::TextureFormat::Rgba16Float,
+        ("rgba16f", _) | ("rgba16u", _) => wgpu::TextureFormat::Rgba16Float,
         _ => wgpu::TextureFormat::Rgba8Unorm,
     }
 }
@@ -413,12 +413,26 @@ fn upload_texture(
     if data.is_empty() || t.levels.is_empty() {
         return None;
     }
+    // RGBA16 UNORM (load.rs format 25) as half floats; a colour slot gets its
+    // sRGB decode here, since there is no sRGB 16-bit format to do it
+    let conv;
+    let data = if t.format == "rgba16u" {
+        conv = data.chunks_exact(2).enumerate().flat_map(|(i, c)| {
+            let v = u16::from_le_bytes([c[0], c[1]]) as f32 / 65535.0;
+            // (alpha, every fourth value, stays linear)
+            let v = if srgb && i % 4 != 3 { if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) } } else { v };
+            crate::load::unorm_to_half(v).to_le_bytes()
+        }).collect::<Vec<u8>>();
+        &conv[..]
+    } else {
+        data
+    };
     let format = wgpu_format(&t.format, srgb);
     let block = if matches!(t.format.as_str(), "bc1" | "bc4" | "bc7" | "bc6h" | "bc3") { 4 } else { 1 };
     let block_bytes = match t.format.as_str() {
         "bc1" | "bc4" => 8,
         "bc7" | "bc6h" | "bc3" => 16,
-        "rgba16f" => 8,
+        "rgba16f" | "rgba16u" => 8,
         _ => 4,
     };
     // BC formats require both edges of the texture to be a multiple of 4
@@ -548,6 +562,23 @@ fn upload_texture(
         );
     }
     flush_staging(device, queue, data.len() as u64);
+    // a chain that stops early (no small levels) sparkles wherever it is
+    // minified: completed on the GPU (mipfill.rs)
+    if crate::mipfill::wanted() {
+        let have = (0..count).take_while(|&i| {
+            let l = &t.levels[i];
+            (blocks(l.width.max(1)) as usize) * (blocks(l.height.max(1)) as usize) * (block_bytes as usize) <= l.bytes as usize
+        }).count() as u32;
+        let t0 = std::time::Instant::now();
+        let filled = crate::mipfill::complete(device, queue, &tex, have);
+        if let Some(full) = filled {
+            crate::perf::add("tex: mip fill", t0.elapsed().as_secs_f64());
+            if std::env::var_os("EVOVIEW_MIPFILL_LOG").is_some() {
+                println!("mipfill: {} {}x{} {} had {have} of {} levels", t.name, fw, fh, t.format, full.mip_level_count());
+            }
+            return Some(full);
+        }
+    }
     Some(tex)
 }
 

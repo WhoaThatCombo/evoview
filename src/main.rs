@@ -87,6 +87,7 @@ mod lights;
 mod livery;
 mod contact;
 mod material;
+mod mipfill;
 mod layers;
 mod fmodsys;
 mod hud;
@@ -390,6 +391,10 @@ fn main() {
         // `--lapsim <track> --car <id> [--layout <l>]`: an ideal lap from
         // the car's physics data (lapsim.rs)
         // --pkg-cat <entry> <out file>: one archive entry, decoded, to a file
+        // --tex-audit: every texture in the package through the decoder
+        if args.iter().any(|a| a == "--tex-audit") {
+            return load::tex_audit(&path);
+        }
         if let Some(i) = args.iter().position(|a| a == "--pkg-cat") {
             let key = args[i + 1].to_lowercase().replace('/', "\\");
             if let Ok(p) = pkg::Package::open_filtered(&path, &[key.as_str()]) {

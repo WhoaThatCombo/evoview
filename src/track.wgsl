@@ -1202,18 +1202,35 @@ fn road_surface(in: VsOut, ng: vec3<f32>) -> Surface {
     if (mat.green.w > 0.5) {
         c = c * mat.green.rgb;
     }
+    var vg = 1.0;
     if (mat.red.w > 0.5) {
         let vuv = uv_for(mat.red_uv.z, in) * mat.red_uv.xy;
-        let vr = textureSample(t_red, s_wrap, vuv).r;
+        let vm = textureSample(t_red, s_wrap, vuv);
         let tint = select(vec3<f32>(1.0), mat.red.rgb, mat.red_uv.w > 0.5);
-        c = c * vr * tint;
+        // how much variation (the lift's v524/v532): all of it, or where the
+        // vertex colour marks it (Vertex_UseVertexVariation, channel R).
+        // (the lift's v532 also takes Rubbering_VariationRemoval x the
+        // rubber; no rubber state here, so none removed)
+        var amt = 1.0;
+        if (mat.layer_rough.w > 0.5) {
+            let ch = i32(mat.layer_rough.w + 0.5) - 1;
+            let vc = select(select(select(in.color.r, in.color.g, ch == 1), in.color.b, ch == 2), in.color.a, ch == 3);
+            amt = clamp((vc + mat.ao.z) * mat.ao.w, 0.0, 1.0);
+        }
+        c = mix(c, c * vm.r * tint, amt);
+        // the lift's roughness term (v1640): x Variation.g, or by
+        // max(Variation_Roughness x g, 0.045) when ModulateRoughness - only
+        // where the map has a g (not BC4, which reads g = 0)
+        if (mat.layer_rough.z > 0.5) {
+            vg = mix(1.0, select(vm.g, max(mat.layer_rough.x * vm.g, 0.045), mat.layer_rough.y > 0.5), amt);
+        }
     }
     s.albedo = c;
     s.base_col = c;
     s.alpha = 1.0;
     let nxy = (bm.xy * 2.0 - 1.0) * mat.blue.z;
     s.n_ts = vec3<f32>(nxy, sqrt(max(1.0 - dot(nxy, nxy), 0.0)));
-    s.rough = clamp(mat.blue.x * (0.5 + bm.w) * mix(1.0, dm.g * mat.blue.y, mat.blue.w), 0.2, 1.0);
+    s.rough = clamp(mat.blue.x * (0.5 + bm.w) * mix(1.0, dm.g * mat.blue.y, mat.blue.w) * vg, 0.2, 1.0);
     s.ao = 1.0;
     if (mat.green_uv.w > 0.5) {
         let dn = textureSample(t_red_n, s_wrap, wxz).xyz * 2.0 - 1.0;

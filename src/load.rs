@@ -41,6 +41,18 @@ fn format_of(e: u64) -> Option<(&'static str, u32, u32, u32)> {
         // BC3 (DXT5): the packed particle flipbooks (smoke_3_10x9_packed:
         // RGB shading, A density). Same 16-byte blocks / tiles as BC7.
         17 => ("bc3", 8, 256, 256),
+        // BC3 too (DXT5: BC4-style alpha + BC1 colour) - the packed tarmac
+        // variation maps "_ar_packed" (rgb a light variation, a a streak
+        // map) and the dirt maps. Found by --tex-audit: unknown before, so
+        // those roads lost their variation. ⚠ Not BC5: read as BC5 the
+        // second half (the BC1 colour block) was white noise even at mip 3,
+        // and the first (the alpha streaks, mean 0.24) blackened the road.
+        16 => ("bc3", 8, 256, 256),
+        // RGBA16 UNORM (the cars' display images, a carbon-fibre normal, the
+        // showroom gradients): RGBA16F's 8 bytes and 128x64 tiles. Kept as
+        // u16 here; material.rs turns it into half floats at upload,
+        // sRGB-decoded when the slot is colour (no sRGB 16-bit format)
+        25 => ("rgba16u", 64, 128, 64),
         _ => return None,
     })
 }
@@ -663,10 +675,35 @@ fn read_texture_lod_inner(hdr: &[u8], raw: &[u8], skip_mips: u32) -> Option<Tex>
     } else {
         0
     };
+    // ⚠ A payload holding only the tail of the chain (Sebring's
+    // tower_roughness: 2048^2 declared, 11 pages stored - the levels from
+    // 1024 down): read from the start, the top level never fit and the
+    // texture came out empty. Where the stored pages are exactly the chain
+    // from some level down, start there.
+    let pages_of = |m: u32| -> usize {
+        let mw = ((w as u32) >> m).max(1);
+        let mh = ((h as u32) >> m).max(1);
+        mw.div_ceil(tw).max(1) as usize * mh.div_ceil(th).max(1) as usize
+    };
+    let mut first = 0u32;
+    {
+        let mut tail: usize = (0..mips as u32).map(pages_of).sum::<usize>() * PAGE;
+        if raw.len() < tail {
+            let mut m = 0u32;
+            while m + 1 < mips as u32 && tail > raw.len() {
+                tail -= pages_of(m) * PAGE;
+                m += 1;
+            }
+            if tail == raw.len() {
+                first = m;
+            }
+        }
+    }
+    let skip = skip.max(first);
     let mut out: Vec<u8> = Vec::new();
     let mut levels = Vec::new();
     let mut off = 0usize;
-    for m in 0..mips as u32 {
+    for m in first..mips as u32 {
         let mw = ((w as u32) >> m).max(1);
         let mh = ((h as u32) >> m).max(1);
         // ONE TILE IS ONE FULL PAGE, padded both ways: page count comes from
@@ -714,6 +751,7 @@ fn read_texture_lod_inner(hdr: &[u8], raw: &[u8], skip_mips: u32) -> Option<Tex>
             p.swap(0, 2);
         }
     }
+
     Some(Tex {
         format: kind.to_string(),
         width: ((w as u32) >> skip).max(1),
@@ -721,6 +759,21 @@ fn read_texture_lod_inner(hdr: &[u8], raw: &[u8], skip_mips: u32) -> Option<Tex>
         levels,
         data: out,
     })
+}
+
+/// A value in 0..1 as IEEE half-float bits (rounded to nearest).
+pub(crate) fn unorm_to_half(v: f32) -> u16 {
+    let v = v.clamp(0.0, 1.0);
+    if v < 6.103_515_6e-5 {
+        // subnormal: v / 2^-24
+        return (v * 16_777_216.0).round() as u16;
+    }
+    let b = v.to_bits();
+    let e = ((b >> 23) & 0xff) as i32 - 127 + 15;
+    let m = b & 0x7f_ffff;
+    let h = ((e as u32) << 10) | (m >> 13);
+    // round to nearest on the dropped bits (a carry into the exponent is right)
+    (h + ((m >> 12) & 1)) as u16
 }
 
 // ------------------------------------------------------------------ cubemap --
@@ -6968,4 +7021,122 @@ mod node_xf_tests {
             }
         }
     }
+}
+
+// ------------------------------------------------------------- tex audit --
+
+/// `--tex-audit <content.kspkg>`: every `.texture` in the package through the
+/// same decode the renderer uses, and every way one can come out wrong:
+/// header / payload missing, unknown format, no levels, truncated or short mip
+/// chains (distant shimmer), all-zero payloads, non-finite floats. One line per
+/// problem texture (TEXAUDIT kind key detail) and a summary. The last line,
+/// `TEXAUDIT PROBLEMS n`, counts only what would render wrong: editor / dev UI
+/// content is left out, and so are the formats with loaders of their own (30
+/// irradiance volumes, 8 / 11 the IBL tables) and the short chains that
+/// mipfill.rs completes at upload. Rerun after a game update.
+pub fn tex_audit(pkg_path: &Path) {
+    let Ok(pkg) = crate::pkg::Package::open_filtered(pkg_path, &["content\\"]) else {
+        eprintln!("tex-audit: cannot open {}", pkg_path.display());
+        return;
+    };
+    let mut keys: Vec<String> = pkg.by_path.keys().filter(|k| k.ends_with(".texture")).cloned().collect();
+    keys.sort();
+    let mut counts: std::collections::BTreeMap<&'static str, usize> = Default::default();
+    let mut fmts: std::collections::BTreeMap<u64, usize> = Default::default();
+    let mut bump = |c: &mut std::collections::BTreeMap<&'static str, usize>, k: &'static str| *c.entry(k).or_default() += 1;
+    let mut problems = 0usize;
+    for key in &keys {
+        let rendered = !key.starts_with(r"content\editor\") && !key.starts_with(r"content\devui\");
+        let mut problem = |what: &str, detail: String| {
+            println!("TEXAUDIT {what} {key} {detail}");
+            if rendered {
+                problems += 1;
+            }
+        };
+        let hdr = pkg.read(pkg.by_path[key]);
+        let mk = key.replace(".texture", ".texturemips");
+        let raw = pkg.by_path.get(&mk).map(|e| pkg.read(*e)).unwrap_or_default();
+        let (mut w, mut h, mut mips, mut fmt, mut faces) = (0u64, 0u64, 1u64, 0u64, 1u64);
+        fields(&hdr, 0, hdr.len(), |f, v| match (f, v) {
+            (1, Val::Varint(n)) => w = n,
+            (2, Val::Varint(n)) => h = n,
+            (3, Val::Varint(n)) => mips = n,
+            (4, Val::Varint(n)) => fmt = n,
+            (6, Val::Varint(n)) => faces = n,
+            _ => {}
+        });
+        *fmts.entry(fmt).or_default() += 1;
+        if faces == 6 {
+            bump(&mut counts, "cubemap (separate path)");
+            continue;
+        }
+        if hdr.is_empty() || w == 0 || h == 0 {
+            problem("bad-header", format!("{w}x{h}"));
+            bump(&mut counts, "bad header");
+            continue;
+        }
+        if raw.is_empty() {
+            problem("no-payload", format!("{w}x{h} fmt {fmt}"));
+            bump(&mut counts, "no payload");
+            continue;
+        }
+        let Some((kind, _, _, _)) = format_of(fmt) else {
+            if matches!(fmt, 30 | 8 | 11) {
+                bump(&mut counts, "own loader (irradiance volumes / IBL tables)");
+            } else {
+                problem("unknown-format", format!("{w}x{h} fmt {fmt}"));
+                bump(&mut counts, "unknown format");
+            }
+            continue;
+        };
+        let Some(t) = read_texture_lod_inner(&hdr, &raw, 0) else {
+            problem("decode-failed", format!("{w}x{h} {kind}"));
+            bump(&mut counts, "decode failed");
+            continue;
+        };
+        if t.levels.is_empty() {
+            problem("no-levels", format!("{w}x{h} {kind} payload {} B", raw.len()));
+            bump(&mut counts, "no levels");
+            continue;
+        }
+        // (a payload holding just the tail of its chain decodes from the
+        // first level it has: smaller, not wrong)
+        let first = mips as usize - t.levels.len().min(mips as usize);
+        let tail = first > 0 && t.width == ((w as u32) >> first).max(1);
+        if (t.levels.len() as u64) < mips && !tail {
+            problem("truncated", format!("{w}x{h} {kind} {}/{} levels, payload {} B", t.levels.len(), mips, raw.len()));
+            bump(&mut counts, "truncated chain");
+        } else if tail {
+            bump(&mut counts, "tail-only payload (decoded from its first level)");
+        }
+        let last = t.levels.last().unwrap();
+        if last.width.max(last.height) > 16 && w.max(h) > 64 {
+            println!("TEXAUDIT short-chain {key} {w}x{h} {kind} smallest {}x{}", last.width, last.height);
+            bump(&mut counts, "short chain (completed at upload)");
+        }
+        let l0 = t.levels[0].bytes as usize;
+        if t.data[..l0.min(t.data.len())].iter().all(|&b| b == 0) {
+            println!("TEXAUDIT all-zero {key} {w}x{h} {kind}");
+            bump(&mut counts, "all-zero level 0");
+        }
+        if kind == "rgba16f" {
+            let bad = t.data.chunks_exact(2).filter(|c| {
+                let v = u16::from_le_bytes([c[0], c[1]]);
+                (v & 0x7c00) == 0x7c00
+            }).count();
+            if bad > 0 {
+                problem("non-finite", format!("{w}x{h} {bad} half(s)"));
+                bump(&mut counts, "non-finite floats");
+            }
+        }
+        bump(&mut counts, "checked");
+    }
+    println!("TEXAUDIT SUMMARY {} textures", keys.len());
+    for (k, n) in &counts {
+        println!("TEXAUDIT   {k}: {n}");
+    }
+    for (f, n) in &fmts {
+        println!("TEXAUDIT   format {f} ({}): {n}", format_of(*f).map_or("UNKNOWN", |x| x.0));
+    }
+    println!("TEXAUDIT PROBLEMS {problems}");
 }
