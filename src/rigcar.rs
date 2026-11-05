@@ -1528,6 +1528,11 @@ impl RigCar {
             // (toe-in turns a left wheel's nose right)
             let ang = [0usize, 1, 2, 3].map(|k| if k < 2 { self.steer } else { 0.0 } + if k % 2 == 1 { -self.toe[k / 2] } else { self.toe[k / 2] });
             l.set_wheel_angles(ang);
+            // walls() and body_ground() moved the chassis and changed its
+            // velocity: hand that to the rods' world before it steps, or
+            // the step integrates the old state and the push-out is lost
+            // (the car drove through barriers)
+            l.sync(self.cg, self.q, self.v, self.w);
             let (cg, q, v, w) = l.step(f_body, t_body, &f_hub, &t_hub, dt);
             self.links = Some(l);
             self.acc_prev = (v - self.v) / dt;

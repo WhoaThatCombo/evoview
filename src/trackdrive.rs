@@ -2209,6 +2209,13 @@ pub fn test_run(td: &mut TrackDrive, secs: f32, mut driver: Option<LineDriver>, 
                 analog: false,
                 ..Default::default()
             },
+            // EVOVIEW_DRIVE_STRAIGHT: flat out, wheel straight, until the
+            // first barrier (does the car stop at it?)
+            None if std::env::var_os("EVOVIEW_DRIVE_STRAIGHT").is_some() => Controls {
+                throttle: 1.0,
+                analog: false,
+                ..Default::default()
+            },
             None => Controls {
                 throttle: if t < secs * 0.7 { 1.0 } else { 0.0 },
                 brake: if t >= secs * 0.75 { 1.0 } else { 0.0 },
