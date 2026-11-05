@@ -1070,6 +1070,9 @@ pub struct TrackMatUniform {
     /// 1 + (map - 1) x strength, 2 Subsurface / Fence / Grass sat(map) x
     /// strength), zw unused
     pub ao: [f32; 4],
+    /// x Detail_UseDetailMasks (the Detail tint fades by the layers' detail
+    /// masks, not by the base weight), yzw unused
+    pub dmask: [f32; 4],
 }
 
 /// How many of the scene's materials (from index 0) the track pipeline
@@ -1184,10 +1187,15 @@ impl TrackMatUniform {
             w("TR44", "foliage by file name".into());
         }
         let blend_mode = p("blendMode", 0.0) as i32;
+        // blendMode 3 (DefaultTranslucent, lift 034d3730): tinted
+        // transmission - the background x (T + (1 - a)(1 - T)), T the glass
+        // colour, plus the lit surface x a. A plain alpha blend at a is that
+        // within a x (1 - T) of the background (4% on the stock trucks'
+        // windows, a = 0.04). It was a cutout at 0.5, which deleted it.
         if blend_mode == 3 {
-            w("TR45", "blendMode 3 drawn as a cutout".into());
+            w("TR45", "blendMode 3 (tinted transmission) drawn as an alpha blend".into());
         }
-        let blend = if kind == 4.0 || blend_mode == 1 {
+        let blend = if kind == 4.0 || blend_mode == 1 || blend_mode == 3 {
             Blend::Alpha
         } else if kind == 3.0 || blend_mode >= 2 || s.opacity.is_some() {
             Blend::Cutout
@@ -1244,6 +1252,12 @@ impl TrackMatUniform {
             tint
         };
         u.base = [tint[0].min(2.0), tint[1].min(2.0), tint[2].min(2.0), kind];
+        // the colour's alpha (lift 034e5ce0: the base alpha is Base_Basecolor.w
+        // x map.a under Modulation_BaseBaseColor, .w alone without a map):
+        // dropped, every untextured glass (Imola's glass.material, the trucks'
+        // windows) was drawn fully opaque. Blended materials only - a
+        // cutout's coverage stays its map's.
+        u.dmask[1] = if matches!(blend, Blend::Alpha) && !pigment && !road_tx { tint[3].clamp(0.0, 1.0) } else { 1.0 };
         if !m.has(&["Base_Roughness", "Roughness"]) {
             w("TR14", "no roughness (0.8)".into());
         }
@@ -2029,7 +2043,7 @@ impl TrackRender {
                 count: None,
             },
         ];
-        for b in 2..=14 {
+        for b in 2..=17 {
             mat_entries.push(tex_entry(b, wgpu::TextureViewDimension::D2));
         }
         let mat_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2479,6 +2493,17 @@ impl TrackRender {
                 (None, 0.0, 1.0)
             };
             let ao_view = if slots.dt { None } else { get(ao_slot, false) };
+            // Detail_UseDetailMasks (lift 034e5ce0): the Detail tint fades
+            // by 1 - sat(sum of layer weight x that layer's DetailMask.r),
+            // a missing mask reading 1 (= the white placeholder). Imola's
+            // grass (Detail_BaseColorMultiplier 15) clipped to flat lime
+            // with the base weight in its place.
+            let use_masks = !slots.dt && u.detail[0] > 0.5 && pv("Detail_UseDetailMasks", 0.0) > 0.5;
+            let mut dmask = |l: &str| if use_masks && pv(&format!("{l}_HasDetailMaskMap"), 0.0) > 0.5 {
+                get(m.slot(&[&format!("{l}_DetailMaskMap")]), false)
+            } else { None };
+            let (red_m, green_m, blue_m) = (dmask("Red"), dmask("Green"), dmask("Blue"));
+            u.dmask[0] = if use_masks && std::env::var("EVOVIEW_DETAIL_MASKS").map_or(true, |v| v != "0") { 1.0 } else { 0.0 };
             u.ao = [ao_k, if ao_view.is_some() { ao_mode } else { 0.0 }, u.ao[2], u.ao[3]];
             // textures; a missing map clears its flag so the shader never
             // samples a placeholder as if it were data
@@ -2543,12 +2568,13 @@ impl TrackRender {
             };
             // Raw pointers only to dodge borrowck on the Rc clones above; every
             // view outlives this call (they live in `cache` or are locals).
-            let views: [*const wgpu::TextureView; 13] = [
+            let views: [*const wgpu::TextureView; 16] = [
                 view(&base, &white), view(&base_n, &flat), view(&base_r, &white),
                 view(&splat, &black), view(&red, &white), view(&red_n, &flat),
                 view(&green, &white), view(&green_n, &flat), view(&blue, &white),
                 view(&blue_n, &flat), view(&detail, &white), view(&opacity, &white),
-                view(&ao_view, &white),
+                view(&ao_view, &white), view(&red_m, &white), view(&green_m, &white),
+                view(&blue_m, &white),
             ];
             let mut entries = vec![
                 wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },

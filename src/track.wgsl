@@ -141,6 +141,8 @@ struct TrackMat {
     wind2: vec4<f32>,
     // material AO map: x strength, y mode (track.rs TrackMatUniform.ao)
     ao: vec4<f32>,
+    // x Detail_UseDetailMasks, y the base colour's alpha (blended only)
+    dmask: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -189,6 +191,10 @@ struct TrackMat {
 @group(1) @binding(12) var t_detail: texture_2d<f32>;
 @group(1) @binding(13) var t_opacity: texture_2d<f32>;
 @group(1) @binding(14) var t_ao: texture_2d<f32>;
+// the layers' Detail masks (Red/Green/Blue_DetailMaskMap; white = none)
+@group(1) @binding(15) var t_red_m: texture_2d<f32>;
+@group(1) @binding(16) var t_green_m: texture_2d<f32>;
+@group(1) @binding(17) var t_blue_m: texture_2d<f32>;
 
 struct VsIn {
     @location(0) position: vec3<f32>,
@@ -1254,7 +1260,7 @@ fn surface(in: VsOut, ng: vec3<f32>) -> Surface {
         base = textureSample(t_base, s_wrap, buv);
     }
     s.albedo = base.rgb * mat.base.rgb;
-    s.alpha = base.a;
+    s.alpha = base.a * mat.dmask.y;
     if (mat.extra.x > 0.5) {
         // grass cards take the colour of the ground they stand on
         var pig = vec3<f32>(0.5);
@@ -1287,7 +1293,7 @@ fn surface(in: VsOut, ng: vec3<f32>) -> Surface {
         s.rough = clamp(textureSample(t_base_r, s_wrap, buv).r * max(mat.surf.x, 0.05) * 1.25, 0.04, 1.0);
     }
     if (mat.flags.z > 0.5) {
-        s.alpha = textureSample(t_opacity, s_wrap, buv).r;
+        s.alpha = textureSample(t_opacity, s_wrap, buv).r * mat.dmask.y;
     }
     // the cutout's alpha at the material's own mip bias (f11), as the
     // game's prepass reads it
@@ -1380,7 +1386,16 @@ fn surface(in: VsOut, ng: vec3<f32>) -> Surface {
         // into blue/yellow kerbs.
         if (mat.detail.x > 0.5 && !road) {
             let k = mat.detail.y * s.albedo;
-            let mk = wbase / wsum;
+            var mk = wbase / wsum;
+            // Detail_UseDetailMasks: faded by the layers' masks instead
+            // (1 - sat(sum of normalised weight x mask.r); no mask = 1)
+            if (mat.dmask.x > 0.5) {
+                var ms = 0.0;
+                if (wts.x > 0.003) { ms += layer_sample(t_red_m, mat.red_uv, in, ng).r * wts.x; }
+                if (wts.y > 0.003) { ms += layer_sample(t_green_m, mat.green_uv, in, ng).r * wts.y; }
+                if (wts.z > 0.003) { ms += layer_sample(t_blue_m, mat.blue_uv, in, ng).r * wts.z; }
+                mk = 1.0 - clamp(ms / wsum, 0.0, 1.0);
+            }
             alb = clamp(alb * (k + (vec3<f32>(1.0) - k) * mk), vec3<f32>(0.0), vec3<f32>(1.0));
         }
         rgh = rgh / wsum;

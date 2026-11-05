@@ -7257,6 +7257,24 @@ pub fn mat_audit(path: &Path, known_track: &[&str], known_car: &[&str]) {
         Some(pk) => pk.by_path.keys().filter(|k| k.ends_with(".material")).cloned().collect(),
         None => files.keys().filter(|k| k.ends_with(".material")).cloned().collect(),
     };
+    // EVOVIEW_MATAUDIT_REFS=<text>: every non-texture file naming it (who
+    // uses a material)
+    if let (Ok(want), Some(pk)) = (std::env::var("EVOVIEW_MATAUDIT_REFS"), pkg.as_ref()) {
+        let w = want.to_lowercase().into_bytes();
+        let mut n = 0;
+        for k in pk.by_path.keys() {
+            if k.ends_with(".texturemips") || k.ends_with(".texture") || k.ends_with(".bank") {
+                continue;
+            }
+            let d = pk.read(pk.by_path[k]);
+            let low: Vec<u8> = d.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if low.windows(w.len()).any(|x| x == &w[..]) {
+                println!("MATREF {k}");
+                n += 1;
+            }
+        }
+        println!("MATREF {n} file(s)");
+    }
     let mut counts: std::collections::BTreeMap<(String, String), (usize, String)> = Default::default();
     for k in &keys {
         let d = match pkg.as_ref() {
@@ -7266,6 +7284,10 @@ pub fn mat_audit(path: &Path, known_track: &[&str], known_car: &[&str]) {
         let tree = if k.contains(r"\cars\") { "cars" } else if k.contains(r"\tracks\") { "tracks" } else { "other" };
         let sh = read_material(&d, k).and_then(|m| m.shader).map(|s| s.to_lowercase())
             .unwrap_or_else(|| "(inherits)".to_string());
+        // EVOVIEW_MATAUDIT_LIST=<shader>: every material on it
+        if std::env::var("EVOVIEW_MATAUDIT_LIST").map_or(false, |v| v.eq_ignore_ascii_case(&sh)) {
+            println!("MATLIST {sh} {k}");
+        }
         let e = counts.entry((tree.to_string(), sh)).or_insert((0, k.clone()));
         e.0 += 1;
     }
