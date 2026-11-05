@@ -144,16 +144,16 @@ pub fn build(
         let mi = mats.lookup(name);
         meshes.push(GpuMesh {
             draws: vec![(0, idx.len() as u32, mi)],
-            vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            vertices: std::sync::Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(name),
                 contents: bytemuck::cast_slice(&verts),
                 usage: wgpu::BufferUsages::VERTEX,
-            }),
-            indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            })),
+            indices: std::sync::Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(name),
                 contents: bytemuck::cast_slice(&idx),
                 usage: wgpu::BufferUsages::INDEX,
-            }),
+            })),
             instances: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("grid instance"),
                 contents: bytemuck::cast_slice(&pack_instances(&[], 0)),

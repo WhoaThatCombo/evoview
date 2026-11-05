@@ -621,16 +621,16 @@ pub fn ground_quad(device: &wgpu::Device, lo: Vec3, hi: Vec3) -> GpuMesh {
     let i: [u32; 6] = [0, 1, 2, 0, 2, 3];
     let identity = pack_instances(&[], 0);
     GpuMesh {
-        vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        vertices: std::sync::Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("ground"),
             contents: bytemuck::cast_slice(&v),
             usage: wgpu::BufferUsages::VERTEX,
-        }),
-        indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        })),
+        indices: std::sync::Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("ground"),
             contents: bytemuck::cast_slice(&i),
             usage: wgpu::BufferUsages::INDEX,
-        }),
+        })),
         instances: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("ground-inst"),
             contents: bytemuck::cast_slice(&identity),
@@ -648,8 +648,10 @@ pub fn ground_quad(device: &wgpu::Device, lo: Vec3, hi: Vec3) -> GpuMesh {
 /// One uploaded mesh. Attributes are interleaved once at load: the game stores
 /// them as separate arrays, the GPU prefers a single stream.
 pub struct GpuMesh {
-    pub vertices: wgpu::Buffer,
-    pub indices: wgpu::Buffer,
+    /// Shared between meshes with identical contents (`car_geometry`):
+    /// every AI / online look of one model is the same geometry.
+    pub vertices: std::sync::Arc<wgpu::Buffer>,
+    pub indices: std::sync::Arc<wgpu::Buffer>,
     pub instances: wgpu::Buffer,
     pub instance_count: u32,
     pub index_count: u32,
@@ -671,6 +673,54 @@ pub struct GpuMesh {
 }
 
 pub const FLOATS_PER_VERTEX: usize = 20; // pos3 nrm3 uv2 tan4 boneidx4 bonewgt4
+
+/// A car mesh's vertex and index buffers, shared with any mesh already on
+/// the GPU whose contents are the same. Each AI look and each online player
+/// is its own slot of meshes, and a grid of one model held one copy of its
+/// geometry per look (~30-40 MB for a GT3 each). Keyed by a 128-bit hash of
+/// the final vertex and index data; held weakly, so a geometry nobody draws
+/// any more is freed. Track meshes are unique and are not looked up.
+fn car_geometry(device: &wgpu::Device, label: &str, verts: &[f32], idx: &[u32])
+        -> (std::sync::Arc<wgpu::Buffer>, std::sync::Arc<wgpu::Buffer>) {
+    use std::sync::{Arc, Mutex, Weak};
+    type Geom = (Weak<wgpu::Buffer>, Weak<wgpu::Buffer>);
+    static CACHE: Mutex<Option<std::collections::HashMap<(u64, u64, usize, usize), Geom>>> = Mutex::new(None);
+    // two multiplicative lanes over the bytes, 8 at a time
+    let mut h = (0x9e37_79b9_7f4a_7c15u64, 0xc2b2_ae3d_27d4_eb4fu64);
+    let mut eat = |b: &[u8]| {
+        let mut ch = b.chunks_exact(8);
+        for c in &mut ch {
+            let x = u64::from_le_bytes(c.try_into().unwrap());
+            h.0 = (h.0.rotate_left(5) ^ x).wrapping_mul(0x517c_c1b7_2722_0a95);
+            h.1 = (h.1.rotate_left(7) ^ x).wrapping_mul(0x9e37_79b1_85eb_ca87);
+        }
+        for &x in ch.remainder() {
+            h.0 = (h.0.rotate_left(5) ^ x as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+            h.1 = (h.1.rotate_left(7) ^ x as u64).wrapping_mul(0x9e37_79b1_85eb_ca87);
+        }
+    };
+    eat(bytemuck::cast_slice(verts));
+    eat(bytemuck::cast_slice(idx));
+    let key = (h.0, h.1, verts.len(), idx.len());
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let map = cache.get_or_insert_with(Default::default);
+    if let Some((v, i)) = map.get(&key).and_then(|(v, i)| Some((v.upgrade()?, i.upgrade()?))) {
+        return (v, i);
+    }
+    let v = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label),
+        contents: bytemuck::cast_slice(verts),
+        usage: wgpu::BufferUsages::VERTEX,
+    }));
+    let i = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label),
+        contents: bytemuck::cast_slice(idx),
+        usage: wgpu::BufferUsages::INDEX,
+    }));
+    map.retain(|_, (v, _)| v.strong_count() > 0);
+    map.insert(key, (Arc::downgrade(&v), Arc::downgrade(&i)));
+    (v, i)
+}
 
 /// Instance buffer: 16 floats of column-major world matrix + 4-float facing.
 pub fn pack_instances(xforms: &[[f32; 16]], facing: u32) -> Vec<f32> {
@@ -826,18 +876,25 @@ pub fn build_scene(
                 hi = hi.max(p);
             }
         }
-        meshes.push(GpuMesh {
-            draws,
-            vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        // car geometry is shared between identical meshes (car_geometry)
+        let (vbuf, ibuf) = if extra.is_none() && crate::envc::var("EVOVIEW_SHARE_GEOMETRY").map_or(true, |v| v != "0") {
+            car_geometry(device, &m.name, &verts, &idx)
+        } else {
+            (std::sync::Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(&m.name),
                 contents: bytemuck::cast_slice(&verts),
                 usage: wgpu::BufferUsages::VERTEX,
-            }),
-            indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            })),
+             std::sync::Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(&m.name),
                 contents: bytemuck::cast_slice(&idx),
                 usage: wgpu::BufferUsages::INDEX,
-            }),
+            })))
+        };
+        meshes.push(GpuMesh {
+            draws,
+            vertices: vbuf,
+            indices: ibuf,
             instances: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(&format!("{}-inst", m.name)),
                 contents: bytemuck::cast_slice(&inst_data),
