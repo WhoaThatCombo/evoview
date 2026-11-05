@@ -307,9 +307,8 @@ fn facing_vertex(in: VsIn, face: f32) -> array<vec3<f32>, 2> {
     var ln = in.normal;
     var to = frame.eye.xyz - origin;
     if (frame.debug.z < 1.5) {
-        // the view direction, from the clip -> world matrix
-        let a = frame.inv_view_proj * vec4<f32>(0.0, 0.0, 0.5, 1.0);
-        to = frame.eye.xyz - a.xyz / a.w;
+        // the view direction (backwards: toward the camera)
+        to = -view_ray(vec2<f32>(0.0));
     }
     if (face < 1.5 || (face > 2.5 && face < 3.5)) {
         let hz = vec2<f32>(to.x, to.z);
@@ -1826,6 +1825,27 @@ struct SkyOut {
     @location(0) ndc: vec2<f32>,
 };
 
+/// The world direction through clip-space point `ndc`, from the view-
+/// projection's rotation rows alone: a direction is a point at infinity,
+/// so the translation never enters. ⚠ It used to unproject two points
+/// through inv_view_proj, whose translation terms (eye x 1/near, ~10^5 on
+/// the Nordschleife with the cockpit's 3 cm near plane) cancel inside the
+/// product: the direction carried up to ~1 degree of rounding, and the
+/// clouds onboard came out in vertical streaks (near points) or blocks
+/// (far points).
+fn view_ray(ndc: vec2<f32>) -> vec3<f32> {
+    let m = frame.view_proj;
+    let r0 = vec3<f32>(m[0].x, m[1].x, m[2].x);
+    let r1 = vec3<f32>(m[0].y, m[1].y, m[2].y);
+    let r3 = vec3<f32>(m[0].w, m[1].w, m[2].w);
+    var d = cross(r0 - ndc.x * r3, r1 - ndc.y * r3);
+    // in front of the camera: positive clip w
+    if (dot(d, r3) < 0.0) {
+        d = -d;
+    }
+    return normalize(d);
+}
+
 @vertex
 fn vs_sky(@builtin(vertex_index) i: u32) -> SkyOut {
     var o: SkyOut;
@@ -2008,11 +2028,7 @@ fn cirrus(d: vec3<f32>, g: vec4<f32>) -> vec4<f32> {
 
 @fragment
 fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
-    // ⚠ Not z = 1: with a far plane kilometres out (or at infinity) the
-    // unprojected far point is inf/NaN and the whole sky goes white.
-    let a = frame.inv_view_proj * vec4<f32>(in.ndc, 0.5, 1.0);
-    let b = frame.inv_view_proj * vec4<f32>(in.ndc, 0.0, 1.0);
-    let d = normalize(a.xyz / a.w - b.xyz / b.w);
+    let d = view_ray(in.ndc);
     var c = sky_radiance(d);
     // the sun disc, 0.53 degrees, with a little limb darkening
     let mu = dot(d, frame.sun.xyz);
