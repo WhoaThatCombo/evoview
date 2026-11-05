@@ -66,6 +66,7 @@ mod asset;
 mod race;
 mod cluster;
 mod motion;
+mod carcull;
 mod dlss;
 mod fsr;
 mod install;

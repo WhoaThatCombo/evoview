@@ -411,7 +411,11 @@ impl Post {
         let now = std::time::Instant::now();
         let dt = now.duration_since(self.last).as_secs_f32().min(0.25);
         self.last = now;
-        self.dt = dt.max(1e-4);
+        // EVOVIEW_FIXED_DT (captures, A/B shots): the blur follows the
+        // simulated frame, not how fast this machine drew it
+        static FIXED: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+        self.dt = FIXED.get_or_init(|| std::env::var("EVOVIEW_FIXED_DT").ok().and_then(|v| v.parse::<f32>().ok()))
+            .unwrap_or(dt).max(1e-4);
         // ⚠ the readback lands every 2-3 frames: stepped by one frame's dt
         // each time, the exposure adapted at 1/2-1/3 of its speed
         self.ae_dt = (self.ae_dt + dt).min(0.25);

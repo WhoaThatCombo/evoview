@@ -45,6 +45,20 @@ pub struct Slot {
     /// The model's own cockpit camera (actor cameras, mesh space): the
     /// replay's onboard view
     pub cockpit: Option<crate::fxdata::CarCam>,
+    /// Coarser LODs of body meshes (load.rs CAR_LODS): (the LOD0 mesh in
+    /// `meshes`, switch distance, the LOD's mesh). Not in `meshes`: only
+    /// carcull.rs draws them, in place of LOD0 on far cars.
+    pub lods: Vec<(usize, f32, usize)>,
+}
+
+/// Pair each `@lod` mesh in `range` with its LOD0 (same base name).
+fn collect_lods(meshes: &[MeshEntry], range: std::ops::Range<usize>, lods: &mut Vec<(usize, f32, usize)>) {
+    for i in range.clone() {
+        let Some((base, dist)) = crate::load::car_lod_of(&meshes[i].name) else { continue };
+        if let Some(j) = range.clone().find(|&j| meshes[j].name == base) {
+            lods.push((j, dist, i));
+        }
+    }
 }
 
 /// Mesh-name corner code -> replay wheel index. The replay stores wheels
@@ -464,6 +478,7 @@ impl Scene {
                     cars: vec![i],
                     skel: None,
                     cockpit: None,
+                    lods: Vec::new(),
                 }),
             }
         }
@@ -480,6 +495,7 @@ impl Scene {
             println!("replay: {} car models, their textures {skip} mip(s) down", slots.len());
         }
         crate::load::CAR_TEX_SKIP.store(skip, std::sync::atomic::Ordering::Relaxed);
+        crate::load::set_car_lods(true);
         for (k, mut s) in slots.into_iter().enumerate() {
             // a mod car is in its own package (Saved Games/ACE/mods/<model>
             // .kspkg) over the base game, as the race path (below) opens it
@@ -517,8 +533,12 @@ impl Scene {
             // room for the per-frame rewrite; the values are replaced on the
             // first frame.
             let ident = Mat4::IDENTITY.to_cols_array();
+            collect_lods(&meshes, range.clone(), &mut s.lods);
             for i in range.clone() {
                 meshes[i].xforms = vec![ident; s.cars.len()];
+                if crate::load::car_lod_of(&meshes[i].name).is_some() {
+                    continue;
+                }
                 match corner_index(&meshes[i].name) {
                     Some(k) => {
                         // Wheel meshes are authored AT the wheel bone, so their
@@ -577,6 +597,7 @@ impl Scene {
             kept.push(s);
         }
         crate::load::CAR_TEX_SKIP.store(0, std::sync::atomic::Ordering::Relaxed);
+        crate::load::set_car_lods(false);
         if kept.is_empty() {
             return Err("none of the replay's cars could be loaded".into());
         }
@@ -728,6 +749,7 @@ impl Scene {
         let ai_skip = std::env::var("EVOVIEW_AI_TEX_SKIP").ok().and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(if own.iter().any(|o| o.is_some()) { 2 } else { 1 });
         crate::load::CAR_TEX_SKIP.store(ai_skip, std::sync::atomic::Ordering::Relaxed);
+        crate::load::set_car_lods(true);
         let mut models: Vec<&String> = Vec::new();
         for m in ai {
             if !models.contains(&m) {
@@ -824,6 +846,7 @@ impl Scene {
             ai_vfs.push((m.to_string(), v));
         }
         crate::load::CAR_TEX_SKIP.store(0, std::sync::atomic::Ordering::Relaxed);
+        crate::load::set_car_lods(false);
         if !ai.is_empty() {
             println!("AI cars: {} model(s), {} look(s), loaded in {:.1}s", models.len(), slots.len() - 1, t_ai.elapsed().as_secs_f32());
         }
@@ -857,8 +880,10 @@ pub fn load_net_car(pkg: &Path, base: Option<&Path>, model: &str, own: Option<&[
     }
     let skip = std::env::var("EVOVIEW_AI_TEX_SKIP").ok().and_then(|x| x.parse::<u32>().ok()).unwrap_or(2);
     crate::load::CAR_TEX_SKIP.store(skip, std::sync::atomic::Ordering::Relaxed);
+    crate::load::set_car_lods(true);
     let r = crate::load::load(&mut v);
     crate::load::CAR_TEX_SKIP.store(0, std::sync::atomic::Ordering::Relaxed);
+    crate::load::set_car_lods(false);
     match saved {
         Some(x) => std::env::set_var("EVOVIEW_VISUAL", x),
         None => std::env::remove_var("EVOVIEW_VISUAL"),
@@ -892,10 +917,15 @@ fn measure_slot(meshes: &mut [MeshEntry], range: std::ops::Range<usize>, src: &C
         cars: (0..n).collect(),
         skel: None,
         cockpit: None,
+        lods: Vec::new(),
     };
     let ident = Mat4::IDENTITY.to_cols_array();
+    collect_lods(meshes, range.clone(), &mut s.lods);
     for i in range.clone() {
         meshes[i].xforms = vec![ident; n];
+        if crate::load::car_lod_of(&meshes[i].name).is_some() {
+            continue;
+        }
         match corner_index(&meshes[i].name) {
             Some(k) => {
                 let (lo, hi) = mesh_bounds(src, &src.meshes[i - range.start]);

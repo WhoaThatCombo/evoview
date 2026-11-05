@@ -607,6 +607,28 @@ pub(crate) fn read_texture_pub(hdr: &[u8], raw: &[u8]) -> Option<Tex> {
 /// card, and every pass slowed ~10x once it paged).
 pub static CAR_TEX_SKIP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// While set, `load` also reads each stock mesh's coarser LODs, as extra
+/// meshes named `<mesh>@lod<k>@<switch distance>` (replayscene.rs collects
+/// them into `Slot::lods`; carcull.rs picks one per car by distance). Set
+/// while the scene loads the AI / replay / online cars, never the car being
+/// driven or shown. EVOVIEW_CAR_LOD=0: never. Per thread: an online car
+/// loading on a worker must not hand LODs to a livery reload on the render
+/// thread.
+pub fn set_car_lods(on: bool) {
+    CAR_LODS.with(|c| c.set(on));
+}
+
+thread_local! {
+    static CAR_LODS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The `@lod` name suffix: (LOD0's name, switch distance) for a coarse LOD.
+pub fn car_lod_of(name: &str) -> Option<(&str, f32)> {
+    let (base, rest) = name.split_once("@lod")?;
+    let (_, d) = rest.split_once('@')?;
+    Some((base, d.parse().ok()?))
+}
+
 /// Sentinel for `read_texture_lod`: pick the mip skip from the texture's size.
 pub const AUTO_MIP: u32 = u32::MAX;
 
@@ -4516,7 +4538,29 @@ pub fn load(vfs: &mut Vfs) -> Result<Loaded, String> {
         // held back until the whole skeleton is known: a replacement part
         // hides stock geometry by bone (see parts.rs)
         mesh_audit.push((key.clone(), "stock"));
+        let lod0_len = lod.indices.len();
         stock_lods.push((name.clone(), lod));
+        // the coarser LODs (CAR_LODS), skinned to the same bones by name; a
+        // LOD naming a bone LOD0 does not have is left out
+        if CAR_LODS.with(|c| c.get())
+            && std::env::var("EVOVIEW_CAR_LOD").map_or(true, |v| v != "0") {
+            // a LOD that keeps over 40% of the last kept one's triangles
+            // costs its memory for little (an M4 GT3's body LOD1 is 54% of
+            // LOD0): skipped, the finer one draws on to the next
+            let mut last = lod0_len;
+            for (k, (dist, mut l)) in read_mesh_lods(&bytes).into_iter().enumerate().skip(1) {
+                if l.positions.is_empty() || l.indices.is_empty() || dist <= 0.0 || l.indices.len() * 5 > last * 2 {
+                    continue;
+                }
+                last = l.indices.len();
+                let map: Option<Vec<u32>> = l.bones.iter().map(|b| bone_index.get(&b.name).map(|&g| g as u32)).collect();
+                let Some(map) = map else { continue };
+                if !l.bone_idx.is_empty() {
+                    remap_bone_idx(&mut l.bone_idx, &map);
+                }
+                stock_lods.push((format!("{name}@lod{k}@{dist}"), l));
+            }
+        }
     }
 
     // ---- wheels ----------------------------------------------------------

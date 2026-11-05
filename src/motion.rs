@@ -330,6 +330,32 @@ impl Motion {
         self.prev_vp = Some(vp);
     }
 
+    /// Last frame's instance rows for mesh `i`, from the caller: carcull.rs
+    /// compacts a moving car mesh's instances to the visible cars, so this
+    /// frame's row k need not be last frame's row k (a GPU copy would pair
+    /// one car's matrix with another's). Written before this frame's `run`.
+    pub fn set_prev(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, meshes: &[crate::render::GpuMesh],
+                    i: usize, rows: &[f32]) {
+        if self.prev_inst.len() < meshes.len() {
+            self.prev_inst.resize_with(meshes.len(), || None);
+        }
+        let sz = meshes[i].instances.size();
+        if self.prev_inst[i].as_ref().map_or(true, |b| b.size() != sz) {
+            self.prev_inst[i] = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("motion prev instances"),
+                size: sz,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        if let Some(b) = self.prev_inst[i].as_ref() {
+            let n = (rows.len() * 4).min(sz as usize) / 4;
+            if n > 0 {
+                queue.write_buffer(b, 0, bytemuck::cast_slice(&rows[..n]));
+            }
+        }
+    }
+
     fn copy_prev(&self, enc: &mut wgpu::CommandEncoder, bones: &wgpu::Buffer, meshes: &[crate::render::GpuMesh], dyns: &[usize]) {
         enc.copy_buffer_to_buffer(bones, 0, &self.prev_bones, 0, self.prev_bones.size().min(bones.size()));
         for &i in dyns {

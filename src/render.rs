@@ -637,6 +637,7 @@ pub fn ground_quad(device: &wgpu::Device, lo: Vec3, hi: Vec3) -> GpuMesh {
         draws: vec![],
         src: usize::MAX,
         extra: None,
+        radius: 0.0,
     }
 }
 
@@ -660,6 +661,9 @@ pub struct GpuMesh {
     /// Track meshes only: vertex colour (4) + uv1 (2) per vertex, the second
     /// vertex stream of the track pipeline. None = not track geometry.
     pub extra: Option<wgpu::Buffer>,
+    /// The farthest vertex from the mesh origin (m, unskinned): carcull.rs
+    /// bounds each moving car's instance with it. 0 where unused.
+    pub radius: f32,
 }
 
 pub const FLOATS_PER_VERTEX: usize = 20; // pos3 nrm3 uv2 tan4 boneidx4 bonewgt4
@@ -848,6 +852,8 @@ pub fn build_scene(
             index_count: idx.len() as u32,
             src: src_i,
             extra,
+            radius: verts.chunks_exact(FLOATS_PER_VERTEX)
+                .map(|v| v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).fold(0.0f32, f32::max).sqrt(),
         });
     }
     // A machine-readable line so a sweep over every car can tell a real
@@ -2364,8 +2370,10 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     // translate once here rather than searching every frame.
     #[allow(clippy::type_complexity)]
     let mut slot_gpu: Vec<(Vec<usize>, [Vec<usize>; 4])> = Vec::new();
-    // AI car meshes drawn only near the camera (race.rs, EVOVIEW_AI_DETAIL_M)
-    let mut ai_detail: std::collections::HashSet<usize> = Default::default();
+    // (AI car cabins are drawn only near the camera: EVOVIEW_AI_DETAIL_M)
+    // the moving cars' instances, culled to what the camera can see (carcull.rs)
+    let mut carcull = crate::carcull::CarCull::default();
+    let car_detail_m = std::env::var("EVOVIEW_AI_DETAIL_M").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(30.0);
     if let Some(td) = opts.track_drive.as_ref() {
         let mut src_to_gpu = vec![usize::MAX; car.meshes.len()];
         for (gi, m) in meshes.iter().enumerate() {
@@ -2381,13 +2389,20 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
         // the opponents' slots after it (race.rs: an AI's `slot` indexes here)
         for s in &opts.ai_slots {
             slot_gpu.push((map(&s.meshes), [map(&s.wheels[0]), map(&s.wheels[1]), map(&s.wheels[2]), map(&s.wheels[3])]));
+            for &(b, d, l) in &s.lods {
+                if let (Some(&gb), Some(&gl)) = (src_to_gpu.get(b), src_to_gpu.get(l)) {
+                    if gb != usize::MAX && gl != usize::MAX {
+                        carcull.add_lod(&mut meshes, gb, d, gl);
+                    }
+                }
+            }
             // the cockpit, the driver and the small parts: only drawn on an
             // AI car near the camera (an M4 GT3's interior alone is more
             // triangles than its body)
             for &gi in &slot_gpu.last().unwrap().0 {
                 let n = car.meshes.get(meshes[gi].src).map_or("", |m| m.name.as_str()).to_lowercase();
                 if ["interior", "steer", "_net", "cable", "belt"].iter().any(|k| n.contains(k)) || n.starts_with("driver:") || n.starts_with("part_") {
-                    ai_detail.insert(gi);
+                    carcull.set_detail(gi, crate::carcull::Detail::Near);
                 }
             }
         }
@@ -2433,6 +2448,25 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                 (map(&s.meshes), w)
             })
             .collect();
+        for s in &pb.slots {
+            for &(b, d, l) in &s.lods {
+                if let (Some(&gb), Some(&gl)) = (src_to_gpu.get(b), src_to_gpu.get(l)) {
+                    if gb != usize::MAX && gl != usize::MAX {
+                        carcull.add_lod(&mut meshes, gb, d, gl);
+                    }
+                }
+            }
+        }
+        // the cabin, the driver and the small parts of a car too far to show
+        // them (seen at a 60-degree view; a zoomed TV camera keeps them)
+        for (b, _) in &slot_gpu {
+            for &gi in b {
+                let n = car.meshes.get(meshes[gi].src).map_or("", |m| m.name.as_str()).to_lowercase();
+                if ["interior", "steer", "_net", "cable", "belt"].iter().any(|k| n.contains(k)) || n.starts_with("driver:") || n.starts_with("part_") {
+                    carcull.set_detail(gi, crate::carcull::Detail::Seen);
+                }
+            }
+        }
         println!(
             "replay: {:.0}s, {} car(s) on {}",
             pb.replay.captured(),
@@ -2449,6 +2483,8 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
         let skip: Vec<usize> = slot_gpu
             .iter()
             .flat_map(|(b, w)| b.iter().chain(w.iter().flatten()).copied())
+            // the cars' coarse LODs move with them too (carcull.rs)
+            .chain(carcull.lod_meshes())
             .collect();
         crate::perf::time("cull setup", || crate::cull::Culler::build(&car, &meshes, &skip))
     });
@@ -3450,13 +3486,11 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 }
                                 for &gi in &slot_gpu[si].0 {
                                     let rows = if driver_meshes.contains(&gi) { &body_drv } else { &body };
-                                    queue.write_buffer(&meshes[gi].instances, 0,
-                                        bytemuck::cast_slice(rows));
+                                    carcull.put(gi, rows);
                                 }
                                 for k in 0..4 {
                                     for &gi in &slot_gpu[si].1[k] {
-                                        queue.write_buffer(&meshes[gi].instances, 0,
-                                            bytemuck::cast_slice(&wheel[k]));
+                                        carcull.put(gi, &wheel[k]);
                                     }
                                 }
                             }
@@ -3608,12 +3642,19 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                             if let Some(&gi) = to_gpu.get(si).filter(|&&g| g != usize::MAX) {
                                                 if ["interior", "steer", "_net", "cable", "belt"].iter().any(|k| name.contains(k))
                                                     || name.starts_with("driver:") || name.starts_with("part_") {
-                                                    ai_detail.insert(gi);
+                                                    carcull.set_detail(gi, crate::carcull::Detail::Near);
                                                 }
                                             }
                                         }
                                         slot_gpu.push((body, [map(&slot.wheels[0]), map(&slot.wheels[1]), map(&slot.wheels[2]), map(&slot.wheels[3])]));
                                         meshes.extend(nmeshes);
+                                        for &(b, d, l) in &slot.lods {
+                                            if let (Some(&gb), Some(&gl)) = (to_gpu.get(b), to_gpu.get(l)) {
+                                                if gb != usize::MAX && gl != usize::MAX {
+                                                    carcull.add_lod(&mut meshes, gb, d, gl);
+                                                }
+                                            }
+                                        }
                                         opts.ai_slots.push(slot.clone());
                                         let si = opts.ai_slots.len();
                                         let car_td = crate::trackdrive::TrackDrive::with_model(td.ground.clone(), slot, None, false, false);
@@ -3724,7 +3765,6 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     }
                                     ai_smokers.push(c);
                                 }
-                                let detail_m = std::env::var("EVOVIEW_AI_DETAIL_M").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(30.0);
                                 // EVOVIEW_AI_DRAW=0: the AI drive but are not drawn (their GPU cost, A/B)
                                 if std::env::var("EVOVIEW_AI_DRAW").map_or(false, |v| v == "0") {
                                     for (b, w) in slot_gpu.iter().skip(1) {
@@ -3733,14 +3773,6 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                         }
                                     }
                                     rows.clear();
-                                }
-                                let mut near_rows: Vec<Vec<f32>> = vec![Vec::new(); rows.len()];
-                                for a in &r.ai {
-                                    if a.td.pos.distance(near_eye) < detail_m {
-                                        if let Some((b, _)) = rows.get(a.slot - 1) {
-                                            near_rows[a.slot - 1].extend_from_slice(&b[a.inst * 20..a.inst * 20 + 20]);
-                                        }
-                                    }
                                 }
                                 // a look none of whose cars is on track within
                                 // EVOVIEW_AI_DRAW_M (1500 m) of the camera is not drawn at
@@ -3763,26 +3795,13 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                         }
                                         continue;
                                     }
-                                    for &gi in gw.iter().flatten() {
-                                        meshes[gi].instance_count = (w[0].len() / 20) as u32;
-                                    }
+                                    // (the cabin meshes only near the camera: carcull.rs)
                                     for &gi in gb {
-                                        if !ai_detail.contains(&gi) {
-                                            meshes[gi].instance_count = (b.len() / 20) as u32;
-                                        }
-                                        if ai_detail.contains(&gi) {
-                                            let nr = &near_rows[si];
-                                            if !nr.is_empty() {
-                                                queue.write_buffer(&meshes[gi].instances, 0, bytemuck::cast_slice(nr));
-                                            }
-                                            meshes[gi].instance_count = (nr.len() / 20) as u32;
-                                            continue;
-                                        }
-                                        queue.write_buffer(&meshes[gi].instances, 0, bytemuck::cast_slice(b));
+                                        carcull.put(gi, b);
                                     }
                                     for k in 0..4 {
                                         for &gi in &gw[k] {
-                                            queue.write_buffer(&meshes[gi].instances, 0, bytemuck::cast_slice(&w[k]));
+                                            carcull.put(gi, &w[k]);
                                         }
                                     }
                                 }
@@ -4139,6 +4158,8 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         if let Some(c) = culler.as_mut() {
                             c.update(&queue, &meshes, view_proj, eye, rh);
                         }
+                        carcull.flush(&device, &queue, &mut meshes, motion.as_mut(), view_proj, eye,
+                                      crate::sky::key_dir(), car_detail_m);
                         // the drawn projection carries TAA's sub-pixel jitter;
                         // culling and the resolve use the clean one
                         let taa_on = taa.as_ref().map_or(false, |t| t.on);
@@ -4689,6 +4710,14 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 }
                                 // the culler's slot for this cascade (5: the middle one)
                                 let cslot = if layer == LAYER_MID as usize { 5 } else { layer };
+                                // this map's light box: a moving car's mesh whose
+                                // cars all lie outside it casts nothing here
+                                let layer_vp = match layer {
+                                    0 => Some(light_vp),
+                                    1 => Some(far_vp),
+                                    l if l == LAYER_MID as usize => Some(mid_vp),
+                                    _ => hero_vp,
+                                };
                                 sp.set_bind_group(2, bone_bg, &[]);
                                 for (mi_mesh, m) in meshes.iter().enumerate() {
                                     if Some(mi_mesh) == ground_mesh {
@@ -4696,6 +4725,10 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     }
                                     // track geometry carries its extra stream, the car not
                                     if (what == 1 && m.extra.is_none()) || (what == 2 && m.extra.is_some()) {
+                                        continue;
+                                    }
+                                    if m.extra.is_none() && m.instance_count > 0
+                                        && layer_vp.map_or(false, |lv| !carcull.casts_into(mi_mesh, lv)) {
                                         continue;
                                     }
                                     // culled to the light's box; casters
@@ -5142,6 +5175,11 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     // the cars: the driven one's / each replay slot's
                                     // body and wheel meshes
                                     let mut dyn_mesh = vec![false; meshes.len()];
+                                    for gi in carcull.lod_meshes() {
+                                        if let Some(d) = dyn_mesh.get_mut(gi) {
+                                            *d = true;
+                                        }
+                                    }
                                     for (b, w) in &slot_gpu {
                                         for &gi in b.iter().chain(w.iter().flatten()) {
                                             if let Some(d) = dyn_mesh.get_mut(gi) {
