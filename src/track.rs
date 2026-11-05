@@ -284,7 +284,8 @@ impl TrackAnim {
             *out = vec![crate::load::IDENTITY; n];
             keys.clear();
         }
-        let mut changed = false;
+        // the copies that step this frame: (mesh, clip time, bone offset)
+        let mut jobs: Vec<(usize, f32, usize)> = Vec::new();
         for (k, (mi, v, ct)) in self.times(t).enumerate() {
             let m = &self.meshes[mi];
             let a = &self.clips[m.clip];
@@ -296,13 +297,38 @@ impl TrackAnim {
                 keys.resize(k + 1, u32::MAX);
             }
             keys[k] = f;
-            let nb = m.skel.bones.len();
-            let p = m.skel.pose_many(&[(a, ct)]);
-            let o = (m.base as usize) + v as usize * nb;
-            out[o..o + nb].copy_from_slice(&p[..nb]);
-            changed = true;
+            jobs.push((mi, ct, (m.base as usize) + v as usize * m.skel.bones.len()));
         }
-        changed
+        if jobs.is_empty() {
+            return false;
+        }
+        let pose = |js: &[(usize, f32, usize)]| -> Vec<(usize, Vec<[f32; 16]>)> {
+            js.iter().map(|&(mi, ct, o)| {
+                let m = &self.meshes[mi];
+                let mut p = m.skel.pose_many(&[(&self.clips[m.clip], ct)]);
+                p.truncate(m.skel.bones.len());
+                (o, p)
+            }).collect()
+        };
+        // a Nordschleife's crowds step hundreds of copies a frame (~1 ms):
+        // half of them on a second thread
+        let done: Vec<(usize, Vec<[f32; 16]>)> = if jobs.len() >= 64 {
+            let (a, b) = jobs.split_at(jobs.len() / 2);
+            std::thread::scope(|sc| {
+                let h = sc.spawn(|| pose(b));
+                let mut r = pose(a);
+                r.extend(h.join().unwrap_or_default());
+                r
+            })
+        } else {
+            pose(&jobs)
+        };
+        for (o, p) in done {
+            if let Some(dst) = out.get_mut(o..o + p.len()) {
+                dst.copy_from_slice(&p);
+            }
+        }
+        true
     }
 
     /// Every bone set at time `t` (seconds), in buffer order.

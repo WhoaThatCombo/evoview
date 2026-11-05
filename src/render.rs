@@ -4469,8 +4469,11 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             fxg.set_late_camera(&queue, bytemuck::bytes_of(&lu));
                         }
                         if let Some(t) = track.as_ref() {
-                            let _t = crate::bench::cpu("track update");
-                            t.update(&queue, vp_draw, eye, lit, &cam_u);
+                            {
+                                let _t = crate::bench::cpu("track update");
+                                t.update(&queue, vp_draw, eye, lit, &cam_u);
+                            }
+                            let _t = crate::bench::cpu("track anim");
                             t.animate(&queue, crate::clouds::time());
                         }
                         // The sun and the scenery are static, so the shadow map
@@ -4799,6 +4802,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             if cache_dirty && shadow_dirty {
                                 shadow_cache_vp = Some(light_vp);
                             }
+                            let mut enc_sec = crate::bench::cpu("enc shadow");
                             for (layer, target, clear_it, what) in jobs {
                                 if what == 2 {
                                     // the cached scenery into the live cascade
@@ -4902,6 +4906,8 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 crate::bench::mark(&mut enc, ["shadow near", "shadow far", "shadow mid", "shadow hero"][layer.min(3)]);
                             }
                             if let Some(b) = bench.as_mut() { b.mark(&mut enc, "shadow"); }
+                            drop(enc_sec);
+                            enc_sec = crate::bench::cpu("enc mirror");
                             // the main camera's focal length in pixels (mirror / probe LODs)
                             let main_focal = view_proj.row(1).truncate().length() * rh as f32 * 0.5;
                             // one glass mirror a frame in turn, and the rear-view
@@ -4970,6 +4976,8 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 }
                             }
                             if let Some(b) = bench.as_mut() { b.mark(&mut enc, "mirror"); }
+                            drop(enc_sec);
+                            enc_sec = crate::bench::cpu("enc probe");
                             // one reflection-probe face a frame, from the middle
                             // of the car, through the track pipelines again
                             if let (Some(pr), Some(t), Some(td)) = (probe.as_mut(), track.as_ref(), opts.track_drive.as_ref()) {
@@ -5011,6 +5019,8 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 pr.filter(&mut enc, face);
                                 if let Some(b) = bench.as_mut() { b.mark(&mut enc, "probe"); }
                             }
+                            drop(enc_sec);
+                            let _enc_main = crate::bench::cpu("enc main");
                             // + the SSR targets (ssr.rs), cleared: nothing reflects
                             let mut atts = vec![Some(color)];
                             if let Some(s) = ssr.as_ref() {
@@ -5296,6 +5306,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             }
                             // motion vectors: the scenery through the camera,
                             // the cars (everything not track geometry) drawn again
+                            let _enc_post = crate::bench::cpu("enc post");
                             let mv_on = match motion.as_mut() {
                                 Some(mo) => {
                                     if hist_reset {

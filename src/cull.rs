@@ -57,6 +57,9 @@ struct Entry {
     /// order: (cell, start, end) into `order`. Empty for meshes with few
     /// instances, which are tested one by one.
     runs: Vec<(u32, u32, u32)>,
+    /// per run: its largest instance radius (a run too small to show is
+    /// skipped whole, see `Tiny`)
+    run_r: Vec<f32>,
     order: Vec<u32>,
     /// mesh name (EVOVIEW_LOD_LOG)
     name: String,
@@ -77,6 +80,9 @@ struct Grid {
     /// per cell this update: frustum test passed, (min, max) squared distance
     vis: Vec<bool>,
     dist: Vec<[f32; 2]>,
+    /// per cell this update (main view): the least view depth (`row3` .
+    /// centre) over its centres' box
+    wmin: Vec<f32>,
 }
 
 /// Grid cell size in metres; meshes with fewer instances skip the grid.
@@ -97,7 +103,7 @@ impl Grid {
         let nz = (((hi.z - lo.z) / CELL).floor() as u32 + 1).min(4096);
         let empty = [Vec3::splat(f32::MAX), Vec3::splat(f32::MIN), Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)];
         let mut g = Grid { origin: lo, cell: CELL, nx, boxes: vec![empty; (nx * nz) as usize],
-                           vis: Vec::new(), dist: Vec::new() };
+                           vis: Vec::new(), dist: Vec::new(), wmin: Vec::new() };
         for s in spheres.iter().flat_map(|s| s.iter()) {
             let c = g.cell_of(s.truncate());
             let b = &mut g.boxes[c as usize];
@@ -108,6 +114,18 @@ impl Grid {
             b[3] = b[3].max(p);
         }
         Some(g)
+    }
+
+    /// `wmin` for this update's view row (clip w = row3 . (p, 1)).
+    fn update_depth(&mut self, row3: Vec4) {
+        self.wmin.clear();
+        for b in &self.boxes {
+            let (lo, hi) = (b[2], b[3]);
+            let v = Vec3::new(if row3.x >= 0.0 { lo.x } else { hi.x },
+                              if row3.y >= 0.0 { lo.y } else { hi.y },
+                              if row3.z >= 0.0 { lo.z } else { hi.z });
+            self.wmin.push(row3.truncate().dot(v) + row3.w);
+        }
     }
 
     fn cell_of(&self, p: Vec3) -> u32 {
@@ -149,14 +167,38 @@ impl Grid {
 /// has no grid runs, else true with `out` holding those in cells that passed
 /// and whose distance range meets the squared window [lo2, hi2) (distances
 /// x s2, the LOD scale squared), in their original order.
-fn candidates(e: &Entry, g: Option<&Grid>, win: Option<[f32; 2]>, s2: f32, out: &mut Vec<u32>) -> bool {
+/// A whole grid run whose largest instance would fail the caller's own
+/// too-small test at the run's nearest point is skipped unread - every
+/// instance in it fails that test too, so the visible set is unchanged.
+#[derive(Clone, Copy)]
+enum Tiny {
+    No,
+    /// radius < k x distance from the grid's focus (update_view): k squared
+    Dist(f32),
+    /// radius x focal < MIN_PIXELS x view depth (update): focal
+    Proj(f32),
+}
+
+fn candidates(e: &Entry, g: Option<&Grid>, win: Option<[f32; 2]>, s2: f32, tiny: Tiny, out: &mut Vec<u32>) -> bool {
     out.clear();
     let Some(g) = g.filter(|_| !e.runs.is_empty()) else {
         return false;
     };
-    for &(c, a, b) in &e.runs {
+    for (ri, &(c, a, b)) in e.runs.iter().enumerate() {
         if !g.vis[c as usize] {
             continue;
+        }
+        let rmax = e.run_r.get(ri).copied().unwrap_or(f32::MAX);
+        match tiny {
+            Tiny::Dist(k2) if rmax * rmax < k2 * g.dist[c as usize][0] => continue,
+            Tiny::Proj(focal) => {
+                if let Some(&w) = g.wmin.get(c as usize) {
+                    if w > rmax && rmax * focal < MIN_PIXELS * w {
+                        continue;
+                    }
+                }
+            }
+            _ => {}
         }
         if let Some([lo2, hi2]) = win {
             let [dmin, dmax] = g.dist[c as usize];
@@ -336,6 +378,7 @@ impl Culler {
                 shadow_src: src.shadow_mesh,
                 last_fade: Vec::new(),
                 runs: Vec::new(),
+                run_r: Vec::new(),
                 order: Vec::new(),
                 name: src.name.clone(),
             });
@@ -361,6 +404,7 @@ impl Culler {
                         j += 1;
                     }
                     e.runs.push((c, i as u32, j as u32));
+                    e.run_r.push(keyed[i..j].iter().map(|k| e.spheres[k.1 as usize].w).fold(0.0f32, f32::max));
                     i = j;
                 }
             }
@@ -475,6 +519,12 @@ impl Culler {
         if let Some(g) = self.grid.as_mut() {
             g.update(&planes, focus);
         }
+        // runs too small to show skipped whole, when the size test is from
+        // the grid's own centre (the views; not the shadow maps)
+        let tiny_run = match tiny {
+            Some((eye, k)) if eye == focus && min_radius <= 0.0 => Tiny::Dist(k * k),
+            _ => Tiny::No,
+        };
         // the shadow cascades draw each LOD's casters with its shadow
         // level's geometry (load.rs forceShadowLod); other views draw as seen
         let redirect = matches!(c, 0 | 1 | 5);
@@ -485,7 +535,7 @@ impl Culler {
         for ei in 0..self.entries.len() {
             let e = &self.entries[ei];
             self.vis.clear();
-            let gridded = candidates(e, self.grid.as_ref(), e.lod, s2, &mut self.cand);
+            let gridded = candidates(e, self.grid.as_ref(), e.lod, s2, tiny_run, &mut self.cand);
             let all = 0..if gridded { 0 } else { e.spheres.len() as u32 };
             for k in self.cand.iter().copied().chain(all) {
                 let s = &e.spheres[k as usize];
@@ -581,12 +631,14 @@ impl Culler {
         }
         if let Some(g) = self.grid.as_mut() {
             g.update(&planes, eye);
+            g.update_depth(rows[3]);
         }
+        let tiny_run = if focal > 0.0 { Tiny::Proj(focal) } else { Tiny::No };
         for e in self.entries.iter_mut() {
             self.vis.clear();
             self.fade.clear();
             let win = e.band.map(|b| [b.lo2, b.hi2]).or(e.lod);
-            let gridded = candidates(e, self.grid.as_ref(), win, 1.0, &mut self.cand);
+            let gridded = candidates(e, self.grid.as_ref(), win, 1.0, tiny_run, &mut self.cand);
             let all = 0..if gridded { 0 } else { e.spheres.len() as u32 };
             for k in self.cand.iter().copied().chain(all) {
                 let s = &e.spheres[k as usize];
