@@ -260,6 +260,28 @@ fn main() {
     }
     // --tex-audit <content.kspkg | mod .kspkg | folder of loose files>:
     // every texture through the renderer's decoder (load::tex_audit)
+    // --replay-info <a.rpy> [b.rpy ...]: one JSON line per replay - its track,
+    // how much motion it holds, the cars in it - for a replay browser (ACECM)
+    if let Some(i) = args.iter().position(|a| a == "--replay-info") {
+        for p in args[i + 1..].iter().take_while(|a| !a.starts_with("--")) {
+            let line = match replay::Replay::load(std::path::Path::new(p)) {
+                Ok(r) => {
+                    let cars: Vec<serde_json::Value> = (0..r.cars.len())
+                        .filter(|&c| !r.is_placeholder(c))
+                        .map(|c| serde_json::json!({
+                            "model": r.cars[c].model.clone().unwrap_or_else(|| r.model.clone()),
+                            "seconds": r.cars[c].n_matrix as f32 / r.rate(),
+                        }))
+                        .collect();
+                    serde_json::json!({"file": p, "ok": true, "track": r.track, "model": r.model,
+                                       "captured": r.captured(), "duration": r.duration, "cars": cars})
+                }
+                Err(e) => serde_json::json!({"file": p, "ok": false, "error": e}),
+            };
+            println!("REPLAYINFO {line}");
+        }
+        return;
+    }
     if let Some(i) = args.iter().position(|a| a == "--mat-audit") {
         let target = args.get(i + 1).filter(|a| !a.starts_with("--")).or_else(|| args.get(1)).cloned().unwrap_or_default();
         return load::mat_audit(&PathBuf::from(target), track::KNOWN_SHADERS, material::CAR_SHADERS);

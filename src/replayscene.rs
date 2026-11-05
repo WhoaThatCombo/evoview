@@ -462,7 +462,20 @@ impl Scene {
         let mut kept: Vec<Slot> = Vec::new();
         let mut first_fx = None;
         for (k, mut s) in slots.into_iter().enumerate() {
-            let loaded = match crate::load::load_from_package(pkg, &s.model, base) {
+            // a mod car is in its own package (Saved Games/ACE/mods/<model>
+            // .kspkg) over the base game, as the race path (below) opens it
+            let loaded = crate::load::load_from_package(pkg, &s.model, base).or_else(|e| {
+                let m = std::env::var_os("USERPROFILE").map(|h| std::path::Path::new(&h).join("Saved Games")
+                    .join("ACE").join("mods").join(format!("{}.kspkg", s.model)));
+                match m.filter(|m| m.exists()) {
+                    Some(m) => {
+                        println!("car {}: the mod {}", s.model, m.display());
+                        crate::load::load_from_package(&m, &s.model, Some(pkg))
+                    }
+                    None => Err(e),
+                }
+            });
+            let loaded = match loaded {
                 Ok(l) => l,
                 Err(e) => {
                     // One missing car must not sink the whole replay.
