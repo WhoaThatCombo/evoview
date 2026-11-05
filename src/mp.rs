@@ -66,7 +66,7 @@ struct Hist {
 /// packet intervals (the game sends every 57 ms), so a late or lost packet
 /// is still interpolated, not guessed. EVOVIEW_MP_DELAY overrides.
 fn interp_delay() -> f64 {
-    std::env::var("EVOVIEW_MP_DELAY").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.12)
+    crate::envc::var("EVOVIEW_MP_DELAY").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.12)
 }
 
 impl Hist {
@@ -321,14 +321,14 @@ pub fn car_final_state(pkg: &std::path::Path, car: &str) -> Option<(Vec<u8>, Str
     let p = match crate::pkg::Package::open_filtered(pkg, &[&dir]).ok().filter(|p| has(p)) {
         Some(p) => p,
         None => {
-            let m = std::env::var_os("USERPROFILE")
+            let m = crate::envc::var_os("USERPROFILE")
                 .map(|h| std::path::Path::new(&h).join("Saved Games").join("ACE").join("mods").join(format!("{car}.kspkg")))
                 .filter(|m| m.exists())?;
             println!("mp: {car} is a mod: presets from {}", m.display());
             crate::pkg::Package::open_filtered(&m, &[&dir]).ok().filter(|p| has(p))?
         }
     };
-    let want = std::env::var("EVOVIEW_MP_PRESET").ok();
+    let want = crate::envc::var("EVOVIEW_MP_PRESET").ok();
     let mut keys: Vec<&String> = p.by_path.keys().filter(|k| k.ends_with(".carfinalstate")).collect();
     keys.sort_by_key(|k| (!k.contains("mech_1"), !k.contains("visual_1"), k.len()));
     let key = match want.as_deref() {
@@ -464,7 +464,7 @@ impl Mp {
     /// handed out once; `add_ai` gives it its slot when loaded.
     pub fn new_cars(&self) -> Vec<(u16, String, Option<Vec<u8>>)> {
         let mut g = self.sh.lock().unwrap();
-        if std::env::var_os("EVOVIEW_MP_LOG").is_some() {
+        if crate::envc::var_os("EVOVIEW_MP_LOG").is_some() {
             static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
             let mut l = LAST.lock().unwrap();
             if l.map_or(true, |t| t.elapsed().as_secs_f32() > 5.0) {
@@ -486,7 +486,7 @@ impl Mp {
             println!("mp: loading #{n}'s car ({car})");
             out.push((n, car, g.states.get(&n).cloned()));
         }
-        if std::env::var_os("EVOVIEW_MP_LOG").is_some() && !out.is_empty() {
+        if crate::envc::var_os("EVOVIEW_MP_LOG").is_some() && !out.is_empty() {
             println!("mp: {} car(s) to load; roster {}, heard {}, loaded {}", out.len(), g.roster.len(), g.remotes.len(), g.loaded.len());
         }
         out
@@ -522,7 +522,7 @@ impl Mp {
         // only cars the server has a netcar for (a public server streams more
         // numbers than it has players: stale entries, which drew phantom cars
         // and took the spare slots); EVOVIEW_MP_ALL=1 draws every number
-        let all = std::env::var_os("EVOVIEW_MP_ALL").is_some();
+        let all = crate::envc::var_os("EVOVIEW_MP_ALL").is_some();
         let mut waiting: Vec<u16> = live.iter().copied()
             .filter(|n| (all || g.roster.contains_key(n)) && !g.ai.iter().any(|a| a.1 == Some(*n))).collect();
         waiting.sort();
@@ -687,7 +687,7 @@ fn session_track(d: &[u8]) -> Option<String> {
 /// EVOVIEW_MP_USER / EVOVIEW_MP_NAME say otherwise.
 pub fn steam_user() -> Option<(String, String)> {
     let roots = [
-        std::env::var("ProgramFiles(x86)").ok().map(|p| format!("{p}/Steam")),
+        crate::envc::var("ProgramFiles(x86)").ok().map(|p| format!("{p}/Steam")),
         Some("C:/Program Files (x86)/Steam".to_string()),
     ];
     let txt = roots.iter().flatten().find_map(|r| std::fs::read_to_string(format!("{r}/config/loginusers.vdf")).ok())?;
@@ -866,7 +866,7 @@ fn session_cars(d: &[u8]) -> Vec<u16> {
 }
 
 fn run(addr: &str, user: &str, name: &str, fs: &[u8], mech: &str, sh: &Mutex<Shared>) -> Result<(), String> {
-    let log = std::env::var_os("EVOVIEW_MP_LOG").is_some();
+    let log = crate::envc::var_os("EVOVIEW_MP_LOG").is_some();
     let mut tcp = TcpStream::connect(addr).map_err(|e| format!("connect {addr}: {e}"))?;
     tcp.set_nodelay(true).ok();
     let udp = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
@@ -1004,7 +1004,7 @@ fn run(addr: &str, user: &str, name: &str, fs: &[u8], mech: &str, sh: &Mutex<Sha
                     // the slot our packets carry is the car's NUMBER (a public server's
                     // cars ran 12..215 with gaps); EVOVIEW_MP_SLOT overrides. Number 0
                     // (omitted, a local test server): 1, as its vAI car sends.
-                    let slot = std::env::var("EVOVIEW_MP_SLOT").ok().and_then(|v| v.parse().ok())
+                    let slot = crate::envc::var("EVOVIEW_MP_SLOT").ok().and_then(|v| v.parse().ok())
                         .unwrap_or(number as u16);
                     {
                         let mut g = sh.lock().unwrap();
@@ -1090,7 +1090,7 @@ fn run(addr: &str, user: &str, name: &str, fs: &[u8], mech: &str, sh: &Mutex<Sha
                         _ => {}
                     });
                     if let (true, Some(n)) = (id == car_id, num) {
-                        if std::env::var_os("EVOVIEW_MP_SLOT").is_none() {
+                        if crate::envc::var_os("EVOVIEW_MP_SLOT").is_none() {
                             sh.lock().unwrap().slot = n;
                             println!("mp: our car number is now {n}");
                         }
@@ -1172,7 +1172,7 @@ fn run(addr: &str, user: &str, name: &str, fs: &[u8], mech: &str, sh: &Mutex<Sha
         // {1 car_id, 99 EVOVIEW_TAG {1 "evoview", 2 number, 3 CarFinalStateData,
         // 4 driver name}}, every 3 s so late joiners hear it
         if car_id != (0, 0) && last_state.elapsed() >= Duration::from_secs(3)
-            && std::env::var_os("EVOVIEW_MP_NOTAG").is_none() {
+            && crate::envc::var_os("EVOVIEW_MP_NOTAG").is_none() {
             last_state = Instant::now();
             let number = sh.lock().unwrap().slot;
             let mut tag = Vec::new();

@@ -62,11 +62,11 @@ pub struct Events {
 
 impl Events {
     pub fn from_env() -> Option<Box<Events>> {
-        let v = std::env::var("EVOVIEW_COLLIDE_LOG").ok()?;
+        let v = crate::envc::var("EVOVIEW_COLLIDE_LOG").ok()?;
         Some(Box::new(Events {
             n: Counts::default(),
             total: Counts::default(),
-            launch_v: std::env::var("EVOVIEW_LAUNCH_V").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0),
+            launch_v: crate::envc::var("EVOVIEW_LAUNCH_V").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0),
             open: None,
             prev_gn: [Vec3::Y; 4],
             prev_gy: [0.0; 4],

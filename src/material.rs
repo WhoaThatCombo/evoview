@@ -202,7 +202,7 @@ fn apply_lights(u: &mut MaterialUniform, src: &crate::lights::LightSrc, _s: u32)
 fn glass_reflection_strength() -> f32 {
     // ⚠ was 0.17: the glass shaders scale nothing - RT0 = a * lit + E
     // (SPEC_small §2), and the extra factor made reflections ~6x too weak
-    std::env::var("EVOVIEW_GLASS_REFL").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0)
+    crate::envc::var("EVOVIEW_GLASS_REFL").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0)
 }
 
 /// Glass coverage head-on, EVO's way: `OpacityOverride` when the material
@@ -461,7 +461,7 @@ fn upload_texture(
         return None;
     }
     // EVOVIEW_MIP_LOG=1: what the old rule would have kept
-    if std::env::var_os("EVOVIEW_MIP_LOG").is_some() {
+    if crate::envc::var_os("EVOVIEW_MIP_LOG").is_some() {
         let aligned = |l: &crate::asset::Level| {
             l.width >= block && l.height >= block && l.width % block == 0 && l.height % block == 0
         };
@@ -573,7 +573,7 @@ fn upload_texture(
         let filled = crate::mipfill::complete(device, queue, &tex, have);
         if let Some(full) = filled {
             crate::perf::add("tex: mip fill", t0.elapsed().as_secs_f64());
-            if std::env::var_os("EVOVIEW_MIPFILL_LOG").is_some() {
+            if crate::envc::var_os("EVOVIEW_MIPFILL_LOG").is_some() {
                 println!("mipfill: {} {}x{} {} had {have} of {} levels", t.name, fw, fh, t.format, full.mip_level_count());
             }
             return Some(full);
@@ -1125,7 +1125,7 @@ impl Materials {
             {
                 albedo_i = None;
                 n_base_off += 1;
-                if std::env::var_os("EVOVIEW_MAT_LOG").is_some() { eprintln!("base map off: {}", m.file); }
+                if crate::envc::var_os("EVOVIEW_MAT_LOG").is_some() { eprintln!("base map off: {}", m.file); }
             }
             let normal_i = m.slot(&[
                 "Base_NormalMap", "NormalMap", "txNormal", "Normal",
@@ -1721,7 +1721,7 @@ impl Materials {
             // magenta - probe by ASSIGNMENT, not addition, so "no visible
             // change" cannot be mistaken for "the flag never set".
             let mut hl_override = false;
-            if let Ok(hl) = std::env::var("EVOVIEW_MAT_HL") {
+            if let Ok(hl) = crate::envc::var("EVOVIEW_MAT_HL") {
                 // Comma-separated, so a bisect can highlight half the material
                 // list at once and find which one owns a pixel in log2(n)
                 // renders instead of n.
@@ -1747,7 +1747,7 @@ impl Materials {
                     hl_override = true;
                 }
             }
-            if std::env::var("EVOVIEW_MAT_DUMP").is_ok() {
+            if crate::envc::var("EVOVIEW_MAT_DUMP").is_ok() {
                 let mut slots: Vec<String> = m.slots.iter().map(|(k, v)| format!("{k}={}", alb_name_of(car, Some(*v)))).collect();
                 slots.sort();
                 let mut cols: Vec<(&String, &Vec<f32>)> = m.colors.iter().collect();
@@ -1764,7 +1764,7 @@ impl Materials {
                     prm.iter().map(|(k, v)| format!("{k}={v:.3}")).collect::<Vec<_>>(),
                 );
             }
-            if std::env::var("EVOVIEW_MAT_LOG").is_ok() {
+            if crate::envc::var("EVOVIEW_MAT_LOG").is_ok() {
                 eprintln!("MAT {:<34} shader={:<26} albedo={:<26} base={:.3},{:.3},{:.3}                            textured={} Base_Basecolor={:?}",
                     m.file, m.shader.clone().unwrap_or_default(), alb_name,
                     base[0], base[1], base[2],
@@ -1829,7 +1829,7 @@ impl Materials {
                     // dithered coverage at that opacity scale (shader.wgsl
                     // cutout_drop; EVOVIEW_CUTOUT_DITHER=0 the old threshold)
                     if mode != Blend::Cutout { 0.0 }
-                    else if std::env::var("EVOVIEW_CUTOUT_DITHER").map_or(false, |v| v == "0") { 1.0 }
+                    else if crate::envc::var("EVOVIEW_CUTOUT_DITHER").map_or(false, |v| v == "0") { 1.0 }
                     else {
                         let s = if co >= 0.0 && sc > 0.0 { sc } else { 2.0 };
                         s.max(1.5).max(0.5 / cutoff.max(0.01)).max(0.5 / (1.0 - cutoff).max(0.01))
@@ -1926,7 +1926,7 @@ impl Materials {
                 // leaving the far sidewall showing through: "rims disappear
                 // when they spin fast". It stays solid unless its blur rim is
                 // there to replace it.
-                let blur_drawn = std::env::var("EVOVIEW_RIM_BLUR").map_or(false, |v| v == "1");
+                let blur_drawn = crate::envc::var("EVOVIEW_RIM_BLUR").map_or(false, |v| v == "1");
                 uniform.fx_m[2] = if m.param(&["InverseVelocity"], 0.0) > 0.5 {
                     if blur_drawn { 2.0 } else { 0.0 }
                 } else { 1.0 };
@@ -1957,7 +1957,7 @@ impl Materials {
             // on the upward faces, tiled at Rain_ScaleUv. Unset (most skins),
             // a fine 24 x 24: the 6 x 1.5 some skins author drew palm-sized
             // smears across a livery's uv sheet that read as holes
-            if !glass && m.param(&["Rain_RaindropsEnabled"], 0.0) > 0.5 && std::env::var_os("EVOVIEW_NO_BODY_RAIN").is_none() {
+            if !glass && m.param(&["Rain_RaindropsEnabled"], 0.0) > 0.5 && crate::envc::var_os("EVOVIEW_NO_BODY_RAIN").is_none() {
                 let s = m.colors.get("Rain_ScaleUv").filter(|v| v.len() >= 2 && v[0] > 0.0)
                     .map_or([24.0, 24.0], |v| [v[0], v[1]]);
                 uniform.layer_pbr[2][2] = s[0];
@@ -2381,7 +2381,7 @@ fn pick_ground_tile(
     used: &std::collections::HashSet<usize>,
 ) -> Option<usize> {
     // EVOVIEW_NO_TILE=1: show materials exactly as authored (conversion previews)
-    if std::env::var("EVOVIEW_NO_TILE").is_ok() {
+    if crate::envc::var("EVOVIEW_NO_TILE").is_ok() {
         return None;
     }
     // What kind of ground is this material meant to be?

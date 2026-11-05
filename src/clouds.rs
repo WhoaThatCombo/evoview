@@ -47,7 +47,7 @@ pub fn advance(dt: f32) {
 }
 
 fn env_f32(name: &str, d: f32) -> f32 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+    crate::envc::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
 }
 
 impl CloudGpu {
@@ -132,7 +132,7 @@ impl CloudGpu {
             [if self.has_weather && env_f32("EVOVIEW_WEATHER_MAP", 1.0) > 0.5 { 1.0 } else { 0.0 },
              // w: the multi-scatter octaves' extinction step (EVOVIEW_CLOUD_MS)
              200_000.0, 30_000.0, env_f32("EVOVIEW_CLOUD_MS", 0.3)],
-            [self.ground, if self.cars_only && std::env::var_os("EVOVIEW_OLD_CAR_OUTDOOR").is_none() { 1.0 } else { 0.0 },
+            [self.ground, if self.cars_only && crate::envc::var_os("EVOVIEW_OLD_CAR_OUTDOOR").is_none() { 1.0 } else { 0.0 },
              0.0, 0.0],
         ]
     }

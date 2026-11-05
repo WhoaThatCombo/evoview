@@ -59,7 +59,7 @@
 use glam::{Mat3, Mat4, Quat, Vec2, Vec3};
 
 fn env_f(k: &str) -> Option<f32> {
-    std::env::var(k).ok().and_then(|v| v.parse::<f32>().ok())
+    crate::envc::var(k).ok().and_then(|v| v.parse::<f32>().ok())
 }
 
 /// The game's CameraSettings (only the fields the drivable cameras read).
@@ -130,7 +130,7 @@ impl GameSettings {
     /// The user's saved file if there is one, else the package's system one,
     /// else the shipped numbers.
     pub fn load(pkg: Option<&std::path::Path>) -> (GameSettings, &'static str) {
-        if let Some(home) = std::env::var_os("USERPROFILE") {
+        if let Some(home) = crate::envc::var_os("USERPROFILE") {
             let p = std::path::Path::new(&home).join("Saved Games/ACE/camerasettings.camerasettings");
             if let Ok(d) = std::fs::read(&p) {
                 return (Self::parse(&d), "Saved Games camerasettings");
@@ -194,15 +194,15 @@ impl Settings {
         if let Some(v) = env_f("EVOVIEW_CAM_CHASE_LAG") { g.chase_lag = v; }
         if let Some(v) = env_f("EVOVIEW_CAM_ONBOARD") { g.onboard_movement = v; }
         let s = Settings {
-            on: std::env::var("EVOVIEW_CAM_HEAD").map_or(true, |v| v != "0"),
+            on: crate::envc::var("EVOVIEW_CAM_HEAD").map_or(true, |v| v != "0"),
             game: g,
             g_tau: env_f("EVOVIEW_CAM_G_TAU").unwrap_or(1.0).max(0.01),
-            head_abs: std::env::var("EVOVIEW_CAM_HEAD_ABS").map_or(true, |v| v != "0"),
+            head_abs: crate::envc::var("EVOVIEW_CAM_HEAD_ABS").map_or(true, |v| v != "0"),
             head_scale: env_f("EVOVIEW_CAM_HEAD_SCALE").unwrap_or(1.0),
             lp_hz: env_f("EVOVIEW_CAM_LP_HZ").unwrap_or(3.0).max(0.0),
             lp_max_m: env_f("EVOVIEW_CAM_LP_MAX_CM").unwrap_or(4.0) * 0.01,
             lp_max_rad: env_f("EVOVIEW_CAM_LP_MAX_DEG").unwrap_or(2.0).to_radians(),
-            slope_ref: std::env::var("EVOVIEW_CAM_HORIZON_REF").map_or(true, |v| v != "world"),
+            slope_ref: crate::envc::var("EVOVIEW_CAM_HORIZON_REF").map_or(true, |v| v != "world"),
             slope_tau: env_f("EVOVIEW_CAM_SLOPE_TAU").unwrap_or(0.15).max(0.001),
         };
         if s.on {
@@ -234,7 +234,7 @@ impl Settings {
         }
         match kind {
             1 => Mode { gain: g.general_movement, lock: g.horizon_lock, lws: true, lp: true, ..Default::default() },
-            2 if std::env::var("EVOVIEW_CAM_CHASE").map_or(false, |v| v == "0") => Mode::default(),
+            2 if crate::envc::var("EVOVIEW_CAM_CHASE").map_or(false, |v| v == "0") => Mode::default(),
             2 => Mode { gain: g.general_movement, lock: g.horizon_lock, lp: true, chase: true, ..Default::default() },
             4 => Mode { gain: g.general_movement * g.dashcam_factor, lock: g.horizon_lock * g.dashcam_factor,
                         lws: true, lp: true, ..Default::default() },
@@ -295,7 +295,7 @@ const ONBOARD_LIMIT: Vec3 = Vec3::new(2.0, 7.0, 1.0);
 
 impl HeadCam {
     pub fn new(pkg: Option<&std::path::Path>) -> HeadCam {
-        let log = std::env::var("EVOVIEW_CAM_LOG").ok().and_then(|p| std::fs::File::create(p).ok()).map(|f| {
+        let log = crate::envc::var("EVOVIEW_CAM_LOG").ok().and_then(|p| std::fs::File::create(p).ok()).map(|f| {
             use std::io::Write;
             let mut w = std::io::BufWriter::new(f);
             let _ = writeln!(w, "t,x,y,z,kmh,ax_g,ay_g,az_g,head_x_cm,head_y_cm,head_z_cm,pitch_raw,roll_raw,\
@@ -329,7 +329,7 @@ impl HeadCam {
     /// noise to hide, and the low-pass only let the eye drift 9 cm in the
     /// cockpit (Oulton: the dash bobbed up the screen). Off unless asked for.
     pub fn sprung_body(&mut self) {
-        if std::env::var_os("EVOVIEW_CAM_LP_HZ").is_none() && self.s.lp_hz > 0.0 {
+        if crate::envc::var_os("EVOVIEW_CAM_LP_HZ").is_none() && self.s.lp_hz > 0.0 {
             self.s.lp_hz = 0.0;
             println!("in-car camera: rigid-body car, body low-pass off (EVOVIEW_CAM_LP_HZ=3 for it)");
         }
@@ -564,10 +564,10 @@ impl HeadCam {
 /// f2 rotations (deg), per type}. EVOVIEW_CAM_USER=0 keeps the car's own.
 pub fn apply_user(cams: &mut [crate::fxdata::CarCam], car_id: &str) {
     use crate::proto::{fields, text, Val};
-    if std::env::var("EVOVIEW_CAM_USER").map_or(false, |v| v == "0") {
+    if crate::envc::var("EVOVIEW_CAM_USER").map_or(false, |v| v == "0") {
         return;
     }
-    let Some(home) = std::env::var_os("USERPROFILE") else { return };
+    let Some(home) = crate::envc::var_os("USERPROFILE") else { return };
     let Ok(d) = std::fs::read(std::path::Path::new(&home).join("Saved Games/ACE/CarCameras.carcamerausersettings"))
         else { return };
     let floats = |d: &[u8], v: Val, out: &mut Vec<f32>| match v {
@@ -644,8 +644,8 @@ pub struct Headless {
 
 impl Headless {
     pub fn from_env() -> Option<Headless> {
-        std::env::var_os("EVOVIEW_CAM_LOG")?;
-        let v3 = |k: &str, d: [f32; 3]| std::env::var(k).ok().and_then(|v| {
+        crate::envc::var_os("EVOVIEW_CAM_LOG")?;
+        let v3 = |k: &str, d: [f32; 3]| crate::envc::var(k).ok().and_then(|v| {
             let p: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
             (p.len() == 3).then(|| [p[0], p[1], p[2]])
         }).unwrap_or(d);
@@ -681,7 +681,7 @@ pub struct ViewLog {
 
 impl ViewLog {
     pub fn from_env() -> Option<ViewLog> {
-        let f = std::fs::File::create(std::env::var_os("EVOVIEW_CAM_VLOG")?).ok()?;
+        let f = std::fs::File::create(crate::envc::var_os("EVOVIEW_CAM_VLOG")?).ok()?;
         let mut w = std::io::BufWriter::new(f);
         use std::io::Write;
         let _ = writeln!(w, "t,cam,kmh,x,y,z,body_pitch,body_roll,view_pitch,view_roll,rel_pitch,rel_roll,rel_yaw,eye_x,eye_y,eye_z,eye_car_x,eye_car_y,eye_car_z");

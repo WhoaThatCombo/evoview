@@ -19,7 +19,7 @@ use glam::{Mat4, Vec3};
 
 /// face size in pixels (EVOVIEW_PROBE_RES)
 fn size() -> u32 {
-    std::env::var("EVOVIEW_PROBE_RES").ok().and_then(|v| v.parse().ok()).unwrap_or(256u32).clamp(16, 1024)
+    crate::envc::var("EVOVIEW_PROBE_RES").ok().and_then(|v| v.parse().ok()).unwrap_or(256u32).clamp(16, 1024)
 }
 
 #[repr(C)]

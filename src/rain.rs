@@ -101,7 +101,7 @@ static WATER: std::sync::Mutex<Option<water::Water>> = std::sync::Mutex::new(Non
 fn with_water<R>(f: impl FnOnce(&mut water::Water) -> R) -> R {
     let mut g = WATER.lock().unwrap();
     let w = g.get_or_insert_with(|| {
-        let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f32>().ok());
+        let env = |k: &str| crate::envc::var(k).ok().and_then(|v| v.parse::<f32>().ok());
         water::Water {
             wet: 0.0,
             rubber: 1.0,
@@ -516,7 +516,7 @@ impl Rain {
         let roots: Vec<usize> = bones.iter().copied()
             .filter(|&b| !bones.iter().any(|&o| o != b && under(b, o)))
             .collect();
-        if std::env::var_os("EVOVIEW_RAIN_LOG").is_some() {
+        if crate::envc::var_os("EVOVIEW_RAIN_LOG").is_some() {
             println!("rain: wiper bones {:?} roots {roots:?}", bones.iter().map(|&b| names.get(b).cloned().unwrap_or_default()).collect::<Vec<_>>());
         }
         for &b in &roots {
@@ -559,7 +559,7 @@ impl Rain {
                 wipers.push(Wiper { bone: b, pivot, tip, radius: best, axis: None, hist: [0.0; HIST], acc: 0.0 });
             }
         }
-        if std::env::var_os("EVOVIEW_RAIN_LOG").is_some() {
+        if crate::envc::var_os("EVOVIEW_RAIN_LOG").is_some() {
             for me in &car.meshes {
                 let uv = car.floats(me.uvs);
                 let p = car.floats(me.positions);
@@ -654,7 +654,7 @@ impl Rain {
         let sticky = curve(&[(30.0, 1.0), (60.0, 1.0), (100.0, 0.5), (150.0, 0.05), (250.0, 0.01)], speed_kmh);
         // ~0.35 drop generations a second at the slow end
         let phase = (self.time * 0.35 * rate).fract();
-        let dbg = match std::env::var("EVOVIEW_RAIN_DEBUG").as_deref() { Ok("2") => 20.0, Ok(_) => 10.0, Err(_) => 0.0 };
+        let dbg = match crate::envc::var("EVOVIEW_RAIN_DEBUG").as_deref() { Ok("2") => 20.0, Ok(_) => 10.0, Err(_) => 0.0 };
         b[0] = [intensity, phase, (amount * sticky).max(0.05 * intensity), self.wipers.len() as f32 + dbg];
         for (i, w) in self.wipers.iter().enumerate() {
             let r = 1 + i * 8;

@@ -217,7 +217,7 @@ impl Sim {
         let ns = fx.emitters.len();
         let nd = fx.emitter_defs.len().max(1);
         let showroom = self.cars.is_empty();
-        self.more = std::env::var("EVOVIEW_SMOKE_RATE").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0);
+        self.more = crate::envc::var("EVOVIEW_SMOKE_RATE").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0);
         self.counts.clear();
         self.counts.resize(nd, 0);
         for p in &self.parts {
@@ -345,7 +345,7 @@ impl Sim {
                     // sparks are evoview's own idea - off unless
                     // EVOVIEW_SCRAPE_SPARKS=1 (they looked out of place).
                     (0, ET_DEBRIS) if def_path.to_lowercase().contains("spark")
-                        && std::env::var_os("EVOVIEW_SCRAPE_SPARKS").is_some() => car.scrape,
+                        && crate::envc::var_os("EVOVIEW_SCRAPE_SPARKS").is_some() => car.scrape,
                     (0, ET_CAR_SMOKE) => 0.0,
                     _ => 0.0,
                 };
@@ -355,7 +355,7 @@ impl Sim {
                 if strength <= 0.0 {
                     continue;
                 }
-                let off_path = std::env::var("EVOVIEW_FX_OFF_PATH").map_or(false, |v| {
+                let off_path = crate::envc::var("EVOVIEW_FX_OFF_PATH").map_or(false, |v| {
                     v.split(',').any(|w| !w.is_empty() && def_path.to_lowercase().contains(&w.to_lowercase()))
                 });
                 if strength <= 0.0 || fx_off(ty) || off_path {
@@ -492,5 +492,5 @@ fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
 }
 
 fn fx_off(ty: u32) -> bool {
-    std::env::var("EVOVIEW_FX_OFF").map_or(false, |v| v.split(',').any(|x| x.trim().parse::<u32>().ok() == Some(ty)))
+    crate::envc::var("EVOVIEW_FX_OFF").map_or(false, |v| v.split(',').any(|x| x.trim().parse::<u32>().ok() == Some(ty)))
 }

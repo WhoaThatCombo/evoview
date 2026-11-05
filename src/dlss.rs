@@ -28,12 +28,12 @@
 
 /// EVOVIEW_UPSCALER=dlss asks for DLSS.
 pub fn wanted() -> bool {
-    std::env::var("EVOVIEW_UPSCALER").map_or(false, |v| v.eq_ignore_ascii_case("dlss"))
+    crate::envc::var("EVOVIEW_UPSCALER").map_or(false, |v| v.eq_ignore_ascii_case("dlss"))
 }
 
 /// (perf-quality enum value, render scale) for EVOVIEW_DLSS_QUALITY.
 pub fn quality() -> (i32, f32) {
-    match std::env::var("EVOVIEW_DLSS_QUALITY").unwrap_or_default().to_ascii_lowercase().as_str() {
+    match crate::envc::var("EVOVIEW_DLSS_QUALITY").unwrap_or_default().to_ascii_lowercase().as_str() {
         "dlaa" => (5, 1.0),
         "balanced" => (1, 0.58),
         "performance" | "perf" => (0, 0.5),
@@ -47,15 +47,15 @@ pub fn quality() -> (i32, f32) {
 /// derive it from the quality mode, so the render size, the texture LOD bias
 /// and taa.rs all agree. (taa::render_scale clamps to 0.5..1.)
 pub fn apply_render_scale() {
-    if wanted() && std::env::var_os("EVOVIEW_RENDER_SCALE").is_none() {
-        std::env::set_var("EVOVIEW_RENDER_SCALE", format!("{}", quality().1));
+    if wanted() && crate::envc::var_os("EVOVIEW_RENDER_SCALE").is_none() {
+        crate::envc::set_var("EVOVIEW_RENDER_SCALE", format!("{}", quality().1));
     }
 }
 
 /// Where nvngx_dlss.dll is looked for: EVOVIEW_DLSS_DIR,
 /// then the exe's folder.
 fn dirs() -> Vec<std::path::PathBuf> {
-    std::env::var_os("EVOVIEW_DLSS_DIR").map(Into::into).into_iter()
+    crate::envc::var_os("EVOVIEW_DLSS_DIR").map(Into::into).into_iter()
         .chain(std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())))
         .collect()
 }
@@ -161,7 +161,7 @@ mod ffi {
     /// The driver's NGX folder: EVOVIEW_NGX_CORE, else
     /// HKLM\SOFTWARE\NVIDIA Corporation\Global\NGXCore\FullPath.
     fn core_dir() -> Option<std::path::PathBuf> {
-        if let Some(d) = std::env::var_os("EVOVIEW_NGX_CORE") {
+        if let Some(d) = crate::envc::var_os("EVOVIEW_NGX_CORE") {
             return Some(d.into());
         }
         let w = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
@@ -448,7 +448,7 @@ impl Dlss {
             let data = std::env::temp_dir().join("evoview_ngx");
             let _ = std::fs::create_dir_all(&data);
             let data_w = wide(data.as_os_str());
-            let log = std::env::var_os("EVOVIEW_DLSS_LOG").is_some();
+            let log = crate::envc::var_os("EVOVIEW_DLSS_LOG").is_some();
             let info = ffi::FeatureCommonInfo {
                 paths: ffi::PathListInfo { path: dir_p.as_ptr(), length: dir_p.len() as u32 },
                 internal: std::ptr::null_mut(),
@@ -643,7 +643,7 @@ impl Dlss {
                     ffi::NVSDK_NGX_Parameter_SetI(p, c"DLSS.Enable.Output.Subrects".as_ptr(), 0);
                     // EVOVIEW_DLSS_PRESET = e | f (the older CNN model, deprecated, cheaper)
                     // | j | k | l | m (transformer); default: NVIDIA's per mode
-                    if let Some(pr) = std::env::var("EVOVIEW_DLSS_PRESET").ok().and_then(|v| match v.to_ascii_lowercase().as_str() {
+                    if let Some(pr) = crate::envc::var("EVOVIEW_DLSS_PRESET").ok().and_then(|v| match v.to_ascii_lowercase().as_str() {
                         "e" => Some(5u32), "f" => Some(6), "j" => Some(10), "k" => Some(11), "l" => Some(12), "m" => Some(13), _ => None }) {
                         for n in [c"DLSS.Hint.Render.Preset.DLAA", c"DLSS.Hint.Render.Preset.Quality", c"DLSS.Hint.Render.Preset.Balanced",
                                   c"DLSS.Hint.Render.Preset.Performance", c"DLSS.Hint.Render.Preset.UltraPerformance",
@@ -665,8 +665,8 @@ impl Dlss {
                 self.feature = Some(f);
             }
             let handle = self.feature.as_ref().ok_or("no feature")?.handle;
-            let sx = std::env::var("EVOVIEW_DLSS_JX").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0);
-            let sy = std::env::var("EVOVIEW_DLSS_JY").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0);
+            let sx = crate::envc::var("EVOVIEW_DLSS_JX").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0);
+            let sy = crate::envc::var("EVOVIEW_DLSS_JY").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0);
             enc.as_hal_mut::<Vulkan, _, _>(|e| -> Result<(), String> {
                 let cmd = e.ok_or("no Vulkan encoder")?.raw_handle();
                 let vp = |r: &mut ffi::ResourceVk| r as *mut ffi::ResourceVk as *mut std::ffi::c_void;

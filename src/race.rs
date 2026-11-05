@@ -35,12 +35,12 @@ pub const NAMES: [&str; 24] = [
 ];
 
 pub fn env_count() -> usize {
-    std::env::var("EVOVIEW_AI").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0).min(NAMES.len())
+    crate::envc::var("EVOVIEW_AI").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0).min(NAMES.len())
 }
 
 /// EVOVIEW_AI_CARS, else the player's car, one model per opponent (cycled).
 pub fn models(player: &str, n: usize) -> Vec<String> {
-    let list: Vec<String> = std::env::var("EVOVIEW_AI_CARS").ok()
+    let list: Vec<String> = crate::envc::var("EVOVIEW_AI_CARS").ok()
         .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
         .filter(|l: &Vec<String>| !l.is_empty())
         .unwrap_or_else(|| vec![player.to_string()]);
@@ -247,11 +247,11 @@ impl Race {
     /// Places everyone (the player too) on the grid or in the formation.
     pub fn new(line: Vec<Vec3>, cars: Vec<(TrackDrive, usize, usize)>, grid: &[crate::pits::Spot], player: &mut TrackDrive) -> Race {
         let line = Line::new(line);
-        let start = match std::env::var("EVOVIEW_AI_START").as_deref() {
+        let start = match crate::envc::var("EVOVIEW_AI_START").as_deref() {
             Ok("rolling") => Start::Rolling,
             _ => Start::Standing,
         };
-        let (lo, hi) = std::env::var("EVOVIEW_AI_PACE").ok()
+        let (lo, hi) = crate::envc::var("EVOVIEW_AI_PACE").ok()
             .and_then(|v| {
                 let mut it = v.split(',').filter_map(|x| x.trim().parse::<f32>().ok());
                 let a = it.next()?;
@@ -263,7 +263,7 @@ impl Race {
             let mut drv = LineDriver::new(line.pts.clone());
             drv.pace = lo + (hi - lo) * hash01(i, 1);
             // EVOVIEW_AI_VARY=0: every driver on the line itself, braking alike
-            let vary = std::env::var("EVOVIEW_AI_VARY").map_or(1.0, |v| v.parse::<f32>().unwrap_or(1.0));
+            let vary = crate::envc::var("EVOVIEW_AI_VARY").map_or(1.0, |v| v.parse::<f32>().unwrap_or(1.0));
             drv.brake_k = 1.0 + (0.15 * hash01(i, 2) - 0.1) * vary;
             let base_off = (hash01(i, 3) - 0.5) * 1.2 * vary;
             drv.offset = base_off;
@@ -271,7 +271,7 @@ impl Race {
             Ai { td, drv, name: NAMES[i % NAMES.len()], slot, inst, base_off, pass: None, slow: 0.0, best: f32::MIN, far: 0.0, ctl: Controls::default(), smoke: 0.0 }
         }).collect();
         // the player's slot on the grid, 0-based (default: the middle)
-        let pp = std::env::var("EVOVIEW_AI_GRID_POS").ok().and_then(|v| v.parse::<usize>().ok())
+        let pp = crate::envc::var("EVOVIEW_AI_GRID_POS").ok().and_then(|v| v.parse::<usize>().ok())
             .map_or(n / 2, |p| p.max(1) - 1).min(n);
         let spots = Self::slots(&line, grid, n + 1, start);
         let mut k = 0;
@@ -302,7 +302,7 @@ impl Race {
         }
         let mut prog = vec![Progress::start(&line, player.pos)];
         prog.extend(ai.iter().map(|a| Progress::start(&line, a.td.pos)));
-        let threads = std::env::var("EVOVIEW_AI_THREADS").ok().and_then(|v| v.parse::<usize>().ok())
+        let threads = crate::envc::var("EVOVIEW_AI_THREADS").ok().and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(if n >= 4 { 3 } else { 1 }).clamp(1, 8);
         println!("race: {n} AI, {:?} start, player P{} of {}, pace {lo:.2}-{hi:.2}, {} model, {} thread(s)",
                  start, pp + 1, n + 1, if ai.first().map_or(false, |a| a.td.rig.is_some()) { "rig" } else { "simple" }, threads);
@@ -322,7 +322,7 @@ impl Race {
             lights_out,
             go: None,
             stats: Stats::default(),
-            log: std::env::var_os("EVOVIEW_AI_LOG").is_some(),
+            log: crate::envc::var_os("EVOVIEW_AI_LOG").is_some(),
             threads,
             quiet: Default::default(),
             radar: None,
@@ -485,7 +485,7 @@ impl Race {
         }
         drop(_t);
         // EVOVIEW_AI_CONTACT=0: cars pass through each other (A/B)
-        if std::env::var("EVOVIEW_AI_CONTACT").map_or(true, |v| v != "0") {
+        if crate::envc::var("EVOVIEW_AI_CONTACT").map_or(true, |v| v != "0") {
             self.contacts(player);
         }
         self.prog[0].update(&self.line, player.pos);
@@ -788,7 +788,7 @@ pub fn test_run(race: &mut Race, player: &mut TrackDrive, mut drv: LineDriver, s
     let mut next = 0.0;
     drv.snap(player.pos);
     drv.offset = lateral(&race.line, player.pos);
-    drv.pace = std::env::var("EVOVIEW_PLAYER_PACE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.95);
+    drv.pace = crate::envc::var("EVOVIEW_PLAYER_PACE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.95);
     let mut laps_seen = vec![i32::MIN; race.ai.len() + 1];
     let mut prev_y: Vec<f32> = std::iter::once(player.pos.y).chain(race.ai.iter().map(|a| a.td.pos.y)).collect();
     let wall = std::time::Instant::now();
@@ -811,7 +811,7 @@ pub fn test_run(race: &mut Race, player: &mut TrackDrive, mut drv: LineDriver, s
             let vy = (td.pos.y - prev_y.get(k).copied().unwrap_or(td.pos.y)) / dt;
             if let Some(p) = prev_y.get_mut(k) { *p = td.pos.y; }
             // EVOVIEW_Y_LOG="k,t0,t1": car k's height every step in a window
-            if let Some((yk, t0, t1)) = std::env::var("EVOVIEW_Y_LOG").ok().and_then(|v| {
+            if let Some((yk, t0, t1)) = crate::envc::var("EVOVIEW_Y_LOG").ok().and_then(|v| {
                 let p: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
                 (p.len() == 3).then(|| (p[0] as usize, p[1], p[2]))
             }) {
@@ -838,7 +838,7 @@ pub fn test_run(race: &mut Race, player: &mut TrackDrive, mut drv: LineDriver, s
             laps_seen[k] = p.laps;
         }
         // EVOVIEW_AI_TRACE=k: car k (0 the player) four times a second
-        if let Some(k) = std::env::var("EVOVIEW_AI_TRACE").ok().and_then(|v| v.parse::<usize>().ok()).filter(|_| (t * 4.0).fract() < dt * 4.0) {
+        if let Some(k) = crate::envc::var("EVOVIEW_AI_TRACE").ok().and_then(|v| v.parse::<usize>().ok()).filter(|_| (t * 4.0).fract() < dt * 4.0) {
             let (td, c, extra) = if k == 0 { (&*player, c, String::new()) } else {
                 let a = &race.ai[k - 1];
                 (&a.td, a.ctl, format!(" vcap {:.1} off {:+.1}->{:+.1} smoke {:.2} slip_r {:.3} spin {:.2}", a.drv.vcap, a.drv.offset, a.drv.offset_target,
@@ -947,7 +947,7 @@ impl Race {
         }
         let side = 0.2;
         let (w, h) = (u(side), side);
-        let (x, y) = std::env::var("EVOVIEW_RADAR_POS").ok()
+        let (x, y) = crate::envc::var("EVOVIEW_RADAR_POS").ok()
             .and_then(|v| v.split_once(',').and_then(|(a, b)| Some((a.trim().parse::<f32>().ok()?, b.trim().parse::<f32>().ok()?))))
             .map_or((0.5 - w * 0.5 - u(0.42), 1.0 - h - 0.025), |(a, b)| (a.clamp(0.0, 1.0 - w), b.clamp(0.0, 1.0 - h)));
         hud.panel(x, y, w, h, 10.0, t::panel(0.55), t::line(0.45));

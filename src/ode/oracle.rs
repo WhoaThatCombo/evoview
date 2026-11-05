@@ -538,13 +538,13 @@ fn trimesh_matches_ode_0_15_2() {
 }
 
 fn compare(ours: &str, args: &[&str]) {
-    let Ok(exe) = std::env::var("ODE_ORACLE") else {
+    let Ok(exe) = crate::envc::var("ODE_ORACLE") else {
         eprintln!("ODE_ORACLE not set: ran the scenario only");
         return;
     };
     let o = std::process::Command::new(exe).args(args).output().expect("run ode_oracle");
     let theirs = String::from_utf8(o.stdout).unwrap();
-    if let Ok(p) = std::env::var("ODE_ORACLE_DUMP") {
+    if let Ok(p) = crate::envc::var("ODE_ORACLE_DUMP") {
         let _ = std::fs::write(format!("{p}.{}.rs.txt", args.len()), ours);
         let _ = std::fs::write(format!("{p}.{}.c.txt", args.len()), &theirs);
     }
@@ -555,7 +555,7 @@ fn compare(ours: &str, args: &[&str]) {
 }
 
 fn oracle_steps() -> usize {
-    std::env::var("ODE_ORACLE_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(400)
+    crate::envc::var("ODE_ORACLE_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(400)
 }
 
 #[test]
@@ -567,15 +567,15 @@ fn collision_matches_ode_0_15_2() {
 
 #[test]
 fn matches_ode_0_15_2() {
-    let steps = std::env::var("ODE_ORACLE_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(400);
+    let steps = crate::envc::var("ODE_ORACLE_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(400);
     let ours = scenario(steps);
-    let Ok(exe) = std::env::var("ODE_ORACLE") else {
+    let Ok(exe) = crate::envc::var("ODE_ORACLE") else {
         eprintln!("ODE_ORACLE not set: ran the scenario only");
         return;
     };
     let o = std::process::Command::new(exe).arg(steps.to_string()).output().expect("run ode_oracle");
     let theirs = String::from_utf8(o.stdout).unwrap();
-    if let Ok(p) = std::env::var("ODE_ORACLE_DUMP") {
+    if let Ok(p) = crate::envc::var("ODE_ORACLE_DUMP") {
         let _ = std::fs::write(format!("{p}.rs.txt"), &ours);
         let _ = std::fs::write(format!("{p}.c.txt"), &theirs);
     }

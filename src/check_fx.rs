@@ -88,11 +88,11 @@ pub async fn run(car: Car, car_id: &str, out: &Path, sheet: Option<&Path>,
         anim_poses = a.poses;
     }
     // EVOVIEW_CHECK_ANIM_ONLY=1: the CPU half only (fleet sweeps, no GPU)
-    if std::env::var_os("EVOVIEW_CHECK_ANIM_ONLY").is_some() {
+    if crate::envc::var_os("EVOVIEW_CHECK_ANIM_ONLY").is_some() {
         write(&rep, out);
         return;
     }
-    std::env::set_var("EVOVIEW_SHOT_ALPHA", "1");
+    crate::envc::set_var("EVOVIEW_SHOT_ALPHA", "1");
     let mut still = Still::new(car, W, H, 2.5, 0.35, 1.0, None, None, false, None).await;
     let fx: Option<CarFx> = still.car.fx.as_deref().cloned();
     let (lo, hi) = (still.lo, still.hi);

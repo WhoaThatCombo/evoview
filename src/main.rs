@@ -67,6 +67,7 @@ mod race;
 mod cluster;
 mod motion;
 mod carcull;
+mod envc;
 mod dlss;
 mod fsr;
 mod install;
@@ -312,10 +313,10 @@ fn main() {
     // --layout <id>: the track layout (scenery, racing line, spawn); the
     // same as EVOVIEW_LAYOUT, which the loader and trackdrive read
     if let Some(l) = flag("--layout") {
-        std::env::set_var("EVOVIEW_LAYOUT", l);
+        crate::envc::set_var("EVOVIEW_LAYOUT", l);
     }
     if let Some(s) = flag("--setup") {
-        std::env::set_var("EVOVIEW_SETUP", s);
+        crate::envc::set_var("EVOVIEW_SETUP", s);
     }
     // --strict: draw what had to be guessed (strict.rs)
     if args.iter().any(|a| a == "--strict") {
@@ -398,7 +399,7 @@ fn main() {
 
     // Shared assets (tyres, paints) that live outside a car folder. Defaults
     // to ./assets next to the viewer; override with EVOVIEW_ASSETS.
-    let asset_roots: Vec<PathBuf> = std::env::var("EVOVIEW_ASSETS")
+    let asset_roots: Vec<PathBuf> = crate::envc::var("EVOVIEW_ASSETS")
         .map(|v| v.split(';').map(PathBuf::from).collect())
         .unwrap_or_else(|_| Vec::new());
 
@@ -809,7 +810,7 @@ fn replay_car(rp: &PathBuf, pkg: &PathBuf, base: Option<&std::path::Path>,
             std::process::exit(1);
         }
     };
-    if std::env::var_os("EVOVIEW_REPLAY_DUMP").is_some() {
+    if crate::envc::var_os("EVOVIEW_REPLAY_DUMP").is_some() {
         let span = rep.cars.get(car).map_or(0.0, |c| c.n_matrix as f32 / rep.rate());
         let mut t = 0.0;
         while t < span {
@@ -951,7 +952,7 @@ fn play_donut(pkg: &PathBuf, base: Option<PathBuf>, track: &str, flag: &dyn Fn(&
     let t0 = std::time::Instant::now();
     let model = flag("--car-id").unwrap_or_else(|| "ks_toyota_supra_mkiv".into());
     let n: usize = flag("--cars").and_then(|v| v.parse().ok()).unwrap_or(5);
-    let env3 = std::env::var("EVOVIEW_DONUT").ok().map(|s| s.split(',').filter_map(|x| x.trim().parse::<f32>().ok()).collect::<Vec<_>>());
+    let env3 = crate::envc::var("EVOVIEW_DONUT").ok().map(|s| s.split(',').filter_map(|x| x.trim().parse::<f32>().ok()).collect::<Vec<_>>());
     let (centre, radius) = match env3.as_deref() {
         Some([x, z, r]) => (glam::Vec3::new(*x, 0.0, *z), *r),
         _ => (trackdrive::spawn_point(pkg, track).map_or(glam::Vec3::ZERO, |p| p.0), 9.0),
@@ -1045,7 +1046,7 @@ fn play_convoy(pkg: &PathBuf, base: Option<PathBuf>, track: &str, flag: &dyn Fn(
         None => flat,
     };
     // EVOVIEW_LINE_DUMP: the grounded line every 10 m around --at (camera placing)
-    if std::env::var_os("EVOVIEW_LINE_DUMP").is_some() {
+    if crate::envc::var_os("EVOVIEW_LINE_DUMP").is_some() {
         let mut acc = 0.0f32;
         let mut next = best.1 - 150.0;
         for i in 0..c.line.len() {
@@ -1198,7 +1199,7 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
     let n_ai = flag("--ai").and_then(|v| v.parse::<usize>().ok()).map_or_else(race::env_count, |n| n.min(race::NAMES.len()));
     // EVOVIEW_MP=host:port: online (mp.rs); the other players are drawn in
     // EVOVIEW_MP_CARS render slots (4) of EVOVIEW_AI_CARS or this car's model
-    let mp_addr = std::env::var("EVOVIEW_MP").ok().filter(|v| !v.is_empty());
+    let mp_addr = crate::envc::var("EVOVIEW_MP").ok().filter(|v| !v.is_empty());
     // online: join first - the other players' cars decide what is loaded
     let mp = mp_addr.and_then(|addr| {
         let Some((fs, mech)) = mp::car_final_state(pkg, car_id) else {
@@ -1207,10 +1208,10 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
         // EVOVIEW_MP_NAME (the evoview tab's Driver name), else the Steam
         // account signed in here; its id is who we join as
         let steam = mp::steam_user();
-        let user = std::env::var("EVOVIEW_MP_USER").ok().filter(|v| !v.is_empty())
+        let user = crate::envc::var("EVOVIEW_MP_USER").ok().filter(|v| !v.is_empty())
             .or_else(|| steam.as_ref().map(|s| s.0.clone()))
             .unwrap_or_else(|| "76561190000000000".into());
-        let name = std::env::var("EVOVIEW_MP_NAME").ok().map(|v| v.trim().chars().take(32).collect::<String>())
+        let name = crate::envc::var("EVOVIEW_MP_NAME").ok().map(|v| v.trim().chars().take(32).collect::<String>())
             .filter(|v| !v.is_empty())
             .or_else(|| steam.as_ref().map(|s| s.1.clone()).filter(|n| !n.is_empty()))
             .unwrap_or_else(|| "evoview driver".into());
@@ -1221,7 +1222,7 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
         Some(m) => mp_models(pkg, car_id, m),
         // EVOVIEW_AI_OWN=<file>: every opponent wears that CarFinalStateData
         // (a player's look captured online) - checks of the online liveries
-        None => (race::models(car_id, n_ai), std::env::var("EVOVIEW_AI_OWN").ok()
+        None => (race::models(car_id, n_ai), crate::envc::var("EVOVIEW_AI_OWN").ok()
             .and_then(|f| std::fs::read(f).ok()).map_or(Vec::new(), |b| vec![Some(b); n_ai])),
     };
     // online: the server's track, whatever the evoview tab had picked
@@ -1243,7 +1244,7 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
         }).next();
         if let Some(l) = lay {
             println!("mp: the server runs layout {l}");
-            std::env::set_var("EVOVIEW_LAYOUT", l);
+            crate::envc::set_var("EVOVIEW_LAYOUT", l);
         }
         *load::SESSION_CONTAINERS.write().unwrap() = cs;
     }
@@ -1265,7 +1266,7 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
     let ground = std::sync::Arc::new(trackdrive::Ground::new(coll, &env.map(|e| e.surface_defs.clone()).unwrap_or_default()));
     let slot = scene.slots[0].clone();
     // the opponents: each its own physics on its model's data
-    let ai_rig = std::env::var("EVOVIEW_AI_RIG").map_or(std::env::var_os("EVOVIEW_RIGCAR").is_some(), |v| v != "0");
+    let ai_rig = crate::envc::var("EVOVIEW_AI_RIG").map_or(crate::envc::var_os("EVOVIEW_RIGCAR").is_some(), |v| v != "0");
     let phys_ai: Vec<_> = ai_vfs.into_iter().map(|(_, mut vfs)| {
         let ph = carphys::Physics::read(&mut vfs);
         let aero = ph.as_ref().map(|p| lapsim::aero(&mut vfs, p)).unwrap_or_default();
@@ -1281,7 +1282,7 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
         }
         ai_cars.push((t, si, inst));
     }
-    let mut td = trackdrive::TrackDrive::with_model(ground, slot, phys, std::env::var_os("EVOVIEW_RIGCAR").is_some(), true);
+    let mut td = trackdrive::TrackDrive::with_model(ground, slot, phys, crate::envc::var_os("EVOVIEW_RIGCAR").is_some(), true);
     td.set_aero(aero);
     let (at, yaw) = trackdrive::spawn_point(pkg, track).unwrap_or((glam::Vec3::ZERO, 0.0));
     if !td.place(at, yaw) {
@@ -1317,7 +1318,7 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
         pits::start(&mut td, p);
     }
     // lap timing (laps.rs); scripted drivers' laps are not saved as PBs
-    let scripted = flag("--drive-test").is_some() || flag("--bench").is_some() || std::env::var_os("EVOVIEW_DRIVE_LINE").is_some();
+    let scripted = flag("--drive-test").is_some() || flag("--bench").is_some() || crate::envc::var_os("EVOVIEW_DRIVE_LINE").is_some();
     let mut laps = laps::Session::load(pkg, track, car_id, !scripted);
     let mut race = (!ai_cars.is_empty()).then(|| {
         let grid = pits::PitLane::load(pkg, track).map(|l| l.grid).unwrap_or_default();
@@ -1335,7 +1336,7 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
     }
     // EVOVIEW_AI_WARP=s: the race run on headless for s seconds first (the
     // player's car on the racing-line driver) - mid-race captures
-    if let (Some(r), Some(w)) = (race.as_mut(), std::env::var("EVOVIEW_AI_WARP").ok().and_then(|v| v.parse::<f32>().ok())) {
+    if let (Some(r), Some(w)) = (race.as_mut(), crate::envc::var("EVOVIEW_AI_WARP").ok().and_then(|v| v.parse::<f32>().ok())) {
         let mut d = trackdrive::LineDriver::new(trackdrive::racing_line(pkg, track));
         d.snap(td.pos);
         d.offset = race::lateral(&r.line, td.pos);
@@ -1440,7 +1441,7 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
     }
     // EVOVIEW_RIG_LOG: where the rig's rest pose puts the hubs and the body
     // against their authored (bind) positions
-    if let (Some(sk), true) = (scene.skeleton.as_ref(), std::env::var_os("EVOVIEW_RIG_LOG").is_some()) {
+    if let (Some(sk), true) = (scene.skeleton.as_ref(), crate::envc::var_os("EVOVIEW_RIG_LOG").is_some()) {
         if let Some(rig) = sk.rig.as_deref() {
             let mut d = drive::Drive::new(rig);
             d.follow(rig, &td.rig_feed(), false, 0.02);
@@ -1473,7 +1474,7 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
             focus: Some(td.pos),
             pkg: Some(pkg.clone()),
             track_drive: Some(td),
-            line_driver: std::env::var_os("EVOVIEW_DRIVE_LINE").map(|_| trackdrive::racing_line(pkg, track)).filter(|l| l.len() >= 3).map(trackdrive::LineDriver::new),
+            line_driver: crate::envc::var_os("EVOVIEW_DRIVE_LINE").map(|_| trackdrive::racing_line(pkg, track)).filter(|l| l.len() >= 3).map(trackdrive::LineDriver::new),
             tv: Some(cams::TvDirector::new(cams::load_tv(pkg, track))),
             car_id: Some(car_id.to_string()),
             pits,
@@ -1558,7 +1559,7 @@ fn mp_spawn(pkg: &PathBuf, track: &str, m: &mp::Mp) -> Option<(glam::Vec3, f32)>
 }
 
 fn mp_models(pkg: &PathBuf, car_id: &str, m: &mp::Mp) -> (Vec<String>, Vec<Option<Vec<u8>>>) {
-    let env_n = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(d);
+    let env_n = |k: &str, d: usize| crate::envc::var(k).ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(d);
     let roster = m.wait_roster(12.0);
     // only cars this install has (a server's mod car would fail the load)
     let have = |c: &str| {

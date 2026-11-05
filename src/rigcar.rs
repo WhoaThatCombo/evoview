@@ -39,7 +39,7 @@ const G: f32 = 9.806;
 pub const DT: f32 = 0.003;
 
 fn env_t(k: &str, d: f32) -> f32 {
-    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+    crate::envc::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
 }
 const SUB: usize = 2;
 
@@ -290,7 +290,7 @@ impl RigCar {
             mass / 12.0 * (bx.x * bx.x + bx.z * bx.z) * 0.8,
             mass / 12.0 * (bx.x * bx.x + bx.y * bx.y) * 0.8,
         );
-        let mr_env: Option<f32> = std::env::var("EVOVIEW_RIG_MR").ok().and_then(|v| v.parse().ok());
+        let mr_env: Option<f32> = crate::envc::var("EVOVIEW_RIG_MR").ok().and_then(|v| v.parse().ok());
         let mr = [0, 1].map(|ax| mr_env.unwrap_or_else(|| p.geo[ax].motion_ratio()));
         let tyre = [p.tyres[0].and_then(|t| t.sctm), p.tyres[1].and_then(|t| t.sctm)];
         // tyre + the geometry's hubMass (25 kg when the data has none)
@@ -317,7 +317,7 @@ impl RigCar {
             }
             x_static[k] = 0.5 * (lo + hi);
         }
-        if std::env::var_os("EVOVIEW_RIG_DBG").is_some() {
+        if crate::envc::var_os("EVOVIEW_RIG_DBG").is_some() {
             let kw: Vec<String> = (10..=80).step_by(5).map(|r| {
                 let rpm = r as f32 * 100.0;
                 format!("{rpm:.0}:{:.0}Nm/{:.0}kW", p.engine_torque(rpm, 1.0).unwrap_or(0.0), p.engine_torque(rpm, 1.0).unwrap_or(0.0) * rpm * 0.10472e-3)
@@ -360,7 +360,7 @@ impl RigCar {
             auto_box: false,
             water_flow: true,
             auto_now: false,
-            manual: std::env::var_os("EVOVIEW_MANUAL").is_some(),
+            manual: crate::envc::var_os("EVOVIEW_MANUAL").is_some(),
             h_prev: None,
             missed: false,
             gb: p.gearbox.clone(),
@@ -380,57 +380,57 @@ impl RigCar {
             coil,
             // EVOVIEW_RIG_ARB_SCALE="front,rear": diagnostic multipliers
             arb: {
-                let s: Vec<f32> = std::env::var("EVOVIEW_RIG_ARB_SCALE").ok().map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default();
+                let s: Vec<f32> = crate::envc::var("EVOVIEW_RIG_ARB_SCALE").ok().map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default();
                 [p.coil[0].arb * s.first().copied().unwrap_or(1.0), p.coil[1].arb * s.get(1).copied().unwrap_or(1.0)]
             },
             mr,
             tyre,
             therm_data: p.thermal.clone(),
             // EVOVIEW_NO_TYRE_T=1: no thermal model (grip as at temperature)
-            therm: [0, 1, 2, 3].map(|k| p.thermal[k / 2].as_ref().filter(|_| std::env::var_os("EVOVIEW_NO_TYRE_T").is_none()).map(|d| {
+            therm: [0, 1, 2, 3].map(|k| p.thermal[k / 2].as_ref().filter(|_| crate::envc::var_os("EVOVIEW_NO_TYRE_T").is_none()).map(|d| {
                 // the game starts them at the car's preset (car data +0x3a8)
                 // or 25 C; here the tyre's blanket temperature, else the air
                 let air = env_t("EVOVIEW_AIR_T", 25.0);
-                let t0 = std::env::var("EVOVIEW_TYRE_T0").ok().and_then(|v| v.parse().ok())
+                let t0 = crate::envc::var("EVOVIEW_TYRE_T0").ok().and_then(|v| v.parse().ok())
                     .unwrap_or(if d.blanket > 0.0 { d.blanket } else { air });
                 let mut t = crate::tyretherm::Tyre::new(d, t0, air);
                 // the setup's pressure, else the tyre's ideal
                 // (EVOVIEW_SETUP_PRESSURE=0: the ideal, as before)
-                if let Some(psi) = p.pressure[k / 2].filter(|_| std::env::var("EVOVIEW_SETUP_PRESSURE").map_or(true, |v| v != "0")) {
+                if let Some(psi) = p.pressure[k / 2].filter(|_| crate::envc::var("EVOVIEW_SETUP_PRESSURE").map_or(true, |v| v != "0")) {
                     t.set_pressure(psi);
                 }
                 // EVOVIEW_TYRE_BLOWN=k: start with wheel k (0 FR 1 FL 2 RR 3 RL) blown
-                t.blown = std::env::var("EVOVIEW_TYRE_BLOWN").ok().and_then(|v| v.parse::<usize>().ok()) == Some(k);
+                t.blown = crate::envc::var("EVOVIEW_TYRE_BLOWN").ok().and_then(|v| v.parse::<usize>().ok()) == Some(k);
                 t
             })),
             air_t: env_t("EVOVIEW_AIR_T", 25.0),
             road_t: env_t("EVOVIEW_ROAD_T", f32::NAN),
-            therm_model: std::env::var_os("EVOVIEW_TYRE_T_MODEL").is_some(),
-            no_rr: std::env::var_os("EVOVIEW_NO_RR").is_some(),
-            relax: std::env::var_os("EVOVIEW_NO_RELAX").is_none(),
+            therm_model: crate::envc::var_os("EVOVIEW_TYRE_T_MODEL").is_some(),
+            no_rr: crate::envc::var_os("EVOVIEW_NO_RR").is_some(),
+            relax: crate::envc::var_os("EVOVIEW_NO_RELAX").is_none(),
             last_wall_log: -1.0,
             ev: crate::collide::Events::from_env(),
-            old_contact: std::env::var("EVOVIEW_TYRE_CONTACT").as_deref() == Ok("old"),
+            old_contact: crate::envc::var("EVOVIEW_TYRE_CONTACT").as_deref() == Ok("old"),
             last_tc_log: -1.0,
             vib_phase: 0.0,
             vib_gain: env_t("EVOVIEW_FLATSPOT_FFB", 0.05),
             m_unsprung,
-            hub_ride: std::env::var("EVOVIEW_RIG_HUBRIDE").map_or(true, |v| v != "0"),
+            hub_ride: crate::envc::var("EVOVIEW_RIG_HUBRIDE").map_or(true, |v| v != "0"),
             drive_eff: env_t("EVOVIEW_RIG_DRIVE_EFF", 1.0),
             camber,
             toe,
-            toe_gain: [0, 1].map(|ax| if std::env::var_os("EVOVIEW_RIG_NOBUMPSTEER").is_some() { 0.0 } else { p.geo[ax].toe_gain().clamp(-0.5, 0.5) }),
+            toe_gain: [0, 1].map(|ax| if crate::envc::var_os("EVOVIEW_RIG_NOBUMPSTEER").is_some() { 0.0 } else { p.geo[ax].toe_gain().clamp(-0.5, 0.5) }),
             body_h: bx.y.clamp(0.9, 1.8),
             body_len: bx.z.clamp(3.0, 6.0),
-            abs: p.abs.clone().filter(|_| std::env::var_os("EVOVIEW_NO_ABS").is_none()),
-            tc: p.tc.clone().filter(|_| std::env::var_os("EVOVIEW_NO_TC").is_none()),
+            abs: p.abs.clone().filter(|_| crate::envc::var_os("EVOVIEW_NO_ABS").is_none()),
+            tc: p.tc.clone().filter(|_| crate::envc::var_os("EVOVIEW_NO_TC").is_none()),
             abs_on: true,
             ffb_fx: Default::default(),
             fx_v: Vec3::ZERO,
             tc_on: true,
             tc_mult: 1.0,
-            ffb_fz: std::env::var_os("EVOVIEW_FFB_FZ").is_some(),
-            camber_gain: [0, 1].map(|ax| if std::env::var_os("EVOVIEW_RIG_NOCAMBER").is_some() { 0.0 } else { p.geo[ax].camber_gain() }),
+            ffb_fz: crate::envc::var_os("EVOVIEW_FFB_FZ").is_some(),
+            camber_gain: [0, 1].map(|ax| if crate::envc::var_os("EVOVIEW_RIG_NOCAMBER").is_some() { 0.0 } else { p.geo[ax].camber_gain() }),
             kingpin: {
                 // geometry x is inboard: the left wheel's inboard is -x here
                 let kp = p.geo[0].kingpin();
@@ -451,7 +451,7 @@ impl RigCar {
             aero,
             max_steer,
             steer_ratio: if p.steer_ratio.abs() > 1.0 { p.steer_ratio.abs() } else { 15.0 },
-            rc_height: std::env::var("EVOVIEW_RIG_RC").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0),
+            rc_height: crate::envc::var("EVOVIEW_RIG_RC").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0),
             phys: p.clone(),
             ode: crate::rigode::OdeRig::enabled().then(|| Box::new(crate::rigode::OdeRig::new(mass, inertia, m_unsprung, &centres, cg_local))),
             links: crate::rigwish::Links::enabled()
@@ -624,15 +624,15 @@ impl RigCar {
             *acc -= DT;
             self.controls(ctl, DT);
             self.t += DT;
-            if std::env::var_os("EVOVIEW_RIG_LOG").is_some() && self.t >= self.next_log {
-                self.next_log = self.t + std::env::var("EVOVIEW_RIG_LOG").ok().and_then(|v| v.parse().ok()).unwrap_or(0.1f32);
+            if crate::envc::var_os("EVOVIEW_RIG_LOG").is_some() && self.t >= self.next_log {
+                self.next_log = self.t + crate::envc::var("EVOVIEW_RIG_LOG").ok().and_then(|v| v.parse().ok()).unwrap_or(0.1f32);
                 let c = &self.c;
                 println!("RIG t {:6.2} v {:5.1} thr {:.2} brk {:.2} st {:+.3} g {} rpm {:.0} run {} ce {:.2}{} sh {:?} r {:+.2} | {}", self.t, self.speed() * 3.6, self.thr, self.brk, self.steer, self.gear, self.engine_w * 60.0 / std::f32::consts::TAU, self.running, self.clutch_e, if self.clutch_locked { "L" } else { "" }, self.shift.map(|s| s.0),
                     self.w.dot(self.up()),
                     (0..4).map(|k| format!("[fz {:5.0} a {:+5.1} sr {:+.2} fx {:+5.0} fy {:+5.0} x {:+.3} g {:.2}]", c[k].fz, c[k].alpha.to_degrees(), c[k].sr, c[k].fx, c[k].fy, c[k].x, c[k].grip)).collect::<Vec<_>>().join(" "));
             }
             // EVOVIEW_TYRE_LOG=1: the tyres' temperatures once a second
-            if std::env::var_os("EVOVIEW_TYRE_LOG").is_some() && (self.t / 1.0).floor() != ((self.t - DT) / 1.0).floor() {
+            if crate::envc::var_os("EVOVIEW_TYRE_LOG").is_some() && (self.t / 1.0).floor() != ((self.t - DT) / 1.0).floor() {
                 let d = &self.therm_data;
                 println!("TYRES t {:5.0} v {:5.1} | {}", self.t, self.speed() * 3.6, (0..4).filter_map(|k| {
                     let (dd, th) = (d[k / 2].as_ref()?, self.therm[k].as_ref()?);
@@ -711,7 +711,7 @@ impl RigCar {
 
     fn controls(&mut self, c: &Controls, dt: f32) {
         let idle = Controls::default();
-        let c = if std::env::var_os("EVOVIEW_RIG_IDLE").is_some() { &idle } else { c };
+        let c = if crate::envc::var_os("EVOVIEW_RIG_IDLE").is_some() { &idle } else { c };
         let approach = |v: &mut f32, t: f32, rate: f32| *v += (t - *v).clamp(-rate * dt, rate * dt);
         self.hb = c.handbrake_v.unwrap_or(if c.handbrake { 1.0 } else { 0.0 });
         if c.analog {
@@ -1120,7 +1120,7 @@ impl RigCar {
         if let Some(kin) = kin.as_ref() {
             // EVOVIEW_RIG_LINKLOG=1: each hub's yaw / camber in the chassis
             // frame (deg) against the asked steer, every 0.25 s
-            if std::env::var_os("EVOVIEW_RIG_LINKLOG").is_some() && (self.t / 0.25).floor() != ((self.t - dt) / 0.25).floor() {
+            if crate::envc::var_os("EVOVIEW_RIG_LINKLOG").is_some() && (self.t / 0.25).floor() != ((self.t - dt) / 0.25).floor() {
                 let rt = Mat3::from_quat(self.q).transpose();
                 let a: Vec<String> = kin.iter().map(|kn| {
                     let (f, l) = (rt * (kn.rot * Vec3::Z), rt * (kn.rot * Vec3::X));
@@ -1211,7 +1211,7 @@ impl RigCar {
             // a tyre only touches ground under the car: rolled over, the
             // ground beneath the hub is above the wheel and the roof takes it
             let hit = ground.probe(hub.x, hub.z, hub.y + 0.5).filter(|h| h.n.dot(up) > 0.25);
-            if std::env::var_os("EVOVIEW_RIG_DBG").is_some() {
+            if crate::envc::var_os("EVOVIEW_RIG_DBG").is_some() {
                 match hit {
                     None => eprintln!("PROBE t {:.3} k {k} none at ({:.2} {:.2} {:.2})", self.t, hub.x, hub.y, hub.z),
                     Some(h) if (hub.y - h.y) > t.radius + 0.03 => eprintln!("PROBE t {:.3} k {k} gap {:.3} hub y {:.3} ground {:.3} n {:?}", self.t, hub.y - h.y - t.radius, hub.y, h.y, h.n),
@@ -1352,7 +1352,7 @@ impl RigCar {
                     };
                     let sr = relaxed.map_or(((self.c[k].omega * re - vl) / den).clamp(-3.0, 3.0), |r| r.1);
                     let o0 = solve(sr);
-                    if std::env::var_os("EVOVIEW_RIG_DBG").is_some() && o0.fy.abs() > 3000.0 && alpha.abs() < 0.01 {
+                    if crate::envc::var_os("EVOVIEW_RIG_DBG").is_some() && o0.fy.abs() > 3000.0 && alpha.abs() < 0.01 {
                         eprintln!("DBG k {k} fz {fz:.0} alpha {alpha:.5} sr {sr:.4} speed {:.2} grip {grip:.2} -> fx {:.0} fy {:.0}", vc.length(), o0.fx, o0.fy);
                     }
                     // slip stiffness for the implicit spin update
@@ -1518,7 +1518,7 @@ impl RigCar {
             self.c[rk].omega += td * dt / iw;
         }
 
-        if std::env::var_os("EVOVIEW_RIG_NOWALLS").is_none() {
+        if crate::envc::var_os("EVOVIEW_RIG_NOWALLS").is_none() {
             self.walls(ground);
         }
         self.body_ground(ground);
@@ -1709,7 +1709,7 @@ impl RigCar {
                     continue;
                 }
                 let n = g.n;
-                if pen > 0.05 && std::env::var_os("EVOVIEW_RIG_DBG").is_some() {
+                if pen > 0.05 && crate::envc::var_os("EVOVIEW_RIG_DBG").is_some() {
                     eprintln!("BODYGROUND t {:.3} point ({x:+.2} {y:.2} {z:+.2}) at ({:.1} {:.2} {:.1}) ground y {:.2} n {:?} pen {pen:.2} surf {}", self.t, p.x, p.y, p.z, g.y, g.n, ground.surf_name(g.surf));
                 }
                 if pen > out.0 {
@@ -1752,7 +1752,7 @@ impl RigCar {
             for &(q, d, wi) in hits.iter() {
                 let n = Vec3::new(c.x - q.x, 0.0, c.z - q.z);
                 let n = if d > 1e-4 { n / d } else { -fw };
-                if std::env::var_os("EVOVIEW_RIG_DBG").is_some() {
+                if crate::envc::var_os("EVOVIEW_RIG_DBG").is_some() {
                     eprintln!("WALL t {:.3} z {z:.2} c ({:.1} {:.1} {:.1}) q ({:.1} {:.1} {:.1}) d {d:.3} n {n:?} v {:.1}", self.t, c.x, c.y, c.z, q.x, q.y, q.z, self.speed());
                 }
                 self.cg += n * (half_w - d);
@@ -1933,7 +1933,7 @@ pub fn pad_test(rc: &mut RigCar) {
     let (mut t, mut t100, mut t200) = (0.0f32, None, None);
     while t < 40.0 && t200.is_none() {
         run(rc, &mut acc, full, 0.05);
-        if std::env::var_os("EVOVIEW_PAD_TRACE").is_some() {
+        if crate::envc::var_os("EVOVIEW_PAD_TRACE").is_some() {
             println!("PADTRACE t {t:.2} {:.1} km/h gear {} rpm {:.0} omega R {:.1} {:.1} (v/r {:.1}) Fx R {:.0} {:.0} Fz R {:.0} {:.0}", rc.speed() * 3.6, rc.gear, rc.rpm, rc.c[2].omega, rc.c[3].omega, rc.speed() / 0.2888, rc.c[2].fx, rc.c[3].fx, rc.c[2].fz, rc.c[3].fz);
         }
         t += 0.05;
@@ -1998,9 +1998,9 @@ pub fn ffb_table(rc: &mut RigCar) {
     let g = flat_pad();
     let mut acc = 0.0;
     let game = crate::ffb::Settings { boost: 1.0, ..crate::ffb::Settings::from_env() };
-    std::env::set_var("EVOVIEW_FFB_LEGACY", "1");
+    crate::envc::set_var("EVOVIEW_FFB_LEGACY", "1");
     let old = crate::ffb::Settings { boost: 1.0, ..crate::ffb::Settings::from_env() };
-    std::env::remove_var("EVOVIEW_FFB_LEGACY");
+    crate::envc::remove_var("EVOVIEW_FFB_LEGACY");
     let ffm = if rc.phys.ff_mult > 0.0 { rc.phys.ff_mult } else { 1.0 };
     let gam = if rc.phys.ff_gamma > 0.0 { rc.phys.ff_gamma } else { 1.0 };
     println!("FFB car gamma {gam} (SteerControlsData f5; the old chain ignored it)");
@@ -2069,15 +2069,15 @@ pub fn donut_test(rc: &mut RigCar) {
     rc.abs_on = false;
     rc.tc_on = false;
     rc.place(Vec3::new(0.0, 0.0, -1800.0), 0.0);
-    let env = |k: &str, d: f32| std::env::var(k).ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(d);
+    let env = |k: &str, d: f32| crate::envc::var(k).ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(d);
     let kmh = env("EVOVIEW_DONUT_KMH", 30.0);
     rc.v = rc.forward() * (kmh / 3.6);
     for c in rc.c.iter_mut() {
         c.omega = kmh / 3.6 / 0.34;
     }
     rc.gear = env("EVOVIEW_DONUT_GEAR", 2.0) as i32;
-    let secs: f32 = std::env::var("EVOVIEW_DONUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(8.0);
-    let steer: f32 = std::env::var("EVOVIEW_DONUT_STEER").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+    let secs: f32 = crate::envc::var("EVOVIEW_DONUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(8.0);
+    let steer: f32 = crate::envc::var("EVOVIEW_DONUT_STEER").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
     let c = Controls { throttle: env("EVOVIEW_DONUT_THR", 1.0), steer, analog: true, ..Default::default() };
     for i in 0..(secs / 0.1) as usize {
         for _ in 0..(0.1 / DT) as usize {
@@ -2306,19 +2306,19 @@ pub fn fleet_table(pkg: &std::path::Path, base: Option<&std::path::Path>) {
 /// EVOVIEW_KB_CLUTCH=0: no clutch mapped means no clutch (the game with its
 /// auto-clutch assists off); default: the car launches itself then.
 fn kb_clutch() -> bool {
-    std::env::var("EVOVIEW_KB_CLUTCH").map_or(true, |v| v != "0")
+    crate::envc::var("EVOVIEW_KB_CLUTCH").map_or(true, |v| v != "0")
 }
 
 /// EVOVIEW_PEDAL_DIPS=1: the old evoview rule, the pedal dips the
 /// auto-clutch's value (min of the two).
 fn pedal_dips() -> bool {
-    std::env::var_os("EVOVIEW_PEDAL_DIPS").is_some()
+    crate::envc::var_os("EVOVIEW_PEDAL_DIPS").is_some()
 }
 
 /// EVOVIEW_DCT_NEUTRAL=1: a DCT drops to neutral through a change as a
 /// sequential box does (the old evoview behaviour).
 fn dct_neutral() -> bool {
-    std::env::var_os("EVOVIEW_DCT_NEUTRAL").is_some()
+    crate::envc::var_os("EVOVIEW_DCT_NEUTRAL").is_some()
 }
 
 /// `EVOVIEW_RIG_STEADY=1 EVOVIEW_RIG_PAD=1 --drive-test 1`: steady corners
@@ -2330,7 +2330,7 @@ pub fn steady_test(rc: &mut RigCar) {
     rc.auto_box = true;
     let mut acc = 0.0;
     // EVOVIEW_STEADY_SET="kmh:deg,kmh:deg,..." replaces the four corners
-    let set: Vec<(f32, f32)> = std::env::var("EVOVIEW_STEADY_SET").ok().map(|s| s.split(',').filter_map(|p| { let (a, b) = p.split_once(':')?; Some((a.trim().parse().ok()?, b.trim().parse().ok()?)) }).collect()).unwrap_or_else(|| vec![(60.0, 4.0), (80.0, 3.0), (80.0, 5.0), (100.0, 2.5)]);
+    let set: Vec<(f32, f32)> = crate::envc::var("EVOVIEW_STEADY_SET").ok().map(|s| s.split(',').filter_map(|p| { let (a, b) = p.split_once(':')?; Some((a.trim().parse().ok()?, b.trim().parse().ok()?)) }).collect()).unwrap_or_else(|| vec![(60.0, 4.0), (80.0, 3.0), (80.0, 5.0), (100.0, 2.5)]);
     for (kmh, deg) in set {
         rc.place(Vec3::new(0.0, 0.0, -1800.0), 0.0);
         rc.roll(kmh / 3.6);
@@ -2384,7 +2384,7 @@ pub fn steady_test(rc: &mut RigCar) {
         let a: Vec<f64> = sum.iter().map(|s| s / cnt).collect();
         println!("STEADY {kmh:.0} km/h road wheels {deg:.1} deg: v {:.1} km/h r {:+.3} ay {:.2} g beta {:+.2} | alpha F {:+.2} R {:+.2} deg | Fy F {:.0} R {:.0} | Fz FR {:.0} FL {:.0} RR {:.0} RL {:.0} | thr {:.2} Fx R {:.0} | roll {:+.2} deg x {:+.3} {:+.3} {:+.3} {:+.3} | Fx F {:.0} along-path {:.0}",
             a[0] * 3.6, a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15], a[16], a[17], a[18], a[19], a[20]);
-        if std::env::var_os("EVOVIEW_STEADY_UTIL").is_some() {
+        if crate::envc::var_os("EVOVIEW_STEADY_UTIL").is_some() {
             let u: Vec<String> = (0..4).map(|k| {
                 let c = &rc.c[k];
                 let dy = rc.tyre[k / 2].as_ref().map_or(f32::NAN, |t| t.d_y(c.fz));

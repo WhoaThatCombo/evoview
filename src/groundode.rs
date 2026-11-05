@@ -29,7 +29,7 @@ pub struct OdeGround {
 
 impl OdeGround {
     pub fn enabled() -> bool {
-        std::env::var_os("EVOVIEW_GROUND_ODE").is_some()
+        crate::envc::var_os("EVOVIEW_GROUND_ODE").is_some()
     }
 
     /// `keep[ti]`: the triangle is ground at all; `tagged[ti]`: on a

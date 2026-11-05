@@ -182,6 +182,23 @@ impl Package {
         v
     }
 
+    /// `read`, but only bytes `start..` of a plain (unencrypted) entry are
+    /// read; the ones before stay zero. A texture's skipped top mips are the
+    /// front of its `.texturemips`, and most of its bytes (load.rs).
+    pub fn read_from(&self, e: Entry, start: usize) -> Vec<u8> {
+        if !e.plain || start == 0 || start >= e.size as usize {
+            return self.read(e);
+        }
+        let mut v = vec![0u8; e.size as usize];
+        let t = std::time::Instant::now();
+        if !read_at(&self.file, &mut v[start..], e.offset + start as u64) {
+            return Vec::new();
+        }
+        crate::perf::add("pkg io", t.elapsed().as_secs_f64());
+        crate::perf::add_bytes("pkg io", (v.len() - start) as u64);
+        v
+    }
+
     /// Every track folder that has static meshes. `common_assets` is shared
     /// kit, not a circuit.
     pub fn tracks(&self) -> Vec<String> {

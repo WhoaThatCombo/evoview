@@ -43,6 +43,10 @@ const SKIN_MARGIN: f32 = 1.0;
 /// Every car is at least this big: a part placed by its bones far from the
 /// mesh origin still lies inside.
 const MIN_RADIUS: f32 = 4.0;
+/// For callers testing a whole car (`visible`): its meshes' largest
+/// radius plus this, at least MIN_REACH - never less than a mesh's own test.
+pub const REACH_MARGIN: f32 = SKIN_MARGIN + 0.5;
+pub const MIN_REACH: f32 = MIN_RADIUS + 0.5;
 /// Shadows longer than this are not followed off screen (a sun within ~1
 /// degree of the horizon).
 const MAX_SHADOW: f32 = 150.0;
@@ -94,6 +98,9 @@ pub struct CarCull {
     meshes: Vec<Mesh>,
     frame: u64,
     levels: Vec<Level>,
+    /// the last flush's view test: frustum planes and shadow offset
+    planes: [Vec4; 6],
+    shadow: Vec3,
     /// rows drawn / put in the last flush, and how many went to a coarse LOD
     pub drawn: usize,
     pub total: usize,
@@ -103,11 +110,13 @@ pub struct CarCull {
 impl Default for CarCull {
     fn default() -> Self {
         CarCull {
-            on: std::env::var("EVOVIEW_CAR_CULL").map_or(true, |v| v != "0"),
-            lod_scale: std::env::var("EVOVIEW_CAR_LOD_SCALE").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(2.0),
+            on: crate::envc::var("EVOVIEW_CAR_CULL").map_or(true, |v| v != "0"),
+            lod_scale: crate::envc::var("EVOVIEW_CAR_LOD_SCALE").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(2.0),
             meshes: Vec::new(),
             frame: 0,
             levels: Vec::new(),
+            planes: [Vec4::ZERO; 6],
+            shadow: Vec3::ZERO,
             drawn: 0,
             total: 0,
             coarse: 0,
@@ -195,6 +204,13 @@ impl CarCull {
         sphere_in(&p[..4], m.bound.truncate(), m.bound.w)
     }
 
+    /// Whether a car at `c` (bounding radius `r`) passes this frame's view
+    /// test (`flush` sets it up): what decides if its rig needs posing.
+    pub fn visible(&self, c: Vec3, r: f32) -> bool {
+        !self.on || self.frame == 0 || sphere_in(&self.planes, c, r)
+            || (self.shadow != Vec3::ZERO && sphere_in(&self.planes, c + self.shadow * 0.5, r + self.shadow.length() * 0.5))
+    }
+
     /// Cull and upload every mesh `put` this frame. `vp` / `eye`: the camera
     /// as drawn; `sun`: toward the key light; `detail_m`: see `Detail`.
     #[allow(clippy::too_many_arguments)]
@@ -211,6 +227,8 @@ impl CarCull {
         } else {
             Vec3::ZERO
         };
+        self.planes = planes;
+        self.shadow = shadow;
         // 1/tan(half the vertical fov) over a 60-degree view's (1.732): a
         // long lens sees a far car as a near one
         let zoom = (vp.row(1).truncate().length() / 1.732).max(1e-3);
@@ -310,7 +328,7 @@ impl CarCull {
             }
         }
         // EVOVIEW_CARCULL_LOG=1: the counts, twice a second at 60 fps
-        if self.frame % 30 == 0 && std::env::var_os("EVOVIEW_CARCULL_LOG").is_some() {
+        if self.frame % 30 == 0 && crate::envc::var_os("EVOVIEW_CARCULL_LOG").is_some() {
             println!("carcull: {} of {} rows drawn, {} on a coarse LOD", self.drawn, self.total, self.coarse);
         }
     }

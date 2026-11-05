@@ -105,18 +105,18 @@ pub const SHADOW_LAYERS: u32 = 4;
 
 /// Whether tracks get the middle cascade (EVOVIEW_SHADOW_MID=0 turns it off).
 pub fn mid_cascade() -> bool {
-    cascades() && std::env::var("EVOVIEW_SHADOW_MID").map_or(true, |v| v != "0")
+    cascades() && crate::envc::var("EVOVIEW_SHADOW_MID").map_or(true, |v| v != "0")
 }
 
 /// Whether the driven car gets its own hero map (EVOVIEW_DRIVE_HERO=0: the
 /// car is drawn into the near cascade over the cached scenery, as before).
 pub fn drive_hero() -> bool {
-    std::env::var("EVOVIEW_DRIVE_HERO").map_or(true, |v| v != "0")
+    crate::envc::var("EVOVIEW_DRIVE_HERO").map_or(true, |v| v != "0")
 }
 
 /// Whether tracks get the far cascade (EVOVIEW_NO_CASCADE=1 turns it off).
 pub fn cascades() -> bool {
-    std::env::var_os("EVOVIEW_NO_CASCADE").is_none()
+    crate::envc::var_os("EVOVIEW_NO_CASCADE").is_none()
 }
 
 /// Orthographic world -> light clip matrix, centred on `at`.
@@ -239,7 +239,7 @@ pub const HERO_DIM: u32 = 1024;
 
 /// HERO_DIM, or EVOVIEW_HERO_DIM (512..4096) for quality/perf comparisons.
 pub fn hero_dim() -> u32 {
-    std::env::var("EVOVIEW_HERO_DIM").ok().and_then(|v| v.parse().ok())
+    crate::envc::var("EVOVIEW_HERO_DIM").ok().and_then(|v| v.parse().ok())
         .map(|d: u32| d.clamp(512, 4096)).unwrap_or(HERO_DIM)
 }
 
@@ -388,7 +388,7 @@ fn grade_uniform(outdoor: bool) -> [f32; 4] {
     // back (EVOVIEW_EV_COCKPIT), or the world outside the screen reads dim
     static COCKPIT: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
     let ck = if INTERIOR.load(std::sync::atomic::Ordering::Relaxed) {
-        *COCKPIT.get_or_init(|| std::env::var("EVOVIEW_EV_COCKPIT").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.75).exp2())
+        *COCKPIT.get_or_init(|| crate::envc::var("EVOVIEW_EV_COCKPIT").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.75).exp2())
     } else { 1.0 };
     [if outdoor { o * ck * crate::sky::exposure() * crate::post::ae_mult() } else { s },
      if hdr { 2.0 } else if lut { 1.0 } else { 0.0 },
@@ -459,12 +459,12 @@ pub fn uniforms_lit(
 /// EVOVIEW_SHADOW_OLDBIAS=1: the old fixed values, for A/B.
 pub fn cascade_bias(span: f32) -> f32 {
     let depth = span.max(SHADOW_SPAN * 2.0) * 2.0 * 1.5;
-    let tx = std::env::var("EVOVIEW_SHADOW_BIAS_TX").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5f32);
+    let tx = crate::envc::var("EVOVIEW_SHADOW_BIAS_TX").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5f32);
     tx * (span / SHADOW_DIM as f32) / depth
 }
 
 fn old_bias() -> bool {
-    std::env::var_os("EVOVIEW_SHADOW_OLDBIAS").is_some()
+    crate::envc::var_os("EVOVIEW_SHADOW_OLDBIAS").is_some()
 }
 
 /// The filter a coarse cascade's shadow vec4 asks for in its x (still > 0.5
@@ -473,7 +473,7 @@ fn old_bias() -> bool {
 /// the middle cascade and 5 m in the far one, while the near map's is 0.5 m.
 /// EVOVIEW_SHADOW_KERNEL="mid,far" in texels (5, 3 or 2; default 3,3).
 pub fn cascade_kernel(far: bool) -> f32 {
-    let v: Vec<u32> = std::env::var("EVOVIEW_SHADOW_KERNEL").ok()
+    let v: Vec<u32> = crate::envc::var("EVOVIEW_SHADOW_KERNEL").ok()
         .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
         .unwrap_or_default();
     match v.get(far as usize).copied().unwrap_or(3) {
@@ -485,7 +485,7 @@ pub fn cascade_kernel(far: bool) -> f32 {
 
 /// Texels of normal offset for the sun shadow (EVOVIEW_SHADOW_NOFS).
 pub fn shadow_nofs() -> f32 {
-    std::env::var("EVOVIEW_SHADOW_NOFS").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5)
+    crate::envc::var("EVOVIEW_SHADOW_NOFS").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5)
 }
 
 /// Same, but with the shadow map enabled and aimed at `focus`.
@@ -506,7 +506,7 @@ pub fn uniforms_shadowed(
     // nothing shorter than that - every car, post and kerb - ever shaded
     // the ground; only buildings and trees did. 5e-5 is ~0.12 m (0.6 m at
     // grazing with the slope term). EVOVIEW_SHADOW_BIAS overrides.
-    u.shadow[1] = std::env::var("EVOVIEW_SHADOW_BIAS").ok().and_then(|v| v.parse().ok())
+    u.shadow[1] = crate::envc::var("EVOVIEW_SHADOW_BIAS").ok().and_then(|v| v.parse().ok())
         .unwrap_or(if old_bias() { 0.00005 } else { cascade_bias(SHADOW_SPAN) });
     // w: the normal offset the track shader samples at, metres - this
     // many texels along the normal at grazing sun (the game's resolve,
@@ -900,11 +900,11 @@ pub fn build_scene(
 /// game's vertex shader does (wrong under non-uniform scale).
 /// EVOVIEW_GSAA=0: no specular anti-aliasing (roughness widening + spec fade).
 pub fn shading_wgsl() -> String {
-    let off = |k: &str| std::env::var(k).map_or(false, |v| v == "0" || v == "old");
+    let off = |k: &str| crate::envc::var(k).map_or(false, |v| v == "0" || v == "old");
     // EVOVIEW_GSAA_CAR=var,thr,max: the frameData vehicleGsaaVariance /
     // Threshold / RoughnessMax multipliers (runtime values, not decoded; the
     // material defaults Gsaa_Variance 0.5 / Threshold 1 and a 2x cap)
-    let car: Vec<f32> = std::env::var("EVOVIEW_GSAA_CAR").ok()
+    let car: Vec<f32> = crate::envc::var("EVOVIEW_GSAA_CAR").ok()
         .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
         .filter(|v: &Vec<f32>| v.len() == 3)
         .unwrap_or_else(|| vec![0.5, 1.0, 2.0]);
@@ -1219,7 +1219,7 @@ pub fn build_pipeline(
         // EVOVIEW_SHADER=<path>: load the WGSL from disk instead of the
         // built-in copy, so shading can be tuned without a rebuild.
         source: wgpu::ShaderSource::Wgsl(
-            match std::env::var("EVOVIEW_SHADER").ok().and_then(|p| std::fs::read_to_string(p).ok()) {
+            match crate::envc::var("EVOVIEW_SHADER").ok().and_then(|p| std::fs::read_to_string(p).ok()) {
                 Some(src) => car_wgsl(&src).into(),
                 None => car_wgsl(include_str!("shader.wgsl")).into(),
             }),
@@ -1393,7 +1393,7 @@ pub fn build_pipeline(
     // that put on every sunlit surface is covered by the bias (cascade_bias
     // + the normal offset + this pass's slope-scaled bias).
     // EVOVIEW_SHADOW_CULL=front: the old front-face culling, for A/B.
-    let track_cull = std::env::var("EVOVIEW_SHADOW_CULL").map_or(false, |v| v == "front")
+    let track_cull = crate::envc::var("EVOVIEW_SHADOW_CULL").map_or(false, |v| v == "front")
         .then_some(wgpu::Face::Front);
     let shadow_pipeline = shadow_with("shadow", track_cull);
     // ⚠ Cars cast two-sided: with the front faces culled only the underbody
@@ -1546,7 +1546,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     }
     let window = Arc::new(wb.build(&event_loop).unwrap());
     // EVOVIEW_WHEEL=1: a force-feedback wheel drives the car (wheel.rs, ffb.rs)
-    let mut wheel = if opts.track_drive.is_some() && std::env::var_os("EVOVIEW_WHEEL").is_some() {
+    let mut wheel = if opts.track_drive.is_some() && crate::envc::var_os("EVOVIEW_WHEEL").is_some() {
         use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
         let hwnd = match window.window_handle().map(|h| h.as_raw()) {
             Ok(RawWindowHandle::Win32(h)) => h.hwnd.get() as *mut std::ffi::c_void,
@@ -1647,7 +1647,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
         // how you measure real headroom rather than the monitor's refresh.
         present_mode: if opts.bench.is_some() {
             crate::bench::present_mode(&caps)
-        } else if std::env::var("EVOVIEW_NOVSYNC").is_ok() {
+        } else if crate::envc::var("EVOVIEW_NOVSYNC").is_ok() {
             wgpu::PresentMode::AutoNoVsync
         } else {
             wgpu::PresentMode::Fifo
@@ -1738,7 +1738,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
         // EVOVIEW_TRACK_MSAA = 1 | 4 (default 4; WebGPU only guarantees 1 and 4)
         // driving: 1 (TAA anti-aliases; 4x cost 3 ms at 3440x1440 and the
         // frame no longer fit its vsync slot)
-        match std::env::var("EVOVIEW_TRACK_MSAA").ok().as_deref() {
+        match crate::envc::var("EVOVIEW_TRACK_MSAA").ok().as_deref() {
             // DLSS / FSR take the aliased, jittered frame (and a single-sample depth)
             _ if dlss_device || crate::fsr::wanted() => 1,
             Some("1") => 1,
@@ -1751,21 +1751,21 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     };
     // Cars get the game's hero shadow: a map fitted to the car, redrawn only
     // when the pose changes (shadow_invalid), since the car is static.
-    let hero_on = !opts.start_fly && std::env::var("EVOVIEW_NO_SHADOW").is_err()
-        && std::env::var("EVOVIEW_NO_HERO").is_err();
-    let shadows_on = (opts.start_fly && std::env::var("EVOVIEW_NO_SHADOW").is_err()) || hero_on;
+    let hero_on = !opts.start_fly && crate::envc::var("EVOVIEW_NO_SHADOW").is_err()
+        && crate::envc::var("EVOVIEW_NO_HERO").is_err();
+    let shadows_on = (opts.start_fly && crate::envc::var("EVOVIEW_NO_SHADOW").is_err()) || hero_on;
     let mut last_pose: Vec<[f32; 16]> = Vec::new();
     // Driving: 24 cloud steps instead of 40 (TAA integrates the per-frame
     // dither; ~2 ms at 3440x1440). EVOVIEW_CLOUD_STEPS still wins.
-    if opts.track_drive.is_some() && std::env::var_os("EVOVIEW_CLOUD_STEPS").is_none() {
-        std::env::set_var("EVOVIEW_CLOUD_STEPS", "24");
+    if opts.track_drive.is_some() && crate::envc::var_os("EVOVIEW_CLOUD_STEPS").is_none() {
+        crate::envc::set_var("EVOVIEW_CLOUD_STEPS", "24");
     }
     // and 12 fog steps / 8 AO samples instead of 24 / 12 (taa.wgsl; the
     // history averages the per-frame jitter of both)
     if opts.track_drive.is_some() {
         for (k, v) in [("EVOVIEW_FOG_STEPS", "12"), ("EVOVIEW_AO_SAMPLES", "8")] {
-            if std::env::var_os(k).is_none() {
-                std::env::set_var(k, v);
+            if crate::envc::var_os(k).is_none() {
+                crate::envc::set_var(k, v);
             }
         }
     }
@@ -1776,7 +1776,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     // redrawn on top (the whole cascade every frame cost ~8 ms at 3440x1440).
     // EVOVIEW_SHADOW_CACHE=0 draws it all every frame again.
     let cached = opts.track_drive.is_some() && shadows_on && !hero_on
-        && std::env::var("EVOVIEW_SHADOW_CACHE").map_or(true, |v| v != "0");
+        && crate::envc::var("EVOVIEW_SHADOW_CACHE").map_or(true, |v| v != "0");
     // With the car in its own hero map (layer 3) the near cascade holds the
     // scenery alone: drawn straight into its layer when the cell changes, no
     // cache texture and no 64 MB copy a frame.
@@ -1808,7 +1808,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     let clouds = crate::clouds::CloudGpu::new(&device, &queue, &car);
     // HDR on tracks (EVOVIEW_HDR=0 off): every pipeline drawing into the
     // main pass targets scene_format
-    let hdr = opts.start_fly && std::env::var("EVOVIEW_HDR").map_or(true, |v| v != "0");
+    let hdr = opts.start_fly && crate::envc::var("EVOVIEW_HDR").map_or(true, |v| v != "0");
     HDR.store(hdr, std::sync::atomic::Ordering::Relaxed);
     let scene_format = if hdr { HDR_FORMAT } else { format };
     // screen-space reflections (ssr.rs): the HDR scene, single-sampled (driving,
@@ -1817,7 +1817,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     crate::ssr::set_active(hdr && samples == 1 && crate::ssr::wanted()
         && device.features().contains(wgpu::Features::FLOAT32_FILTERABLE));
     // what the rain drops on the glass refract (rain.rs), single-sample only
-    let no_refract = std::env::var_os("EVOVIEW_NO_REFRACT").is_some();
+    let no_refract = crate::envc::var_os("EVOVIEW_NO_REFRACT").is_some();
     // ⚠ sized for the monitor, not the window: it is bound into the main
     // bind groups, so it cannot follow a resize, and a window grown past it
     // (windowed -> fullscreen) refracted a stale copy on its right and
@@ -1836,7 +1836,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     // The driven car's reflection probe (probe.rs): HDR only, since the
     // track pipelines write tonemapped light otherwise. EVOVIEW_PROBE=0 off.
     let mut probe = (opts.track_drive.is_some() && hdr
-        && std::env::var("EVOVIEW_PROBE").map_or(true, |v| v != "0"))
+        && crate::envc::var("EVOVIEW_PROBE").map_or(true, |v| v != "0"))
         .then(|| crate::probe::Probe::new(&device, &queue, scene_format, samples));
     let pipes = crate::perf::time("pipeline creation", || {
         build_pipeline(
@@ -1850,8 +1850,8 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
         (&pipes.pipeline, &pipes.blended, &pipes.bind_group, &pipes.bone_bg);
     // Effects (fxstate.rs / fxgpu.rs): lights, LEDs, dash, particles, bloom.
     let mut fxst = crate::fxstate::FxState::from_env();
-    let wet_pinned = std::env::var_os("EVOVIEW_WET").is_some();
-    fxst.blink_phase = std::env::var("EVOVIEW_BLINK").ok().map(|v| v.trim() == "1");
+    let wet_pinned = crate::envc::var_os("EVOVIEW_WET").is_some();
+    fxst.blink_phase = crate::envc::var("EVOVIEW_BLINK").ok().map(|v| v.trim() == "1");
     let mut fxg = crate::fxgpu::FxGpu::new(&device, &queue, &car, &materials, scene_format, samples, &uniform_buf);
     // the car itself is dropped below (RAM); the effect data stays
     let car_fx: Option<Box<crate::fxdata::CarFx>> = car.fx.clone();
@@ -1937,6 +1937,14 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     // replay cars with a rig: each one's Drive + recording state (replayscene
     // Slot::skel), made on first sight
     let mut rep_rigs: std::collections::HashMap<usize, (crate::drive::Drive, crate::drive::ReplayRig)> = Default::default();
+    // their bone blocks (1 + car), gathered on the CPU and uploaded in one
+    // write a frame (a write per car was ~50 queue calls)
+    let mut rep_bones: Vec<[f32; 16]> = Vec::new();
+    // replay rigs to pose once the camera is final (car, slot, its centre),
+    // and which cars were posed last frame
+    let mut pose_jobs: Vec<(usize, usize, Vec3)> = Vec::new();
+    let mut posed_last: Vec<bool> = Vec::new();
+    let mut slot_reach: Vec<f32> = Vec::new();
     let n_modes: u8 = if feed.is_some() { 4 } else { 3 };
     if drive.is_some() {
         let _ = ();
@@ -2009,7 +2017,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     }
     // the game's post effects after TAA (post.rs): veil, vignette, sharpen,
     // motion blur, auto exposure. EVOVIEW_POST=0 off.
-    let mut post = taa.as_ref().filter(|_| std::env::var("EVOVIEW_POST").map_or(true, |v| v != "0"))
+    let mut post = taa.as_ref().filter(|_| crate::envc::var("EVOVIEW_POST").map_or(true, |v| v != "0"))
         .map(|_| crate::post::Post::new(&device, scene_format, config.format, config.width, config.height, samples,
                                          &materials.lut_view));
     if hdr {
@@ -2026,7 +2034,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     // Driving, the camera rides the car: camera motion blur smears all the
     // scenery past the windscreen (the "ghosting" at speed). Off unless
     // EVOVIEW_MOTION_BLUR asks for it; / still toggles it.
-    if opts.track_drive.is_some() && std::env::var_os("EVOVIEW_MOTION_BLUR").is_none() {
+    if opts.track_drive.is_some() && crate::envc::var_os("EVOVIEW_MOTION_BLUR").is_none() {
         if let Some(p) = post.as_mut() {
             p.motion_blur = 0.0;
         }
@@ -2036,7 +2044,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     let mut cluster = crate::cluster::Cluster::load();
     // the opponent the camera follows instead of our car (online: another
     // player): EVOVIEW_VIEW_AI=k at start, Numpad 4 / 6 cycle, Numpad 5 ours
-    let mut view_ai: Option<usize> = std::env::var("EVOVIEW_VIEW_AI").ok().and_then(|v| v.parse().ok());
+    let mut view_ai: Option<usize> = crate::envc::var("EVOVIEW_VIEW_AI").ok().and_then(|v| v.parse().ok());
     // online: late joiners' cars, loaded one at a time on a worker thread
     // (replayscene::load_net_car) and appended to the scene when done
     type NetCar = (u16, String, Result<(crate::asset::Car, crate::replayscene::Slot), String>);
@@ -2080,13 +2088,13 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     // The driven car's sound (carsound.rs): the game's FMOD with every bank
     // the car's events use, fed by the drive model. --no-sound / M mute.
     let mut car_snd = match (opts.track_drive.as_ref(), opts.pkg.as_ref()) {
-        (Some(td), Some(pkg)) if std::env::var_os("EVOVIEW_NO_SOUND").is_none() => {
+        (Some(td), Some(pkg)) if crate::envc::var_os("EVOVIEW_NO_SOUND").is_none() => {
             let evs = car.fx.as_ref().map_or(Vec::new(), |f| f.actor.audio_events.clone());
             match crate::carsound::CarSound::new(pkg, &td.slot.model, &evs, None) {
                 Ok(mut s) => {
                     s.muted = std::env::args().any(|a| a == "--no-sound" || a == "--bench" || a == "--drive-test");
                     // a quarter of full scale by default (EVOVIEW_VOLUME 0..1)
-                    s.volume = std::env::var("EVOVIEW_VOLUME").ok().and_then(|v| v.parse().ok()).unwrap_or(0.25);
+                    s.volume = crate::envc::var("EVOVIEW_VOLUME").ok().and_then(|v| v.parse().ok()).unwrap_or(0.25);
                     Some(s)
                 }
                 Err(e) => {
@@ -2142,17 +2150,17 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     }
     // EVOVIEW_FLY="x,y,z,tx,ty,tz": start the free camera there, looking at
     // the target (debugging live-only effects: TAA, animation)
-    if let (Some(f), Ok(s)) = (fly.as_mut(), std::env::var("EVOVIEW_FLY")) {
+    if let (Some(f), Ok(s)) = (fly.as_mut(), crate::envc::var("EVOVIEW_FLY")) {
         let mut v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
         // EVOVIEW_TREE_CHECK=1: every foliage instance against the collision
         // ground under it - floating, buried, or standing on a road surface
-        if std::env::var_os("EVOVIEW_TREE_CHECK").is_some() {
+        if crate::envc::var_os("EVOVIEW_TREE_CHECK").is_some() {
             if let Some(e) = car.track_env.as_deref() {
                 if let Some(c) = e.collision.as_ref() {
                     let g = crate::trackdrive::Ground::new(c, &e.surface_defs);
                     let fol = |n: &str| ["tree", "fir", "spruce", "pine", "beech", "birch", "oak", "bush", "aspen", "conifer", "poplar", "cf", "bb_"]
                         .iter().any(|k| n.to_lowercase().contains(k));
-                    let all = std::env::var("EVOVIEW_TREE_CHECK").map_or(false, |v| v == "all");
+                    let all = crate::envc::var("EVOVIEW_TREE_CHECK").map_or(false, |v| v == "all");
                     let (mut tn, mut tf, mut tb) = (0, 0, 0);
                     for m in car.meshes.iter().filter(|m| !m.xforms.is_empty() && (all || fol(&m.name)) && !m.name.contains("#lod")) {
                         let (mut n, mut hit, mut fl, mut bu, mut road) = (0, 0, 0, 0, 0);
@@ -2183,7 +2191,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
             }
         }
         // EVOVIEW_FLY_GROUND=1: y and ty are heights above the ground there
-        if v.len() == 6 && std::env::var_os("EVOVIEW_FLY_GROUND").is_some() {
+        if v.len() == 6 && crate::envc::var_os("EVOVIEW_FLY_GROUND").is_some() {
             if let Some((c, defs)) = car.track_env.as_deref().and_then(|e| e.collision.as_ref().map(|c| (c, &e.surface_defs))) {
                 let g = crate::trackdrive::Ground::new(c, defs);
                 for (x, y, z) in [(0, 1, 2), (3, 4, 5)] {
@@ -2258,16 +2266,16 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     // (164 Hz: every 2nd = 82 fps; 60 Hz: every one).
     let mut drive_pace: Option<Pace> = {
         window.current_monitor().and_then(|m| m.refresh_rate_millihertz()).map(|m| m as f32 / 1000.0).map(|hz| {
-            let most = std::env::var("EVOVIEW_DRIVE_FPS").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(hz);
+            let most = crate::envc::var("EVOVIEW_DRIVE_FPS").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(hz);
             let k_min = (hz / most.max(1.0)).ceil().max(1.0);
             let k0 = (hz / 90.0).ceil().max(1.0);
             Pace { hz, k: k_min.max(k0), k_min, miss: 0, fast: 0, n: 0, slept: 0.0 }
         })
-    }.filter(|_| std::env::var("EVOVIEW_MAX_FPS").is_err() && std::env::var("EVOVIEW_NOVSYNC").is_err());
+    }.filter(|_| crate::envc::var("EVOVIEW_MAX_FPS").is_err() && crate::envc::var("EVOVIEW_NOVSYNC").is_err());
     if let Some(p) = &drive_pace {
         println!("pacing: {:.0} Hz display, starting at every {:.0} refreshes = {:.1} fps (adapts)", p.hz, p.k, p.hz / p.k);
     }
-    let frame_budget = match std::env::var("EVOVIEW_MAX_FPS").ok().and_then(|v| v.parse::<f32>().ok()) {
+    let frame_budget = match crate::envc::var("EVOVIEW_MAX_FPS").ok().and_then(|v| v.parse::<f32>().ok()) {
         Some(f) if f <= 0.0 => None,
         Some(f) => Some(std::time::Duration::from_secs_f32(1.0 / f)),
         // Driving: vsync paces it. A 60 cap on a 164 Hz screen shows frames
@@ -2286,7 +2294,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     let mut play_t = opts.playback.as_ref().map_or(0.0f32, |pb| pb.start.max(0.0));
     let mut playing = true;
     let mut play_speed = 1.0f32;
-    let mut follow = if opts.track_drive.is_some() && std::env::var_os("EVOVIEW_FLY").is_none() {
+    let mut follow = if opts.track_drive.is_some() && crate::envc::var_os("EVOVIEW_FLY").is_none() {
         crate::camera::Follow::Chase
     } else {
         crate::camera::Follow::Free
@@ -2314,7 +2322,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
         cam_sel = car_cams.len() + 1;
     }
     // EVOVIEW_CAM=<car camera name>|tv|chase|free: the starting camera
-    if let (Ok(want), true) = (std::env::var("EVOVIEW_CAM"), opts.track_drive.is_some()) {
+    if let (Ok(want), true) = (crate::envc::var("EVOVIEW_CAM"), opts.track_drive.is_some()) {
         let w = want.to_lowercase();
         cam_sel = match w.as_str() {
             "tv" => car_cams.len(),
@@ -2338,7 +2346,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                      .collect::<Vec<_>>().join(", "));
     }
     // EVOVIEW_FOLLOW=chase|onboard|side|orbit: the starting follow camera
-    if let Ok(v) = std::env::var("EVOVIEW_FOLLOW") {
+    if let Ok(v) = crate::envc::var("EVOVIEW_FOLLOW") {
         use crate::camera::Follow::*;
         for f in [Free, Chase, Onboard, Side, Orbit] {
             if f.name() == v {
@@ -2373,7 +2381,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     // (AI car cabins are drawn only near the camera: EVOVIEW_AI_DETAIL_M)
     // the moving cars' instances, culled to what the camera can see (carcull.rs)
     let mut carcull = crate::carcull::CarCull::default();
-    let car_detail_m = std::env::var("EVOVIEW_AI_DETAIL_M").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(30.0);
+    let car_detail_m = crate::envc::var("EVOVIEW_AI_DETAIL_M").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(30.0);
     if let Some(td) = opts.track_drive.as_ref() {
         let mut src_to_gpu = vec![usize::MAX; car.meshes.len()];
         for (gi, m) in meshes.iter().enumerate() {
@@ -2414,12 +2422,12 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     let mut rain_fx = skeleton.as_ref().and_then(|s| s.rig.as_deref().map(|r| crate::rain::Rain::new(&car, &r.wiper_bones(), &s.bind, &s.bones.iter().map(|b| b.parent).collect::<Vec<_>>(), &s.bones.iter().map(|b| b.name.clone()).collect::<Vec<_>>())));
     // The driven car's mirrors (mirrors.rs): each a camera at its glass,
     // aimed by reflecting the driver's eye (the cockpit camera) off it.
-    let mut taa_hist_off = std::env::var_os("EVOVIEW_TAA_HIST_OFF").is_some();
+    let mut taa_hist_off = crate::envc::var_os("EVOVIEW_TAA_HIST_OFF").is_some();
     // last frame's eye and view direction (camera-cut detection)
     let mut cut_prev: Option<(Vec3, Vec3)> = None;
     let mut mirrors = match (opts.track_drive.as_ref(), car.fx.as_ref(), slot_gpu.first()) {
         (Some(_), Some(fx), Some((body, _))) if !fx.actor.mirrors.is_empty()
-                && std::env::var("EVOVIEW_MIRRORS").map_or(true, |v| v != "0") => {
+                && crate::envc::var("EVOVIEW_MIRRORS").map_or(true, |v| v != "0") => {
             let eye = car_cams.iter().find(|c| c.mode == 1).or_else(|| car_cams.iter().find(|c| c.mode == 4))
                 .map_or(Vec3::new(0.35, 1.1, 0.0), |c| Vec3::from(c.pos));
             crate::mirrors::Mirrors::new(&device, &car, &meshes, body, &fx.actor.mirrors, eye, &bone_buf, scene_format, samples)
@@ -2479,7 +2487,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     // Static scenery is culled per instance (tracks and replays; a lone car
     // is a handful of skinned draws and has nothing to gain).
     // EVOVIEW_NO_CULL=1 turns it off to compare.
-    let mut culler = (opts.start_fly && std::env::var("EVOVIEW_NO_CULL").is_err()).then(|| {
+    let mut culler = (opts.start_fly && crate::envc::var("EVOVIEW_NO_CULL").is_err()).then(|| {
         let skip: Vec<usize> = slot_gpu
             .iter()
             .flat_map(|(b, w)| b.iter().chain(w.iter().flatten()).copied())
@@ -2491,7 +2499,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     // A lone car (no culler) sorts its opaque draws front to back.
     // EVOVIEW_NO_SORT=1 keeps load order, to compare.
     let mut draw_order = (!opts.start_fly && opts.playback.is_none()
-        && std::env::var_os("EVOVIEW_NO_SORT").is_none())
+        && crate::envc::var_os("EVOVIEW_NO_SORT").is_none())
         .then(|| crate::cull::DrawOrder::build(&car, &meshes));
     // Everything on the GPU is built; the CPU copy of the scene (its blob is
     // every mesh and texture byte, ~2 GB on a big track) would otherwise sit
@@ -3294,7 +3302,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         let aspect = config.width as f32 / config.height as f32;
                         // EVOVIEW_FIXED_DT=s: every frame advances exactly s (evenly
                         // spaced captures for a GIF, whatever the render speed)
-                        let dt = std::env::var("EVOVIEW_FIXED_DT").ok().and_then(|v| v.parse::<f32>().ok())
+                        let dt = crate::envc::var("EVOVIEW_FIXED_DT").ok().and_then(|v| v.parse::<f32>().ok())
                             .unwrap_or_else(|| {
                                 let m = last_frame.elapsed().as_secs_f32().min(0.1);
                                 // on cadence: the exact period, not the jittery clock
@@ -3398,6 +3406,8 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             });
                             let mut wheel: [Vec<f32>; 4] = Default::default();
                             let mut smokers: Vec<crate::particles::CarIn> = Vec::new();
+                            let _rc = crate::bench::cpu("replay cars");
+                            pose_jobs.clear();
                             for (si, slot) in pb.slots.iter().enumerate() {
                                 body.clear();
                                 body_drv.clear();
@@ -3413,23 +3423,27 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                         &pb.replay, &pb.wheels, slot, ci, play_t)
                                         .unwrap_or((glam::Mat4::ZERO, [glam::Mat4::ZERO; 4]));
                                     // EVOVIEW_REPLAY_MAX_CARS=n: only the first n cars (measuring)
-                                    let b = if std::env::var("EVOVIEW_REPLAY_MAX_CARS").ok().and_then(|v| v.parse::<usize>().ok()).map_or(false, |n| ci >= n) { glam::Mat4::ZERO } else { b };
+                                    let b = if crate::envc::var("EVOVIEW_REPLAY_MAX_CARS").ok().and_then(|v| v.parse::<usize>().ok()).map_or(false, |n| ci >= n) { glam::Mat4::ZERO } else { b };
                                     // the car's own rig, posed from its recording:
                                     // everything rides the body, the bones turn,
                                     // spin and spring the wheels, lean the hull,
                                     // steer the wheel and the driver's arms
                                     let mut tail = [0.0f32; 4];
+                                    let _rr = crate::bench::cpu("replay rig");
                                     if let (Some(rig), true) = (slot.skel.as_ref().and_then(|k| k.rig.as_deref()), b != glam::Mat4::ZERO) {
                                         let (d, st) = rep_rigs.entry(ci).or_insert_with(|| {
                                             (crate::drive::Drive::new(rig), crate::drive::ReplayRig::new(&pb.replay, ci, false))
                                         });
+                                        // every car's rig state moves on; only the
+                                        // ones on screen are posed (below, once
+                                        // the camera is final)
                                         st.apply(&pb.replay, d, rig, play_t, play_dt);
-                                        let mut pose = rig.pose(&d.inputs(rig));
-                                        pose.resize(MAX_BONES, identity);
-                                        queue.write_buffer(&bone_buf, ((1 + ci) * MAX_BONES * 64) as u64, bytemuck::cast_slice(&pose));
+                                        pose_jobs.push((ci, si, b.w_axis.truncate()));
                                         wm = [b; 4];
                                         tail[0] = -((1 + ci) as f32);
                                     }
+                                    drop(_rr);
+                                    let _rf = crate::bench::cpu("replay fx");
                                     // brake lights: drawn as an AI car's (shader fn_i)
                                     tail[2] = 1.0 + pb.replay.telemetry(ci, play_t).map_or(0.0, |t| t.brake).clamp(0.0, 1.0);
                                     // tyre smoke from the slide: nose off the
@@ -3463,7 +3477,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                                     cin.scrape_at = inv.transform_point3(at).into();
                                                 }
                                             }
-                                            if std::env::var_os("EVOVIEW_FX_LOG").is_some() {
+                                            if crate::envc::var_os("EVOVIEW_FX_LOG").is_some() {
                                                 let ids: Vec<String> = p1.wheels.iter().map(|w| surface_named(w.x, w.z, w.y + 1.0).1).collect();
                                                 eprintln!("FXLOG t {play_t:.2} car {ci} v {:.1} smoke {:.2} scrape {:.2} thr {:.2} wheels {:?}",
                                                           v.length(), s, cin.scrape, cin.throttle, ids);
@@ -3513,7 +3527,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             let wi = wheel.as_mut().and_then(|w| w.read());
                             let mut c = crate::trackdrive::Controls {
                                 // EVOVIEW_AUTO_THROTTLE: flat out (capturing a launch)
-                                throttle: if k(KeyCode::ArrowUp) || std::env::var_os("EVOVIEW_AUTO_THROTTLE").is_some() { 1.0 } else { 0.0 },
+                                throttle: if k(KeyCode::ArrowUp) || crate::envc::var_os("EVOVIEW_AUTO_THROTTLE").is_some() { 1.0 } else { 0.0 },
                                 brake: if k(KeyCode::ArrowDown) { 1.0 } else { 0.0 },
                                 steer: (k(KeyCode::ArrowLeft) as i32 - k(KeyCode::ArrowRight) as i32) as f32,
                                 handbrake: k(KeyCode::ControlRight) || k(KeyCode::ControlLeft),
@@ -3553,7 +3567,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     }
                                 }
                             }
-                            if let (Some(every), Some((rc, _))) = (std::env::var("EVOVIEW_AIDS_DEMO").ok().and_then(|v| v.parse::<f32>().ok()), td.rig.as_mut()) {
+                            if let (Some(every), Some((rc, _))) = (crate::envc::var("EVOVIEW_AIDS_DEMO").ok().and_then(|v| v.parse::<f32>().ok()), td.rig.as_mut()) {
                                 aid_demo.0 += dt;
                                 if aid_demo.0 >= every {
                                     aid_demo.0 = 0.0;
@@ -3665,7 +3679,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     }
                                     m.set_me(td.net_state());
                                     let placed = m.placed();
-                                    if std::env::var_os("EVOVIEW_MP_LOG").is_some() {
+                                    if crate::envc::var_os("EVOVIEW_MP_LOG").is_some() {
                                         static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
                                         let mut l = LAST.lock().unwrap();
                                         if l.map_or(true, |t| t.elapsed().as_secs_f32() > 5.0) {
@@ -3677,7 +3691,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                         }
                                     }
                                     // EVOVIEW_MP_TRACE=1: the first other car as drawn, every frame
-                                    if std::env::var_os("EVOVIEW_MP_TRACE").is_some() {
+                                    if crate::envc::var_os("EVOVIEW_MP_TRACE").is_some() {
                                         if let Some(x) = placed.iter().flatten().next() {
                                             println!("MPTRACE {:.4} {:.3} {:.3} {:.3}", crate::render::trace_clock(), x.state.pos.x, x.state.pos.z, x.at.elapsed().as_secs_f32());
                                         }
@@ -3728,7 +3742,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                         *f = 1.0 + a.brake().clamp(0.0, 1.0);
                                     }
                                     // EVOVIEW_AI_FX_LOG=1: each AI's effect inputs a frame
-                                    if std::env::var_os("EVOVIEW_AI_FX_LOG").is_some() {
+                                    if crate::envc::var_os("EVOVIEW_AI_FX_LOG").is_some() {
                                         println!("AIFX t {:6.2} {:13} brk {:.2} smoke {:.2} {:5.0} km/h {:5.1} m", r.t, a.name, a.brake(), a.smoke,
                                                  a.td.speed_kmh(), a.td.pos.distance(cut_prev.map_or(td.pos, |c| c.0)));
                                     }
@@ -3742,8 +3756,8 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 // sim's per-car carry and backfire state), but only those
                                 // within EVOVIEW_AI_SMOKE_M of the camera emit (0 = none)
                                 // and at most EVOVIEW_AI_SMOKE_N of them, the nearest (4)
-                                let smoke_m = std::env::var("EVOVIEW_AI_SMOKE_M").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(150.0);
-                                let smoke_n = std::env::var("EVOVIEW_AI_SMOKE_N").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(4);
+                                let smoke_m = crate::envc::var("EVOVIEW_AI_SMOKE_M").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(150.0);
+                                let smoke_n = crate::envc::var("EVOVIEW_AI_SMOKE_N").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(4);
                                 let mut near: Vec<(f32, usize)> = r.ai.iter().enumerate()
                                     .map(|(k, a)| (a.td.pos.distance(near_eye), k)).filter(|d| d.0 < smoke_m).collect();
                                 near.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -3766,7 +3780,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     ai_smokers.push(c);
                                 }
                                 // EVOVIEW_AI_DRAW=0: the AI drive but are not drawn (their GPU cost, A/B)
-                                if std::env::var("EVOVIEW_AI_DRAW").map_or(false, |v| v == "0") {
+                                if crate::envc::var("EVOVIEW_AI_DRAW").map_or(false, |v| v == "0") {
                                     for (b, w) in slot_gpu.iter().skip(1) {
                                         for &gi in b.iter().chain(w.iter().flatten()) {
                                             meshes[gi].instance_count = 0;
@@ -3778,7 +3792,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 // EVOVIEW_AI_DRAW_M (1500 m) of the camera is not drawn at
                                 // all (online: 30 looks, most players km away round the
                                 // Nordschleife, the spares parked - 58 ms of draw calls)
-                                let draw_m = std::env::var("EVOVIEW_AI_DRAW_M").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1500.0);
+                                let draw_m = crate::envc::var("EVOVIEW_AI_DRAW_M").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1500.0);
                                 let mut active = vec![false; rows.len()];
                                 for a in &r.ai {
                                     if a.td.pos.y > -1000.0 && a.td.pos.distance(near_eye) < draw_m {
@@ -3925,7 +3939,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                         d.cs.lights = fxst.lights.min(3) as u8;
                                         let hb = held.contains(&KeyCode::ControlLeft) || held.contains(&KeyCode::ControlRight);
                                         d.follow(rig, &td.rig_feed(), hb, dt);
-                                        if std::env::var_os("EVOVIEW_ATTITUDE_LOG").is_some() {
+                                        if crate::envc::var_os("EVOVIEW_ATTITUDE_LOG").is_some() {
                                             let (p, r) = d.attitude_deg();
                                             eprintln!("attitude pitch {p:6.2} roll {r:6.2} a_long {:6.2} kmh {:5.1}", td.rig_feed().a_long, td.speed_kmh());
                                         }
@@ -3997,7 +4011,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
 
                         // Bench: a fixed orbit (cars) or a turn on the spot
                         // (tracks), the same every run.
-                        if let Some(b) = bench.as_ref().filter(|_| std::env::var_os("EVOVIEW_BENCH_STILL").is_none()) {
+                        if let Some(b) = bench.as_ref().filter(|_| crate::envc::var_os("EVOVIEW_BENCH_STILL").is_none()) {
                             cam.yaw = b.yaw(bench_yaw0.0);
                             if let Some(f) = fly.as_mut() {
                                 f.yaw = b.yaw(bench_yaw0.1);
@@ -4006,7 +4020,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         // EVOVIEW_FLY_MOVE=m: a bench free camera dollies m metres
                         // a frame along its view (LOD transition captures)
                         if let (Some(_), Some(f), Some(m)) = (bench.as_ref(), fly.as_mut(),
-                            std::env::var("EVOVIEW_FLY_MOVE").ok().and_then(|v| v.parse::<f32>().ok())) {
+                            crate::envc::var("EVOVIEW_FLY_MOVE").ok().and_then(|v| v.parse::<f32>().ok())) {
                             f.pos += f.forward() * m;
                         }
                         let (mut view_proj, mut eye) = match fly.as_ref() {
@@ -4076,7 +4090,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             }
                             // EVOVIEW_LOOK_BACK=1: a chase camera turned round (the
                             // pack behind, AI headlights in captures)
-                            if std::env::var_os("EVOVIEW_LOOK_BACK").is_some() {
+                            if crate::envc::var_os("EVOVIEW_LOOK_BACK").is_some() {
                                 let p = td.pose();
                                 let (vp, e) = crate::camera::Follow::Chase.view_proj(
                                     aspect, p.pos + p.up * 0.45, -p.forward, p.up, -p.right, 0.0);
@@ -4160,6 +4174,56 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         }
                         carcull.flush(&device, &queue, &mut meshes, motion.as_mut(), view_proj, eye,
                                       crate::sky::key_dir(), car_detail_m);
+                        // the replay rigs of the cars that can show, posed into
+                        // their bone blocks and uploaded in one write
+                        if let (Some(pb), false) = (opts.playback.as_ref(), pose_jobs.is_empty()) {
+                            let _t = crate::bench::cpu("replay pose");
+                            let (mut lo, mut hi) = (usize::MAX, 0usize);
+                            let mut posed = vec![false; posed_last.len().max(pb.replay.cars.len())];
+                            // each slot's reach: at least carcull's own radius for
+                            // any of its meshes, so a drawn car is always posed
+                            if slot_reach.len() != slot_gpu.len() {
+                                slot_reach = slot_gpu.iter().map(|(b, w)| {
+                                    b.iter().chain(w.iter().flatten())
+                                        .map(|&gi| meshes.get(gi).map_or(0.0, |m| m.radius))
+                                        .fold(0.0f32, f32::max) + crate::carcull::REACH_MARGIN
+                                }).map(|r| r.max(crate::carcull::MIN_REACH)).collect();
+                            }
+                            for &(ci, si, c) in &pose_jobs {
+                                if !carcull.visible(c, slot_reach.get(si).copied().unwrap_or(f32::MAX)) {
+                                    continue;
+                                }
+                                let Some(rig) = pb.slots.get(si).and_then(|s| s.skel.as_ref()).and_then(|k| k.rig.as_deref()) else { continue };
+                                let Some((d, _)) = rep_rigs.get(&ci) else { continue };
+                                let mut pose = rig.pose(&d.inputs(rig));
+                                pose.resize(MAX_BONES, identity);
+                                let blk = 1 + ci;
+                                if rep_bones.len() < (blk + 1) * MAX_BONES {
+                                    rep_bones.resize((blk + 1) * MAX_BONES, identity);
+                                }
+                                rep_bones[blk * MAX_BONES..(blk + 1) * MAX_BONES].copy_from_slice(&pose);
+                                lo = lo.min(blk);
+                                hi = hi.max(blk);
+                                if let Some(p) = posed.get_mut(ci) {
+                                    *p = true;
+                                }
+                                // first frame posed again: no history
+                                if !posed_last.get(ci).copied().unwrap_or(false) {
+                                    if let Some(mo) = motion.as_ref() {
+                                        mo.set_prev_bones(&queue, blk, &pose);
+                                    }
+                                }
+                            }
+                            posed_last = posed;
+                            // blocks between two posed ones keep what they held
+                            let fits = (bone_buf.size() as usize / 64).min(rep_bones.len());
+                            if lo <= hi {
+                                let (a, b) = (lo * MAX_BONES, ((hi + 1) * MAX_BONES).min(fits));
+                                if a < b {
+                                    queue.write_buffer(&bone_buf, (a * 64) as u64, bytemuck::cast_slice(&rep_bones[a..b]));
+                                }
+                            }
+                        }
                         // the drawn projection carries TAA's sub-pixel jitter;
                         // culling and the resolve use the clean one
                         let taa_on = taa.as_ref().map_or(false, |t| t.on);
@@ -4236,7 +4300,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                                  2.0 * texel];
                             m
                         });
-                        if std::env::var_os("EVOVIEW_FX_SUNCHECK").is_some() {
+                        if crate::envc::var_os("EVOVIEW_FX_SUNCHECK").is_some() {
                             let m = cam_u.light_vp;
                             let l = -Vec3::new(m[0][2], m[1][2], m[2][2]).normalize_or_zero();
                             eprintln!("SUNCHECK fx sun {l:?} . sky key {:?} = {:.3}", crate::sky::key_dir(), l.dot(crate::sky::key_dir()));
@@ -4272,7 +4336,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             let night = fxst.night || crate::sky::now().night > 0.5;
                             let wet = fxst.rain > 0.0;
                             let st = crate::fxstate::FxState {
-                                lights: std::env::var("EVOVIEW_AI_LIGHTS").ok().and_then(|v| v.parse::<u32>().ok())
+                                lights: crate::envc::var("EVOVIEW_AI_LIGHTS").ok().and_then(|v| v.parse::<u32>().ok())
                                     .unwrap_or(if night || wet { 2 } else { 0 }).min(3),
                                 fog: wet,
                                 night,
@@ -4283,7 +4347,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         if opts.start_fly {
                             // smoke outdoors: lit by sun + sky, in the scene's units
                             let b = crate::sky::block();
-                            let k = std::env::var("EVOVIEW_SMOKE_LIGHT").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0);
+                            let k = crate::envc::var("EVOVIEW_SMOKE_LIGHT").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0);
                             // under rain the sun is behind the deck (sky::block
                             // dims it) but a translucent cloud of spray or smoke
                             // is lit by the bright overcast all round: undo the dimming
@@ -4293,7 +4357,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             // divided back by most of the night exposure, or the
                             // tail lights bloom into a red blob the size of the car
                             if crate::sky::active() {
-                                let a = std::env::var("EVOVIEW_EMISSIVE_ADAPT").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.8);
+                                let a = crate::envc::var("EVOVIEW_EMISSIVE_ADAPT").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.8);
                                 cam_u.fx[63][3] = crate::sky::exposure().max(1e-3).powf(-a);
                             }
                         }
@@ -4363,7 +4427,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         let cache_dirty = cached && shadow_cache_vp != Some(light_vp);
                         // with the hero map the near layer IS the cache: only
                         // a new cell redraws it, the car changing does not
-                        let every = std::env::var_os("EVOVIEW_SHADOW_EVERY_FRAME").is_some();
+                        let every = crate::envc::var_os("EVOVIEW_SHADOW_EVERY_FRAME").is_some();
                         let shadow_dirty = shadows_on && if dhero { cache_dirty || every } else {
                             shadow_invalid || shadow_drawn != Some(light_vp) || shadow_cache.is_some()
                                 || opts.playback.is_some() || every
@@ -4376,7 +4440,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         // inside the near one): the car changing is not a redraw
                         let far_dirty = far_on
                             && ((shadow_invalid && !cached) || far_drawn != Some(far_vp)
-                                || std::env::var_os("EVOVIEW_SHADOW_EVERY_FRAME").is_some());
+                                || crate::envc::var_os("EVOVIEW_SHADOW_EVERY_FRAME").is_some());
                         if shadow_dirty {
                             let mut lu = cam_u;
                             lu.view_proj = light_vp.to_cols_array_2d();
@@ -4386,7 +4450,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             if let Some(c) = culler.as_mut().filter(|_| cache_dirty || !cached) {
                                 // a caster under ~2 px on screen (EVOVIEW_SHADOW_PX)
                                 // casts nothing visible
-                                let px = std::env::var("EVOVIEW_SHADOW_PX").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(2.0);
+                                let px = crate::envc::var("EVOVIEW_SHADOW_PX").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(2.0);
                                 let focal = view_proj.row(1).truncate().length() * rh as f32 * 0.5;
                                 let tiny = (px > 0.0 && focal > 0.0).then(|| (eye, px / focal));
                                 c.update_shadow(&device, &queue, 0, light_vp, focus, 0.0, tiny);
@@ -4417,7 +4481,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 // a mid texel is ~0.3 m, and its casters are far:
                                 // drop those under EVOVIEW_SHADOW_MID_PX on screen
                                 // (each redraw is a frame's spike)
-                                let px = std::env::var("EVOVIEW_SHADOW_MID_PX").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(4.0);
+                                let px = crate::envc::var("EVOVIEW_SHADOW_MID_PX").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(4.0);
                                 let focal = view_proj.row(1).truncate().length() * rh as f32 * 0.5;
                                 let tiny = (px > 0.0 && focal > 0.0).then(|| (eye, px / focal));
                                 c.update_shadow(&device, &queue, 5, mid_vp, focus_mid, 0.3, tiny);
@@ -4437,14 +4501,14 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         // vertex upload is finished before the pass borrows it.
                         hud.begin(config.width, config.height);
                         // EVOVIEW_NO_HUD=1: clean frames (captures, GIFs)
-                        if let Some(pb) = opts.playback.as_ref().filter(|_| std::env::var_os("EVOVIEW_NO_HUD").is_none()) {
+                        if let Some(pb) = opts.playback.as_ref().filter(|_| crate::envc::var_os("EVOVIEW_NO_HUD").is_none()) {
                             let cur = last_pos.map(|p| {
                                 ((p.0 as f32) / config.width as f32,
                                  (p.1 as f32) / config.height as f32)
                             });
                             // EVOVIEW_HUD_CURSOR=x,y (0..1): a pretend cursor, to
                             // capture hover states in bench shots
-                            let cur = cur.or_else(|| std::env::var("EVOVIEW_HUD_CURSOR").ok().and_then(|v| {
+                            let cur = cur.or_else(|| crate::envc::var("EVOVIEW_HUD_CURSOR").ok().and_then(|v| {
                                 let (x, y) = v.split_once(',')?;
                                 Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
                             }));
@@ -4480,7 +4544,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 }
                             }
                         }
-                        if let Some(td) = opts.track_drive.as_ref().filter(|_| std::env::var_os("EVOVIEW_NO_HUD").is_none()) {
+                        if let Some(td) = opts.track_drive.as_ref().filter(|_| crate::envc::var_os("EVOVIEW_NO_HUD").is_none()) {
                             let rig = td.rig.as_ref().map(|(rc, _)| rc);
                             // watching another car: its own speed, rpm, gear and pedals
                             let viewed = view_ai.and_then(|k| opts.race.as_ref().and_then(|r| r.ai.get(k))).filter(|a| a.td.pos.y > -1000.0);
@@ -4574,14 +4638,14 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 crate::aids::draw(&mut hud, rc, aid_pop, aspect, cluster.rect(aspect));
                             }
                         }
-                        if let (Some(l), true) = (opts.laps.as_ref(), opts.track_drive.is_some() && std::env::var_os("EVOVIEW_NO_HUD").is_none()) {
+                        if let (Some(l), true) = (opts.laps.as_ref(), opts.track_drive.is_some() && crate::envc::var_os("EVOVIEW_NO_HUD").is_none()) {
                             l.draw(&mut hud, aspect);
                             if let Some(p) = opts.pits.as_mut() {
                                 p.sign_right = crate::laps::panel_rect(aspect).0 - 0.012 / aspect;
                             }
                         }
                         if let (Some(p), Some(td)) = (opts.pits.as_ref(), opts.track_drive.as_ref()) {
-                            if std::env::var_os("EVOVIEW_NO_HUD").is_none() {
+                            if crate::envc::var_os("EVOVIEW_NO_HUD").is_none() {
                                 p.draw(&mut hud, td, view_proj, aspect);
                             }
                         }
@@ -4789,7 +4853,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 // frame. EVOVIEW_MIRROR_SEEN=0: always drawn.
                                 let inside = follow != crate::camera::Follow::Free
                                     && car_cams.get(cam_sel).map_or(false, |c| c.mode == 1 || c.mode == 4);
-                                let all = std::env::var("EVOVIEW_MIRROR_SEEN").map_or(false, |v| v == "0");
+                                let all = crate::envc::var("EVOVIEW_MIRROR_SEEN").map_or(false, |v| v == "0");
                                 let seen = |mr: &crate::mirrors::Mirrors, i: usize| all || mr.seen(i, body, vp_draw, eye);
                                 let glass = mr.due().filter(|&i| seen(mr, i)
                                     && (all || inside || mr.list[i].def.kind != 0 || mirror_tick % 4 == 0));
@@ -4913,7 +4977,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         && taa.as_ref().map_or(false, |t| t.on && taa_on);
                     // EVOVIEW_BENCH_SPLIT=1 (--bench, no MSAA): the main pass
                     // broken at each phase so each gets its own GPU time
-                    let split = bench.is_some() && samples == 1 && std::env::var_os("EVOVIEW_BENCH_SPLIT").is_some();
+                    let split = bench.is_some() && samples == 1 && crate::envc::var_os("EVOVIEW_BENCH_SPLIT").is_some();
                     macro_rules! resume_main {
                         ($label:expr) => {{
                             drop(pass);
@@ -4940,7 +5004,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             pass.set_bind_group(2, bone_bg, &[]);
                         }};
                     }
-                    let car_first_on = std::env::var("EVOVIEW_CAR_FIRST").map_or(true, |v| v != "0");
+                    let car_first_on = crate::envc::var("EVOVIEW_CAR_FIRST").map_or(true, |v| v != "0");
                     macro_rules! cars_ordered {
                         ($order:expr, $phase:expr) => {{
                             let mut bound = usize::MAX;
@@ -5289,7 +5353,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     // 60 m away. EVOVIEW_DOF_FOCUS=game keeps the file's.
                                     if let (Some(d), Some(td)) = (p.dof.as_mut(), opts.track_drive.as_ref()) {
                                         let pc = view_proj * (td.pose().pos + td.pose().up * 0.6).extend(1.0);
-                                        if pc.w > 0.0 && std::env::var("EVOVIEW_DOF_FOCUS").map_or(true, |v| v != "game") {
+                                        if pc.w > 0.0 && crate::envc::var("EVOVIEW_DOF_FOCUS").map_or(true, |v| v != "game") {
                                             d.focus = None;
                                             d.center = Some([(pc.x / pc.w * 0.5 + 0.5).clamp(0.0, 1.0),
                                                              (0.5 - pc.y / pc.w * 0.5).clamp(0.0, 1.0)]);
@@ -5298,7 +5362,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     t.run(&device, &queue, &mut enc, &targets.depth, &p.input, view_proj, (&shadow_view, &shadow_samp), mv, ext);
                                     if let Some(b) = bench.as_mut() { b.mark(&mut enc, "taa"); }
                                     // half resolution (EVOVIEW_PARTICLES_FULL=1: full)
-                                    if samples == 1 && fxg.has_particles() && std::env::var_os("EVOVIEW_PARTICLES_FULL").is_none() {
+                                    if samples == 1 && fxg.has_particles() && crate::envc::var_os("EVOVIEW_PARTICLES_FULL").is_none() {
                                         let pdepth = fxg.depth_group(&device, &targets.depth, Some(&p.input));
                                         // half the DEPTH's size: the shader reads its 2x2
                                         fxg.draw_particles_half(&device, &mut enc, &pdepth, &p.input, rw, rh);
@@ -5360,8 +5424,8 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             // only sees a still state)
                             static DASH_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                             let n = DASH_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            if let Ok(dir) = std::env::var("EVOVIEW_DASH_DUMP") {
-                                let at = std::env::var("EVOVIEW_BENCH_SHOT_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(0u64);
+                            if let Ok(dir) = crate::envc::var("EVOVIEW_DASH_DUMP") {
+                                let at = crate::envc::var("EVOVIEW_BENCH_SHOT_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(0u64);
                                 if n == at {
                                     for (k, (pi, t)) in materials.dash_targets.iter().enumerate() {
                                         let (w, h, px) = crate::fxgpu::read_rgba(&device, &queue, t);
@@ -5488,7 +5552,7 @@ pub fn limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
 /// the main camera's `main` (cull.rs update_view); EVOVIEW_VIEW_LOD=0: off.
 fn view_lod_scale(main: f32, focal: f32) -> f32 {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *OFF.get_or_init(|| std::env::var("EVOVIEW_VIEW_LOD").map_or(false, |v| v == "0")) || focal <= 0.0 {
+    if *OFF.get_or_init(|| crate::envc::var("EVOVIEW_VIEW_LOD").map_or(false, |v| v == "0")) || focal <= 0.0 {
         return 1.0;
     }
     (main / focal).max(1.0)
@@ -5529,7 +5593,7 @@ impl Pace {
             if self.miss > 20 && self.k < 3.0 {
                 self.k += 1.0;
                 println!("drive pacing: every {:.0} refreshes = {:.1} fps", self.k, self.hz / self.k);
-            } else if std::env::var_os("EVOVIEW_PACE_DOWN").is_some() && self.fast > 85 && self.k > self.k_min {
+            } else if crate::envc::var_os("EVOVIEW_PACE_DOWN").is_some() && self.fast > 85 && self.k > self.k_min {
                 self.k -= 1.0;
                 println!("drive pacing: every {:.0} refreshes = {:.1} fps", self.k, self.hz / self.k);
             }

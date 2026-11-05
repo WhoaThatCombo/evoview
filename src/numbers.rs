@@ -176,7 +176,7 @@ pub fn selection(vfs: &mut Vfs) -> (u32, [usize; 7]) {
             read(&fs, 74, 51, &mut number, &mut idx);
         }
     }
-    if let Some(n) = std::env::var("EVOVIEW_CAR_NUMBER").ok().and_then(|v| v.parse().ok()) {
+    if let Some(n) = crate::envc::var("EVOVIEW_CAR_NUMBER").ok().and_then(|v| v.parse().ok()) {
         number = n;
     }
     (number, idx)
@@ -282,7 +282,7 @@ pub fn add(
     materials: &mut Vec<MaterialEntry>,
     blob: &mut Vec<u8>,
 ) {
-    if std::env::var_os("EVOVIEW_NO_NUMBERS").is_some() {
+    if crate::envc::var_os("EVOVIEW_NO_NUMBERS").is_some() {
         return;
     }
     let Some(a) = vfs.list("", "actor").into_iter().next() else { return };
@@ -339,7 +339,7 @@ pub fn add(
         let Some(ty) = dec.type_id.checked_sub(1).and_then(|t| types.get(t)) else { continue };
         // EVOVIEW_NUMBER_GLOW=<strength>: light every number (no shipped car
         // sets f7 / f13 - this is how the glowing path is checked)
-        let forced = std::env::var("EVOVIEW_NUMBER_GLOW").ok().and_then(|v| v.parse::<f32>().ok());
+        let forced = crate::envc::var("EVOVIEW_NUMBER_GLOW").ok().and_then(|v| v.parse::<f32>().ok());
         let ty_glow;
         let (ty, dec) = match forced {
             Some(k) => {
@@ -413,7 +413,7 @@ pub fn add(
             }
         }
         let outer = area[1] >= area[0];
-        if std::env::var_os("EVOVIEW_NUMBER_LOG").is_some() {
+        if crate::envc::var_os("EVOVIEW_NUMBER_LOG").is_some() {
             println!("number decal {} [{}]: bone {} centre {:.3?} axis {:.2?} half {:.3?} tris {} area +{:.4} -{:.4}",
                      POSITIONS[pi], k, dec.bone, to_car.transform_point3(Vec3::ZERO), axis, half, tris.len(), area[1], area[0]);
         }

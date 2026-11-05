@@ -133,8 +133,13 @@ impl Kind {
             k => format!("{k:?}").to_lowercase(),
         }
     }
+    /// The driver's slots (the Drv* kinds). ⚠ Was `format!("{self:?}")
+    /// .starts_with("Drv")`: a string built per slot per pose, ~10% of a
+    /// 53-car replay's frame.
     pub fn is_driver(&self) -> bool {
-        format!("{self:?}").starts_with("Drv")
+        matches!(self, Kind::DrvBase | Kind::DrvSteer | Kind::DrvSteerPaddles | Kind::DrvAccel | Kind::DrvBrake
+            | Kind::DrvClutch | Kind::DrvShiftUp | Kind::DrvShiftDown | Kind::DrvApproach | Kind::DrvPaddleUp
+            | Kind::DrvPaddleDown | Kind::DrvHandbrake | Kind::DrvIdle)
     }
 }
 
@@ -551,7 +556,7 @@ impl Rig {
                         hi = hi.max(y);
                     }
                     r = r.max((hi - lo) * 0.5);
-                    if std::env::var_os("EVOVIEW_STEER_DBG").is_some() {
+                    if crate::envc::var_os("EVOVIEW_STEER_DBG").is_some() {
                         eprintln!("TYREMESH {} radius {:.3}", m.name, (hi - lo) * 0.5);
                     }
                 }
@@ -786,7 +791,7 @@ impl Rig {
             let left = centre.x > 0.0;
             let front = ci < 2;
             let mut spin = Vec::new();
-            if std::env::var_os("EVOVIEW_WHEEL_DEBUG").is_some() {
+            if crate::envc::var_os("EVOVIEW_WHEEL_DEBUG").is_some() {
                 for pre in ["HUB_", "WHEEL_", "TYRE_", "DISC_", "SUSP_"] {
                     if let Some(&b) = skel.index.get(&format!("{pre}{c}")) {
                         let par = self.parent[b].map(|p| skel.bones[p].name.clone());
@@ -812,7 +817,7 @@ impl Rig {
                     let inv = self.bind[b].inverse();
                     let car_ax = inv.transform_vector3(Vec3::X).normalize_or_zero();
                     let bone_x = self.bind[b].x_axis.truncate().normalize_or_zero();
-                    let own = std::env::var("EVOVIEW_SPIN_AXIS").map_or(true, |v| v != "car")
+                    let own = crate::envc::var("EVOVIEW_SPIN_AXIS").map_or(true, |v| v != "car")
                         && bone_x.x.abs() > 0.985;
                     let ax = if own { Vec3::X * bone_x.x.signum() } else { car_ax };
                     spin.push((b, if ax == Vec3::ZERO { Vec3::X } else { ax }));
@@ -883,7 +888,7 @@ impl Rig {
             }
         }
         self.steer_axis = best.1;
-        if std::env::var_os("EVOVIEW_STEER_DBG").is_some() {
+        if crate::envc::var_os("EVOVIEW_STEER_DBG").is_some() {
             eprintln!("STEERDBG bind {:?} axis {:?}", w, self.steer_axis);
         }
     }
@@ -966,7 +971,7 @@ impl Rig {
         let a_l = inv.transform_vector3(n).normalize();
         let off = p_l.length();
         let ang = a_l.dot(self.steer_axis).clamp(-1.0, 1.0).acos().to_degrees();
-        if std::env::var_os("EVOVIEW_STEER_DBG").is_some() {
+        if crate::envc::var_os("EVOVIEW_STEER_DBG").is_some() {
             eprintln!("STEERDBG fit {} verts, centre {centre:?} normal {n:?} radius {radius:.3}; bone off {off:.3} m, axis {ang:.1} deg from the bone's", pts.len());
         }
         // trust the fit only near the bone: a wheel with a screen or paddles
@@ -1064,7 +1069,7 @@ impl Rig {
                                         self.drv_steer_range_deg));
             }
         }
-        if let Some(v) = std::env::var("EVOVIEW_DRV_STEER_DEG").ok().and_then(|v| v.parse().ok()) {
+        if let Some(v) = crate::envc::var("EVOVIEW_DRV_STEER_DEG").ok().and_then(|v| v.parse().ok()) {
             self.drv_steer_range_deg = v;
         }
     }
@@ -1235,7 +1240,7 @@ impl Rig {
                         // move the driver faces the road
                         let v = inp.cs.speed_mps.abs() * 3.6;
                         let w = 1.0 - ((v - 1.0) / 14.0).clamp(0.0, 1.0);
-                        if std::env::var_os("EVOVIEW_DRV_LOG").is_some() && (inp.time * 4.0).fract() < 0.05 {
+                        if crate::envc::var_os("EVOVIEW_DRV_LOG").is_some() && (inp.time * 4.0).fract() < 0.05 {
                             eprintln!("DRV t {:.2} kmh {v:.1} idle w {w:.2} frame {f:.1} wheel {:.1}", inp.time, inp.wheel_deg);
                         }
                         if w > 0.0 {
@@ -1676,4 +1681,24 @@ fn read_movable(d: &[u8], s: usize, e: usize, skel: &Skeleton) -> Movable {
     m.bone = skel.index.get(&m.bone_name).copied();
     let _ = IDENTITY;
     m
+}
+
+#[cfg(test)]
+mod kind_tests {
+    use super::Kind;
+
+    /// is_driver must keep agreeing with the Drv* naming it replaced.
+    #[test]
+    fn is_driver_matches_the_drv_names() {
+        let all = [
+            Kind::Wiper, Kind::Hood, Kind::Tailgate, Kind::Door(0), Kind::Lights, Kind::Susp(0), Kind::Accel,
+            Kind::Brake, Kind::Clutch, Kind::ShiftUp, Kind::ShiftDown, Kind::PaddleUp, Kind::PaddleDown,
+            Kind::Handbrake, Kind::Optional("x".into()), Kind::DrvBase, Kind::DrvSteer, Kind::DrvSteerPaddles,
+            Kind::DrvAccel, Kind::DrvBrake, Kind::DrvClutch, Kind::DrvShiftUp, Kind::DrvShiftDown,
+            Kind::DrvApproach, Kind::DrvPaddleUp, Kind::DrvPaddleDown, Kind::DrvHandbrake, Kind::DrvIdle,
+        ];
+        for k in all {
+            assert_eq!(k.is_driver(), format!("{k:?}").starts_with("Drv"), "{k:?}");
+        }
+    }
 }

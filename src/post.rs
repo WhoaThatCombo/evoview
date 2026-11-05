@@ -80,7 +80,7 @@ pub fn ae_mult() -> f32 {
 }
 
 fn env_f(name: &str, d: f32) -> f32 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+    crate::envc::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
 }
 
 struct Target {
@@ -150,7 +150,7 @@ impl Post {
                samples: u32, _lut: &wgpu::TextureView) -> Post {
         // the output dither is for an 8-bit swapchain only
         let dither = matches!(out, wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Rgba8UnormSrgb)
-            && std::env::var("EVOVIEW_DITHER").map_or(true, |v| v != "0");
+            && crate::envc::var("EVOVIEW_DITHER").map_or(true, |v| v != "0");
         let src = include_str!("post.wgsl")
             .replace("DEPTH_TEXTURE", if samples > 1 { "texture_depth_multisampled_2d" } else { "texture_depth_2d" })
             .replace("DITHER_ON", if dither { "true" } else { "false" });
@@ -273,7 +273,7 @@ impl Post {
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         }).create_view(&Default::default());
-        let ae = std::env::var("EVOVIEW_AE").map_or(true, |v| v != "0");
+        let ae = crate::envc::var("EVOVIEW_AE").map_or(true, |v| v != "0");
         if !ae {
             AE_LOG2.store(0f32.to_bits(), Ordering::Relaxed);
         }
@@ -301,17 +301,17 @@ impl Post {
             // corner smeared the whole screen.
             motion_blur: env_f("EVOVIEW_MOTION_BLUR", 0.25),
             blur_rot: env_f("EVOVIEW_BLUR_ROT", 0.35),
-            mv_blur: std::env::var("EVOVIEW_MOTION_BLUR_MV").map_or(true, |v| v != "0"),
+            mv_blur: crate::envc::var("EVOVIEW_MOTION_BLUR_MV").map_or(true, |v| v != "0"),
             ae,
             dof: None,
-            dof_on: std::env::var("EVOVIEW_DOF").map_or(true, |v| v != "0"),
+            dof_on: crate::envc::var("EVOVIEW_DOF").map_or(true, |v| v != "0"),
             // off by default: next to the game they crushed the shade and
             // read as a filter (user, 2026-11-03: 'a lot different from the
             // real game in a worse way, kinda depressing')
             clarity: env_f("EVOVIEW_CLARITY", 0.0),
             shafts: env_f("EVOVIEW_SHAFTS", 0.0),
             ae_log2: 0.0,
-            ae_clamp: std::env::var("EVOVIEW_AE_CLAMP").map_or(true, |v| v != "0"),
+            ae_clamp: crate::envc::var("EVOVIEW_AE_CLAMP").map_or(true, |v| v != "0"),
             ae_dt: 0.0,
             last: std::time::Instant::now(),
         }
@@ -397,7 +397,7 @@ impl Post {
             let t = ((zen - a.0) / (b.0 - a.0).max(1e-3)).clamp(0.0, 1.0);
             (a.1 + (b.1 - a.1) * t, a.2 + (b.2 - a.2) * t)
         };
-        match CURVE.get_or_init(|| std::env::var("EVOVIEW_VEIL_CURVE").unwrap_or_default().to_lowercase()).as_str() {
+        match CURVE.get_or_init(|| crate::envc::var("EVOVIEW_VEIL_CURVE").unwrap_or_default().to_lowercase()).as_str() {
             "soft" => lerp(&[(0.0, 0.35, 0.3), (80.0, 0.35, 0.3), (90.0, 0.33, 0.005), (180.0, 0.33, 0.005)]),
             "cinematic" => lerp(&[(0.0, 1.3, 1.5), (50.0, 1.3, 1.5), (80.0, 1.0, 1.1), (90.0, 0.9, 0.05),
                                   (100.0, 0.9, 0.01), (180.0, 0.9, 0.01)]),
@@ -414,7 +414,7 @@ impl Post {
         // EVOVIEW_FIXED_DT (captures, A/B shots): the blur follows the
         // simulated frame, not how fast this machine drew it
         static FIXED: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
-        self.dt = FIXED.get_or_init(|| std::env::var("EVOVIEW_FIXED_DT").ok().and_then(|v| v.parse::<f32>().ok()))
+        self.dt = FIXED.get_or_init(|| crate::envc::var("EVOVIEW_FIXED_DT").ok().and_then(|v| v.parse::<f32>().ok()))
             .unwrap_or(dt).max(1e-4);
         // ⚠ the readback lands every 2-3 frames: stepped by one frame's dt
         // each time, the exposure adapted at 1/2-1/3 of its speed
@@ -484,7 +484,7 @@ impl Post {
         let rate = if err > 0.0 { up } else { down };
         self.ae_log2 = (self.ae_log2 + err * rate * 0.35 * dt).clamp(-1.0, 1.6);
         AE_LOG2.store(self.ae_log2.to_bits(), Ordering::Relaxed);
-        if std::env::var_os("EVOVIEW_AE_LOG").is_some() {
+        if crate::envc::var_os("EVOVIEW_AE_LOG").is_some() {
             eprintln!("auto exposure: avg log2 lum {avg:.2}, target {target:.2}, exposure x{:.2} (step over {:.1} ms)",
                       self.ae_log2.exp2(), dt * 1e3);
         }
@@ -628,7 +628,7 @@ impl Post {
             // became flat smears of colour ("censored"). A lens blurs a few
             // pixels: 1.0 = mip 3 (1/8 size), EVOVIEW_DOF_MAX_MIP to tune.
             let levels = n + 1;
-            let top = std::env::var("EVOVIEW_DOF_MAX_MIP").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(3).min(levels - 1);
+            let top = crate::envc::var("EVOVIEW_DOF_MAX_MIP").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(3).min(levels - 1);
             let mip = |b: f32| ((b.clamp(0.0, 1.0) * top as f32).round() as usize).min(top);
             let view = |m: usize| if m == 0 { &self.input } else { &self.dof_mips[m - 1].view };
             dof_views = (view(mip(d.fg_blur)), view(mip(d.bg_blur)));
@@ -641,15 +641,15 @@ impl Post {
             u.dof = [d.focus.unwrap_or(0.0), range, d.fg_dist, d.bg_dist];
             u.dof2 = [d.coc_samples.clamp(1, 32) as f32, d.coc_depth_radius, c[0], c[1]];
             // EVOVIEW_DOF=debug: red the foreground CoC, green the background
-            let dbg = std::env::var("EVOVIEW_DOF").map_or(false, |v| v == "debug");
+            let dbg = crate::envc::var("EVOVIEW_DOF").map_or(false, |v| v == "debug");
             u.fwd = [fwd.x, fwd.y, fwd.z, if dbg { 2.0 } else { 1.0 }];
-            if std::env::var_os("EVOVIEW_DOF_LOG").is_some() {
+            if crate::envc::var_os("EVOVIEW_DOF_LOG").is_some() {
                 eprintln!("dof {d:?} mips fg {} bg {} of {levels}, range {range:.2}", mip(d.fg_blur), mip(d.bg_blur));
             }
         }
         // composite; hdr.w 1: the game's B-spline veil read
         // (EVOVIEW_VEIL_BSPLINE=0 the old bilinear one)
-        if std::env::var("EVOVIEW_VEIL_BSPLINE").map_or(true, |v| v != "0") {
+        if crate::envc::var("EVOVIEW_VEIL_BSPLINE").map_or(true, |v| v != "0") {
             u.hdr[3] = 1.0;
         }
         u.veil[3] = 3.0;
@@ -660,7 +660,7 @@ impl Post {
             u.look = [self.clarity, env_f("EVOVIEW_CLARITY_MID", 0.5), 0.0, 0.0];
             // the sun as a point at infinity: on screen when in front
             let sd = crate::sky::key_dir();
-            if std::env::var_os("EVOVIEW_SHAFT_LOG").is_some() {
+            if crate::envc::var_os("EVOVIEW_SHAFT_LOG").is_some() {
                 eprintln!("sun dir {sd:?}");
             }
             let c = vp * glam::Vec4::new(sd.x, sd.y, sd.z, 0.0);

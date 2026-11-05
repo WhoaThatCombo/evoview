@@ -51,7 +51,7 @@ struct Gen {
 static GEN: Mutex<Option<Gen>> = Mutex::new(None);
 
 pub fn wanted() -> bool {
-    std::env::var("EVOVIEW_MIPFILL").map_or(true, |v| v != "0")
+    crate::envc::var("EVOVIEW_MIPFILL").map_or(true, |v| v != "0")
 }
 
 /// The uncompressed format a short chain is completed in.

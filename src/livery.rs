@@ -85,7 +85,7 @@ pub fn list(vfs: &mut Vfs) -> Vec<Livery> {
 /// so a mod whose package also holds other presets opens on the one the game
 /// shows - not on whichever sorts first. An explicit EVOVIEW_MECH wins.
 fn mod_json_preset(pkg: &Path, vfs: &mut Vfs) {
-    if std::env::var("EVOVIEW_MECH").map_or(false, |v| !v.trim().is_empty()) {
+    if crate::envc::var("EVOVIEW_MECH").map_or(false, |v| !v.trim().is_empty()) {
         return;
     }
     let Ok(text) = std::fs::read_to_string(pkg.with_extension("json")) else { return };
@@ -100,7 +100,7 @@ fn mod_json_preset(pkg: &Path, vfs: &mut Vfs) {
         let n = n.trim_end_matches(".mechanicalcarpreset");
         if mechs.iter().any(|m| m == n) {
             println!("mod preset: {n} (from {})", pkg.with_extension("json").display());
-            std::env::set_var("EVOVIEW_MECH", n);
+            crate::envc::set_var("EVOVIEW_MECH", n);
             return;
         }
     }
@@ -108,7 +108,7 @@ fn mod_json_preset(pkg: &Path, vfs: &mut Vfs) {
 
 /// The livery load.rs would pick right now (EVOVIEW_VISUAL, else the first).
 fn current_index(list: &[Livery]) -> usize {
-    let want = std::env::var("EVOVIEW_VISUAL").unwrap_or_default().to_lowercase();
+    let want = crate::envc::var("EVOVIEW_VISUAL").unwrap_or_default().to_lowercase();
     let want = want.trim().trim_end_matches(".visualcarpreset");
     list.iter().position(|l| l.stem == want).unwrap_or(0)
 }
@@ -154,12 +154,12 @@ impl Switcher {
     /// Load the car wearing the current livery.
     pub fn load(&mut self) -> Result<Loaded, String> {
         if let Some(l) = self.list.get(self.cur) {
-            std::env::set_var("EVOVIEW_VISUAL", &l.stem);
+            crate::envc::set_var("EVOVIEW_VISUAL", &l.stem);
         }
         let before = crate::perf::phases();
         let r = crate::load::load(&mut self.vfs);
         // EVOVIEW_LIVERY_PERF=1: where a (re)load spent its time
-        if std::env::var_os("EVOVIEW_LIVERY_PERF").is_some() {
+        if crate::envc::var_os("EVOVIEW_LIVERY_PERF").is_some() {
             for (n, s, c) in crate::perf::phases() {
                 let (s0, c0) = before.iter().find(|e| e.0 == n).map_or((0.0, 0), |e| (e.1, e.2));
                 if s - s0 > 0.002 {

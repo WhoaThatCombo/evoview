@@ -38,7 +38,7 @@ pub fn dash_target(device: &wgpu::Device, w: u32, h: u32) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dash"),
         size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-        mip_level_count: if std::env::var("EVOVIEW_DASH_MIPS").map_or(true, |v| v != "0") { 32 - w.max(h).leading_zeros() } else { 1 },
+        mip_level_count: if crate::envc::var("EVOVIEW_DASH_MIPS").map_or(true, |v| v != "0") { 32 - w.max(h).leading_zeros() } else { 1 },
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: DASH_FORMAT,
@@ -466,7 +466,7 @@ impl FxGpu {
         if let Some(fx) = car.fx.as_deref() {
             for d in &fx.emitter_defs {
                 let m = &d.material;
-                if std::env::var_os("EVOVIEW_FX_DEFS").is_some() {
+                if crate::envc::var_os("EVOVIEW_FX_DEFS").is_some() {
                     eprintln!("FXDEF {} fade {} mat {} flip {} {}x{} col {:?} op {:?} op_alpha {} additive {}", d.path, m.depth_fade, m.file, m.flipbook, m.cols, m.rows,
                         m.color_tex.map(|i| (car.textures[i].name.clone(), car.textures[i].width, car.textures[i].height, car.textures[i].format.clone())),
                         m.opacity_tex.map(|i| (car.textures[i].name.clone(), car.textures[i].width, car.textures[i].height, car.textures[i].format.clone())),
@@ -486,7 +486,7 @@ impl FxGpu {
                 // EVOVIEW_SPRAY=k: how thick the tyres' spray is drawn (alpha
                 // x k); the body's long haze (4-10 m sprites) keeps its own
                 let spray_k = if w > 0.0 && d.path.to_lowercase().contains("tyre") {
-                    std::env::var("EVOVIEW_SPRAY").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(2.5).max(0.0)
+                    crate::envc::var("EVOVIEW_SPRAY").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(2.5).max(0.0)
                 } else { 1.0 };
                 let nrm = m.normal_tex.and_then(|i| mats.textures.get(device, queue, car, i, false));
                 let p: [f32; 20] = [
@@ -497,7 +497,7 @@ impl FxGpu {
                     if m.opacity_alpha { 1.0 } else { 0.0 },
                     if m.depth_fade > 0.0 { m.depth_fade } else { 0.8 }, w, m.distortion,
                     if nrm.is_some() { 1.0 } else { 0.0 },
-                    m.refr_rough, if w > 0.0 { m.amb_int.max(1.0) } else { 1.0 }, spray_k, if std::env::var("EVOVIEW_SPRAY_GAME").map_or(true, |v| v != "0") { 1.0 } else { 0.0 },
+                    m.refr_rough, if w > 0.0 { m.amb_int.max(1.0) } else { 1.0 }, spray_k, if crate::envc::var("EVOVIEW_SPRAY_GAME").map_or(true, |v| v != "0") { 1.0 } else { 0.0 },
                 ];
                 let ub = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("pmat"), contents: bytemuck::cast_slice(&p), usage: wgpu::BufferUsages::UNIFORM,
@@ -671,9 +671,16 @@ impl FxGpu {
     pub fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder,
                   fx: Option<&crate::fxdata::CarFx>, st: &FxState, dt: f32, eye: [f32; 3]) {
         let Some(fx) = fx else { return };
-        self.sim.step(fx, st, dt);
-        self.upload_particles(queue, fx, eye);
+        {
+            let _t = crate::bench::cpu("fx sim");
+            self.sim.step(fx, st, dt);
+        }
+        {
+            let _t = crate::bench::cpu("fx particles");
+            self.upload_particles(queue, fx, eye);
+        }
         self.dash_t += dt;
+        let _t = crate::bench::cpu("fx dash");
         self.render_dash(device, queue, enc, fx, st, false);
     }
 

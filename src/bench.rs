@@ -233,7 +233,7 @@ impl Bench {
         // EVOVIEW_BENCH_YAW_STEP=deg: that many degrees a frame instead, so
         // two runs reach the same angle at the same frame (A/B captures in
         // motion, whatever the frame rate)
-        if let Some(d) = std::env::var("EVOVIEW_BENCH_YAW_STEP").ok().and_then(|v| v.parse::<f32>().ok()) {
+        if let Some(d) = crate::envc::var("EVOVIEW_BENCH_YAW_STEP").ok().and_then(|v| v.parse::<f32>().ok()) {
             return base + (self.frame as f32 * d).to_radians();
         }
         base + self.t() * std::f32::consts::TAU / 8.0
@@ -275,10 +275,10 @@ impl Bench {
     pub fn end(&mut self, enc: &mut wgpu::CommandEncoder, device: &wgpu::Device, tex: &wgpu::Texture) {
         // EVOVIEW_BENCH_SHOT_FRAME=N: save frame N instead of the first (TAA
         // and animation only show after some frames)
-        let at = std::env::var("EVOVIEW_BENCH_SHOT_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(0u64);
+        let at = crate::envc::var("EVOVIEW_BENCH_SHOT_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(0u64);
         // EVOVIEW_BENCH_SHOT_COUNT=K: K frames in a row from there, saved as
         // <shot>_0.png .. (flicker checks)
-        let count = std::env::var("EVOVIEW_BENCH_SHOT_COUNT").ok().and_then(|v| v.parse().ok()).unwrap_or(1u64);
+        let count = crate::envc::var("EVOVIEW_BENCH_SHOT_COUNT").ok().and_then(|v| v.parse().ok()).unwrap_or(1u64);
         if self.frame >= at && self.frame < at + count && self.opts.shot.is_some() {
             self.shot_index = if count > 1 { Some(self.frame - at) } else { None };
             let (w, h) = (tex.width(), tex.height());
@@ -439,8 +439,8 @@ impl Bench {
             }
         }
         // a frame sequence (EVOVIEW_BENCH_SHOT_COUNT > 1) ends the run once saved
-        let seq = std::env::var("EVOVIEW_BENCH_SHOT_COUNT").ok().and_then(|v| v.parse::<u64>().ok()).filter(|&c| c > 1).map(|c| {
-            c + std::env::var("EVOVIEW_BENCH_SHOT_FRAME").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0)
+        let seq = crate::envc::var("EVOVIEW_BENCH_SHOT_COUNT").ok().and_then(|v| v.parse::<u64>().ok()).filter(|&c| c > 1).map(|c| {
+            c + crate::envc::var("EVOVIEW_BENCH_SHOT_FRAME").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0)
         });
         self.t() >= self.opts.seconds + WARMUP_S || seq.map_or(false, |end| self.frame > end + 2)
     }

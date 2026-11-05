@@ -90,7 +90,7 @@ pub struct Links {
 
 impl Links {
     pub fn enabled() -> bool {
-        std::env::var("EVOVIEW_RIG_ODE").map_or(true, |v| v == "links")
+        crate::envc::var("EVOVIEW_RIG_ODE").map_or(true, |v| v == "links")
     }
 
     /// None unless both axles are double wishbones with tie rods.
@@ -162,7 +162,7 @@ impl Links {
             };
             Link { hub, tie, href, tie_body: p6, rack_per_rad, ball_up: mir(ub), ball_low: mir(lb), spring, x_static: x_static[k], mr: mr[k / 2].max(1e-3) }
         });
-        if std::env::var_os("EVOVIEW_RIG_LINKLOG").is_some() {
+        if crate::envc::var_os("EVOVIEW_RIG_LINKLOG").is_some() {
             for ax in 0..2 {
                 println!("LINK geometry {}: roll centre {:.3} m over the ground, instant centre {:?}", ["front", "rear"][ax], roll_centre(geo[ax], anchor[ax * 2] - cg_local, radius[ax]).0, roll_centre(geo[ax], anchor[ax * 2] - cg_local, radius[ax]).1);
             }

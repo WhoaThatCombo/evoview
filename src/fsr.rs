@@ -27,12 +27,12 @@ use std::ffi::{c_char, c_void};
 
 /// EVOVIEW_UPSCALER=fsr asks for FSR.
 pub fn wanted() -> bool {
-    std::env::var("EVOVIEW_UPSCALER").map_or(false, |v| v.eq_ignore_ascii_case("fsr"))
+    crate::envc::var("EVOVIEW_UPSCALER").map_or(false, |v| v.eq_ignore_ascii_case("fsr"))
 }
 
 /// (FfxApiUpscaleQualityMode, render scale) for EVOVIEW_FSR_QUALITY.
 pub fn quality() -> (u32, f32) {
-    match std::env::var("EVOVIEW_FSR_QUALITY").unwrap_or_default().to_ascii_lowercase().as_str() {
+    match crate::envc::var("EVOVIEW_FSR_QUALITY").unwrap_or_default().to_ascii_lowercase().as_str() {
         "native" | "nativeaa" | "aa" => (0, 1.0),
         "balanced" => (2, 1.0 / 1.7),
         "performance" | "perf" => (3, 0.5),
@@ -44,8 +44,8 @@ pub fn quality() -> (u32, f32) {
 /// Startup: the render scale from the quality mode unless EVOVIEW_RENDER_SCALE
 /// is given (as dlss::apply_render_scale).
 pub fn apply_render_scale() {
-    if wanted() && std::env::var_os("EVOVIEW_RENDER_SCALE").is_none() {
-        std::env::set_var("EVOVIEW_RENDER_SCALE", format!("{}", quality().1));
+    if wanted() && crate::envc::var_os("EVOVIEW_RENDER_SCALE").is_none() {
+        crate::envc::set_var("EVOVIEW_RENDER_SCALE", format!("{}", quality().1));
     }
 }
 
@@ -189,7 +189,7 @@ struct Api {
 }
 
 fn dirs() -> Vec<std::path::PathBuf> {
-    std::env::var_os("EVOVIEW_FSR_DIR").map(Into::into).into_iter()
+    crate::envc::var_os("EVOVIEW_FSR_DIR").map(Into::into).into_iter()
         .chain(std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())))
         .collect()
 }
@@ -279,7 +279,7 @@ impl Fsr {
                         .map(|(&i, &n)| (i, if n.is_null() { "?".into() } else { std::ffi::CStr::from_ptr(n).to_string_lossy().into_owned() }))
                         .collect();
                     println!("FSR providers: {}", list.iter().map(|l| l.1.as_str()).collect::<Vec<_>>().join(", "));
-                    if let Ok(want) = std::env::var("EVOVIEW_FSR_VERSION") {
+                    if let Ok(want) = crate::envc::var("EVOVIEW_FSR_VERSION") {
                         version = list.iter().find(|l| l.1.contains(&want)).map(|l| l.0);
                         if version.is_none() {
                             eprintln!("FSR: no provider matching EVOVIEW_FSR_VERSION={want}");
@@ -421,7 +421,7 @@ impl Fsr {
             let mut backend = CreateBackendVk { header: Header { ty: CREATE_BACKEND_VK, next: std::ptr::null_mut() }, device: dev, phys, gdpa };
             let mut ver = CreateUpscaleVersion { header: Header { ty: CREATE_UPSCALE_VERSION, next: &mut backend.header }, version: UPSCALER_VERSION };
             let mut ovr = OverrideVersion { header: Header { ty: DESC_OVERRIDE_VERSION, next: &mut ver.header }, id: self.version.unwrap_or(0) };
-            let log = std::env::var_os("EVOVIEW_FSR_LOG").is_some();
+            let log = crate::envc::var_os("EVOVIEW_FSR_LOG").is_some();
             let mut cd = CreateUpscale {
                 header: Header { ty: CREATE_UPSCALE, next: if self.version.is_some() { &mut ovr.header } else { &mut ver.header } },
                 flags: FLAG_DEPTH_INFINITE | if hdr { FLAG_HDR | FLAG_AUTO_EXPOSURE } else { 0 },

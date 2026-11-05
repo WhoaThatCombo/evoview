@@ -158,7 +158,7 @@ impl Src {
         let dir = if dir.is_dir() {
             dir.to_path_buf()
         } else {
-            std::path::Path::new(&std::env::var_os("USERPROFILE")?).join("Saved Games").join("ACE").join("mods")
+            std::path::Path::new(&crate::envc::var_os("USERPROFILE")?).join("Saved Games").join("ACE").join("mods")
                 .join("content").join("tracks").join(track)
         };
         let mut loose = HashMap::new();
@@ -246,7 +246,7 @@ pub struct TimingTrack {
 
 impl TimingTrack {
     pub fn load(pkg: &std::path::Path, track: &str) -> Option<TimingTrack> {
-        let lay = std::env::var("EVOVIEW_LAYOUT").ok().map(|l| l.to_lowercase()).or_else(crate::load::loaded_layout);
+        let lay = crate::envc::var("EVOVIEW_LAYOUT").ok().map(|l| l.to_lowercase()).or_else(crate::load::loaded_layout);
         let src = Src::open(pkg, track);
         let mut found: Option<(String, HashMap<String, Vec<Vec3>>)> = None;
         let mut gates: Vec<Vec<Vec3>> = Vec::new();
@@ -294,7 +294,7 @@ impl TimingTrack {
                 }
             }
             // a RaceTimingLines zone (only Imola's unplaced sro.scene has one)
-            if std::env::var_os("EVOVIEW_TIMING_GATES").is_some() {
+            if crate::envc::var_os("EVOVIEW_TIMING_GATES").is_some() {
                 for k in keys.iter().filter(|k| k.starts_with("containers\\") && k.ends_with(".scene")) {
                     let Some(d) = src.read(k) else { continue };
                     if !d.windows(6).any(|w| w == b"Timing") {
@@ -384,7 +384,7 @@ impl TimingTrack {
             source = format!("finish + sectors = the RaceTimingLines zone (gate at {start:.0} m)");
             sec_src.clear();
         }
-        if let Ok(v) = std::env::var("EVOVIEW_LAP_START") {
+        if let Ok(v) = crate::envc::var("EVOVIEW_LAP_START") {
             if let Ok(m) = v.parse::<f32>() {
                 start = m.rem_euclid(len);
                 source = format!("finish = {m:.0} m along the centre (EVOVIEW_LAP_START)");
@@ -396,7 +396,7 @@ impl TimingTrack {
                  if limits.is_some() { "yes" } else { "no (grass / sand instead)" });
         let tt = TimingTrack { center, limits, start, sectors, source: format!("{source}; {sec_src}"), layout };
         // EVOVIEW_LAPS_LOG: how far the racing line itself runs past the limits
-        if let (Some((l, sl, r, sr)), true) = (tt.limits.as_ref(), std::env::var_os("EVOVIEW_LAPS_LOG").is_some()) {
+        if let (Some((l, sl, r, sr)), true) = (tt.limits.as_ref(), crate::envc::var_os("EVOVIEW_LAPS_LOG").is_some()) {
             let mut worst: Vec<(f32, Vec3)> = crate::trackdrive::racing_line(pkg, track).iter().step_by(4)
                 .map(|p| ((l.project(*p, None).lat * sl).max(r.project(*p, None).lat * sr), *p)).collect();
             worst.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
@@ -520,7 +520,7 @@ impl Default for Timer {
 }
 
 fn env_f(k: &str, d: f32) -> f32 {
-    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+    crate::envc::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
 }
 
 /// The time at `d` m into a lap from a trace (linear between samples).
@@ -624,7 +624,7 @@ impl Timer {
         self.hint = Some(pr.seg);
         let len = tt.len();
         let s = tt.rel(pr.s);
-        if std::env::var_os("EVOVIEW_LAPS_LOG").is_some() && (self.t / 5.0).floor() != ((self.t + dt) / 5.0).floor() {
+        if crate::envc::var_os("EVOVIEW_LAPS_LOG").is_some() && (self.t / 5.0).floor() != ((self.t + dt) / 5.0).floor() {
             eprintln!("LAPSLOG t {:.1} s {s:.0} off {:.1} m timing {} dist {:.0} owed {}", self.t, pr.d2.sqrt(), self.timing, self.dist, self.owed);
         }
         let Some(prev) = self.s else {
@@ -779,7 +779,7 @@ impl Timer {
                     let pr = r.project(*w, self.lim_hint[1]);
                     self.lim_hint = [Some(pl.seg), Some(pr.seg)];
                     let out = pl.lat * sl > margin || pr.lat * sr > margin;
-                    if std::env::var_os("EVOVIEW_LAPS_LOG").is_some() && out {
+                    if crate::envc::var_os("EVOVIEW_LAPS_LOG").is_some() && out {
                         eprintln!("LAPSLOG wheel ({:.1}, {:.1}) past left {:+.2} right {:+.2}", w.x, w.z, pl.lat * sl, pr.lat * sr);
                     }
                     all &= out;
@@ -850,10 +850,10 @@ pub struct Store {
 
 /// EVOVIEW_LAPS_FILE, else %APPDATA%/evoview/laps.json.
 fn store_path() -> Option<std::path::PathBuf> {
-    if let Some(p) = std::env::var_os("EVOVIEW_LAPS_FILE") {
+    if let Some(p) = crate::envc::var_os("EVOVIEW_LAPS_FILE") {
         return Some(p.into());
     }
-    std::env::var_os("APPDATA").map(|a| std::path::Path::new(&a).join("evoview").join("laps.json"))
+    crate::envc::var_os("APPDATA").map(|a| std::path::Path::new(&a).join("evoview").join("laps.json"))
 }
 
 impl Store {
@@ -947,7 +947,7 @@ pub const BOARD_SECS: f32 = 8.0;
 
 impl Session {
     pub fn load(pkg: &std::path::Path, track: &str, car: &str, save: bool) -> Option<Session> {
-        if std::env::var("EVOVIEW_LAPS").map_or(false, |v| v == "0") {
+        if crate::envc::var("EVOVIEW_LAPS").map_or(false, |v| v == "0") {
             return None;
         }
         let tt = TimingTrack::load(pkg, track)?;
@@ -960,9 +960,9 @@ impl Session {
             timer.pb_trace = r.trace.iter().map(|v| *v as f32 / 1000.0).collect();
             println!("laps: personal best {} ({} saved lap(s), {key})", timer.pb.map_or("-".into(), |t| fmt(t, 3)), r.laps.len());
         }
-        let save = save || std::env::var_os("EVOVIEW_LAPS_FILE").is_some();
+        let save = save || crate::envc::var_os("EVOVIEW_LAPS_FILE").is_some();
         // EVOVIEW_LAPS_BOARD=1: the leaderboard up from the start (captures)
-        let board_on = std::env::var_os("EVOVIEW_LAPS_BOARD").is_some();
+        let board_on = crate::envc::var_os("EVOVIEW_LAPS_BOARD").is_some();
         Some(Session { track: tt, timer, store, key, save, board_on, board_t: f32::INFINITY, others: Vec::new(), ai_timers: Vec::new() })
     }
 

@@ -135,7 +135,7 @@ pub struct Taa {
 
 /// Whether TAA starts on (EVOVIEW_TAA=0 off).
 pub fn wanted() -> bool {
-    std::env::var("EVOVIEW_TAA").map_or(true, |v| v != "0")
+    crate::envc::var("EVOVIEW_TAA").map_or(true, |v| v != "0")
 }
 
 /// Texture LOD bias for the scene's materials while TAA resolves them
@@ -146,7 +146,7 @@ pub fn wanted() -> bool {
 /// half-size mip wherever a texture is a little minified, and liveries and
 /// signs read soft next to the game.
 pub fn mip_bias() -> f32 {
-    if let Some(b) = std::env::var("EVOVIEW_MIP_BIAS").ok().and_then(|v| v.parse::<f32>().ok()) {
+    if let Some(b) = crate::envc::var("EVOVIEW_MIP_BIAS").ok().and_then(|v| v.parse::<f32>().ok()) {
         return b;
     }
     if !wanted() {
@@ -207,12 +207,12 @@ pub fn with_mip_bias_expr(src: &str, bias: &str) -> String {
 pub fn render_scale() -> f32 {
     // down to a third for DLSS / FSR's ultra performance modes
     let lo = if crate::dlss::wanted() || crate::fsr::wanted() { 0.33 } else { 0.5 };
-    std::env::var("EVOVIEW_RENDER_SCALE").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0).clamp(lo, 1.0)
+    crate::envc::var("EVOVIEW_RENDER_SCALE").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0).clamp(lo, 1.0)
 }
 
 /// Render pixels per occlusion / fog texel, per axis (EVOVIEW_AOFOG_FULL=1: 1).
 fn aofog_step() -> u32 {
-    if std::env::var_os("EVOVIEW_AOFOG_FULL").is_some() { 1 } else { 2 }
+    if crate::envc::var_os("EVOVIEW_AOFOG_FULL").is_some() { 1 } else { 2 }
 }
 
 /// The render size for a screen of `w` x `h` at `scale`.
@@ -234,7 +234,7 @@ fn halton(i: u32, b: u32) -> f32 {
 }
 
 fn env_f(k: &str, d: f32) -> f32 {
-    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+    crate::envc::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
 }
 
 impl Taa {
@@ -242,14 +242,14 @@ impl Taa {
         let src = include_str!("taa.wgsl")
             .replace("DEPTH_TEXTURE", if samples > 1 { "texture_depth_multisampled_2d" } else { "texture_depth_2d" })
             // EVOVIEW_TAA_MOVE_W: this frame's share on any moving pixel
-            .replace("TAA_MOVE_W", &format!("{:.3}", std::env::var("EVOVIEW_TAA_MOVE_W").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.2).clamp(0.1, 0.35)))
-            .replace("TAA_GAMMA", &format!("{:.3}", std::env::var("EVOVIEW_TAA_GAMMA").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.25)))
-            .replace("FOG_STEPS", &std::env::var("EVOVIEW_FOG_STEPS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(24).clamp(4, 64).to_string())
-            .replace("AO_SAMPLES", &std::env::var("EVOVIEW_AO_SAMPLES").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(12).clamp(4, 32).to_string())
+            .replace("TAA_MOVE_W", &format!("{:.3}", crate::envc::var("EVOVIEW_TAA_MOVE_W").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.2).clamp(0.1, 0.35)))
+            .replace("TAA_GAMMA", &format!("{:.3}", crate::envc::var("EVOVIEW_TAA_GAMMA").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.25)))
+            .replace("FOG_STEPS", &crate::envc::var("EVOVIEW_FOG_STEPS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(24).clamp(4, 64).to_string())
+            .replace("AO_SAMPLES", &crate::envc::var("EVOVIEW_AO_SAMPLES").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(12).clamp(4, 32).to_string())
             .replace("AOF_STEP", if aofog_step() == 2 { "2" } else { "1" })
             // depth-aware upsampling + bilinear, depth-tested history of the
             // half-res occlusion / fog (EVOVIEW_AOFOG_UP=0: plain bilinear)
-            .replace("AOFUP_ON", if std::env::var("EVOVIEW_AOFOG_UP").map_or(true, |v| v != "0") { "true" } else { "false" })
+            .replace("AOFUP_ON", if crate::envc::var("EVOVIEW_AOFOG_UP").map_or(true, |v| v != "0") { "true" } else { "false" })
             // ambient occlusion (the game's 04732820) and contact shadows:
             // EVOVIEW_AO_POW, _AO_BIAS, _AO_SUNLIT; EVOVIEW_CONTACT=0 off,
             // EVOVIEW_CONTACT_STEPS / _PX / _LEN / _THICK (march steps, render px,
@@ -257,18 +257,18 @@ impl Taa {
             .replace("AO_POW", &format!("{:.3}", env_f("EVOVIEW_AO_POW", 2.5)))
             .replace("AO_BIAS", &format!("{:.3}", env_f("EVOVIEW_AO_BIAS", 0.1)))
             .replace("AO_SUNLIT", &format!("{:.3}", env_f("EVOVIEW_AO_SUNLIT", 0.6).clamp(0.0, 1.0)))
-            .replace("CS_STEPS", &(if std::env::var("EVOVIEW_CONTACT").map_or(false, |v| v == "0") { 0 }
+            .replace("CS_STEPS", &(if crate::envc::var("EVOVIEW_CONTACT").map_or(false, |v| v == "0") { 0 }
                                    else { env_f("EVOVIEW_CONTACT_STEPS", 12.0).clamp(1.0, 64.0) as u32 }).to_string())
             .replace("CS_PX", &format!("{:.3}", env_f("EVOVIEW_CONTACT_PX", 40.0)))
             .replace("CS_MAXLEN", &format!("{:.3}", env_f("EVOVIEW_CONTACT_LEN", 1.0)))
             .replace("CS_THICKK", &format!("{:.4}", env_f("EVOVIEW_CONTACT_THICK_K", 0.001)))
             .replace("CS_THICK", &format!("{:.3}", env_f("EVOVIEW_CONTACT_THICK", 0.05)))
-            .replace("SV_OLD", if std::env::var_os("EVOVIEW_SUNVIS_OLD").is_some() { "true" } else { "false" })
-            .replace("CS_OLD", if std::env::var_os("EVOVIEW_CONTACT_OLD").is_some() { "true" } else { "false" })
-            .replace("MV_DEBUG", if std::env::var_os("EVOVIEW_MOTION_DEBUG").is_some() { "true" } else { "false" })
-            .replace("AO_CAR_W", &format!("{:.3}", std::env::var("EVOVIEW_AO_CAR_W").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.2)))
-            .replace("SPIN_FAST_W", &format!("{:.3}", std::env::var("EVOVIEW_WHEEL_TAA_W").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0)))
-            .replace("MV_WHEELS_OFF", if std::env::var("EVOVIEW_MOTION_WHEELS").map_or(false, |v| v == "0") { "true" } else { "false" })
+            .replace("SV_OLD", if crate::envc::var_os("EVOVIEW_SUNVIS_OLD").is_some() { "true" } else { "false" })
+            .replace("CS_OLD", if crate::envc::var_os("EVOVIEW_CONTACT_OLD").is_some() { "true" } else { "false" })
+            .replace("MV_DEBUG", if crate::envc::var_os("EVOVIEW_MOTION_DEBUG").is_some() { "true" } else { "false" })
+            .replace("AO_CAR_W", &format!("{:.3}", crate::envc::var("EVOVIEW_AO_CAR_W").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.2)))
+            .replace("SPIN_FAST_W", &format!("{:.3}", crate::envc::var("EVOVIEW_WHEEL_TAA_W").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0)))
+            .replace("MV_WHEELS_OFF", if crate::envc::var("EVOVIEW_MOTION_WHEELS").map_or(false, |v| v == "0") { "true" } else { "false" })
             .replace("DEPTH_LOAD", if samples > 1 { "textureLoad(t_depth, p, 0)" } else { "textureLoad(t_depth, p, 0)" });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("taa"),
@@ -422,8 +422,8 @@ impl Taa {
         });
         let hist = Self::textures(device, w, h);
         let (cur_tex, cur, ao_hist, fog_hist) = Self::render_textures(device, format, rw, rh);
-        let fog_density = std::env::var("EVOVIEW_FOG").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0012f32);
-        let ao_strength = std::env::var("EVOVIEW_AO").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0f32);
+        let fog_density = crate::envc::var("EVOVIEW_FOG").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0012f32);
+        let ao_strength = crate::envc::var("EVOVIEW_AO").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0f32);
         Taa { pipe, bgl, aofog_pipe, aofog_bgl, samp, ubuf, cur, cur_tex, ext_pipe, hist, ao_hist, eye: glam::Vec3::ZERO, ao_strength, fog_hist, vol: None, fog_density,
               idx: 0, frame: 0, prev_vp: None, size: (w, h), rsize: (rw, rh), format, on: wanted(), obj: None, obj_prev: None, wheels: [[0.0; 4]; 4],
               no_mv: Self::mk(device, "taa no motion", crate::motion::FORMAT, 1, 1) }
@@ -586,16 +586,16 @@ impl Taa {
             // w: 1 = reproject through the motion vectors
             jit: [jx, -jy, if self.upsampling() { 1.0 } else { 0.0 }, if mv.is_some() { 1.0 } else { 0.0 }],
             // x: the current frame's weight on sky pixels (EVOVIEW_TAA_SKY)
-            sky: [std::env::var("EVOVIEW_TAA_SKY").ok().and_then(|v| v.parse().ok()).unwrap_or(0.05f32), 0.0, 0.0, 0.0],
+            sky: [crate::envc::var("EVOVIEW_TAA_SKY").ok().and_then(|v| v.parse().ok()).unwrap_or(0.05f32), 0.0, 0.0, 0.0],
             obj_rect: self.obj_rect(vp),
             inv_vp: vp.inverse().to_cols_array_2d(),
             prev_vp: self.prev_vp.unwrap_or(vp).to_cols_array_2d(),
             // z: depth-based history rejection (EVOVIEW_TAA_REJECT=0 off)
             ctl: [if self.prev_vp.is_none() { 1.0 } else { 0.0 }, 0.1,
-                  if std::env::var("EVOVIEW_TAA_REJECT").map_or(true, |v| v != "0") { 1.0 } else { 0.0 },
+                  if crate::envc::var("EVOVIEW_TAA_REJECT").map_or(true, |v| v != "0") { 1.0 } else { 0.0 },
                   // w: the relative depth jump that counts as disocclusion
                   // (taa.wgsl: 10 % with motion vectors, 3 % on the old box)
-                  std::env::var("EVOVIEW_TAA_TOL").ok().and_then(|v| v.parse().ok())
+                  crate::envc::var("EVOVIEW_TAA_TOL").ok().and_then(|v| v.parse().ok())
                       .unwrap_or(if mv.is_some() { 0.10f32 } else { 0.03 })],
             size: [w as f32, h as f32, 1.0 / w.max(1) as f32, 1.0 / h.max(1) as f32],
             obj_inv: self.obj.map_or(Mat4::IDENTITY, |o| o.0.inverse()).to_cols_array_2d(),
@@ -617,7 +617,7 @@ impl Taa {
             fog: [self.fog_density, 0.8, 1.0, 450.0],
             amb: self.vol.map_or([0.0; 4], |v| [v.amb[0], v.amb[1], v.amb[2], if v.far { 1.0 } else { 0.0 }]),
             wheels: self.wheels,
-            ao: [std::env::var("EVOVIEW_AO_RADIUS").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5f32), self.ao_strength, (self.frame % 64) as f32, if self.ao_strength > 0.0 { 1.0 } else { 0.0 }],
+            ao: [crate::envc::var("EVOVIEW_AO_RADIUS").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5f32), self.ao_strength, (self.frame % 64) as f32, if self.ao_strength > 0.0 { 1.0 } else { 0.0 }],
         };
         queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&u));
         let read = self.idx;

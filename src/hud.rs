@@ -243,7 +243,7 @@ fn fs(i: VsOut) -> @location(0) vec4<f32> {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
             ],
         });
-        let dir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+        let dir = crate::envc::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
         let fonts: Vec<ab_glyph::FontVec> = ["segoeui.ttf", "seguisb.ttf"]
             .iter()
             .filter_map(|f| {

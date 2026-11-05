@@ -214,7 +214,7 @@ const GAME_ROLES: [(&str, u64, Option<u64>); 11] = [
 /// (the DirectInput button), 3 require_shift}}}. Shifted ones are skipped.
 fn game_binds() -> Vec<(String, Bind)> {
     use crate::proto::{fields, text, Val};
-    let Some(home) = std::env::var_os("USERPROFILE") else { return Vec::new() };
+    let Some(home) = crate::envc::var_os("USERPROFILE") else { return Vec::new() };
     let p = std::path::PathBuf::from(home).join("Saved Games").join("ACE").join("input_devices.inputdeviceconfiguration");
     let Ok(d) = std::fs::read(p) else { return Vec::new() };
     let mut out = Vec::new();
@@ -272,7 +272,7 @@ pub struct Mapping {
 
 impl Mapping {
     fn path() -> std::path::PathBuf {
-        let base = std::env::var_os("APPDATA").map(std::path::PathBuf::from).unwrap_or_else(|| ".".into());
+        let base = crate::envc::var_os("APPDATA").map(std::path::PathBuf::from).unwrap_or_else(|| ".".into());
         base.join("evoview").join("wheel.cfg")
     }
 
@@ -536,7 +536,7 @@ impl Wheel {
         if self.devs.is_empty() {
             return None;
         }
-        if std::env::var_os("EVOVIEW_WHEEL_LOG").is_some() && self.last_log.elapsed().as_secs_f32() > 1.0 {
+        if crate::envc::var_os("EVOVIEW_WHEEL_LOG").is_some() && self.last_log.elapsed().as_secs_f32() > 1.0 {
             self.last_log = std::time::Instant::now();
             for d in &self.devs {
                 let pressed: Vec<usize> = (0..128).filter(|b| d.state.buttons[*b] & 0x80 != 0).collect();

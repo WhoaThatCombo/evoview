@@ -311,7 +311,7 @@ fn blob_add(blob: &mut Vec<u8>, data: &[u8]) -> [u64; 2] {
 fn skinned(l: &Lod) -> bool {
     let n = l.positions.len() / 12;
     !l.anim.is_empty() && !l.bones.is_empty() && l.bone_idx.len() == n * 16 && l.bone_wgt.len() == n * 16
-        && std::env::var_os("EVOVIEW_NO_TRACK_ANIM").is_none()
+        && crate::envc::var_os("EVOVIEW_NO_TRACK_ANIM").is_none()
 }
 
 /// EVOVIEW_PLACE_DUMP=<file>: one line per placed track mesh copy - its
@@ -321,7 +321,7 @@ fn skinned(l: &Lod) -> bool {
 fn place_dump(name: &str, positions: &[u8], xforms: &[[f32; 16]]) {
     use std::io::Write;
     static OUT: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
-    let Ok(path) = std::env::var("EVOVIEW_PLACE_DUMP") else { return };
+    let Ok(path) = crate::envc::var("EVOVIEW_PLACE_DUMP") else { return };
     let mut g = OUT.lock().unwrap();
     if g.is_none() {
         *g = std::fs::File::create(&path).ok();
@@ -395,7 +395,7 @@ pub fn lod_dist_scale() -> f32 {
 
 /// EVOVIEW_NO_LOD=1 keeps only LOD0 for instanced props.
 pub fn lod_enabled() -> bool {
-    std::env::var_os("EVOVIEW_NO_LOD").is_none()
+    crate::envc::var_os("EVOVIEW_NO_LOD").is_none()
 }
 
 pub fn read_mesh(d: &[u8]) -> Option<Lod> {
@@ -424,7 +424,7 @@ pub fn read_force_shadow_lod(d: &[u8]) -> bool {
 
 /// EVOVIEW_LOD_FADE=0 switches LODs with a hard pop (no crossfade, no lodOut).
 pub fn lod_fade_enabled() -> bool {
-    std::env::var("EVOVIEW_LOD_FADE").map_or(true, |v| v != "0")
+    crate::envc::var("EVOVIEW_LOD_FADE").map_or(true, |v| v != "0")
 }
 
 /// Smallest crossfade, as a fraction of the switch distance. Only the
@@ -435,7 +435,7 @@ pub fn lod_fade_enabled() -> bool {
 /// costs 0.55 ms GPU at 3440x1440 on Imola (12k-vertex trees drawn twice
 /// through a band at 105 m), against 0.1 ms for the game's own widths.
 pub fn lod_dither_min() -> f32 {
-    std::env::var("EVOVIEW_LOD_DITHER_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0)
+    crate::envc::var("EVOVIEW_LOD_DITHER_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0)
 }
 
 /// Every LOD in the file, finest first, each with its switch distance
@@ -641,7 +641,7 @@ pub const AUTO_MIP: u32 = u32::MAX;
 /// texel OOMs it - but the cost was being paid by every texture on every
 /// track, including the ones that were never the problem.
 pub fn track_mip_skip(w: u32, h: u32) -> u32 {
-    if let Ok(v) = std::env::var("EVOVIEW_TEX_LOD") {
+    if let Ok(v) = crate::envc::var("EVOVIEW_TEX_LOD") {
         if let Ok(n) = v.parse() {
             return n;
         }
@@ -653,7 +653,7 @@ pub fn track_mip_skip(w: u32, h: u32) -> u32 {
     // ~a dozen maps and ~190 MB, rendered at half resolution for nothing.
     let big = w.max(h);
     if big >= 4096 {
-        let budget = std::env::var("EVOVIEW_TEX_4K_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(64u32);
+        let budget = crate::envc::var("EVOVIEW_TEX_4K_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(64u32);
         let n = TRACK_4K_SEEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if n < budget { 0 } else { 1 }
     } else {
@@ -667,6 +667,41 @@ pub static TRACK_4K_SEEN: std::sync::atomic::AtomicU32 = std::sync::atomic::Atom
 /// `skip_mips` drops the largest levels (1 = start at half-res).
 fn read_texture_lod(hdr: &[u8], raw: &[u8], skip_mips: u32) -> Option<Tex> {
     crate::perf::time("texture decode", || read_texture_lod_inner(hdr, raw, skip_mips))
+}
+
+/// How many leading bytes of a `.texturemips` of `len` bytes
+/// `read_texture_lod` skips unread at `skip_mips`: the skipped top levels'
+/// pages, when the file holds the whole chain (else 0: read it all). Must
+/// follow read_texture_lod_inner's own choice of levels.
+fn mips_skip_bytes(hdr: &[u8], len: usize, skip_mips: u32) -> usize {
+    let (mut w, mut h, mut mips, mut fmt) = (0u64, 0u64, 1u64, 0u64);
+    fields(hdr, 0, hdr.len(), |f, v| {
+        if let Val::Varint(n) = v {
+            match f {
+                1 => w = n,
+                2 => h = n,
+                3 => mips = n,
+                4 => fmt = n,
+                _ => {}
+            }
+        }
+    });
+    let Some((kind, _, tw, th)) = format_of(fmt) else { return 0 };
+    let want = if skip_mips == AUTO_MIP { track_mip_skip(w as u32, h as u32) } else { skip_mips };
+    let skip = if w >= 8 && h >= 8 && matches!(kind, "bc1" | "bc4" | "bc7" | "bc6h" | "bc3") {
+        want.min(mips.saturating_sub(1) as u32)
+    } else {
+        0
+    };
+    let pages_of = |m: u32| -> usize {
+        let mw = ((w as u32) >> m).max(1);
+        let mh = ((h as u32) >> m).max(1);
+        mw.div_ceil(tw).max(1) as usize * mh.div_ceil(th).max(1) as usize
+    };
+    if (0..mips as u32).map(pages_of).sum::<usize>() * PAGE != len {
+        return 0;
+    }
+    (0..skip).map(pages_of).sum::<usize>() * PAGE
 }
 
 fn read_texture_lod_inner(hdr: &[u8], raw: &[u8], skip_mips: u32) -> Option<Tex> {
@@ -768,7 +803,7 @@ fn read_texture_lod_inner(hdr: &[u8], raw: &[u8], skip_mips: u32) -> Option<Tex>
     // Lamborghini badge is blue, Imola's "EVO" banners blue and the
     // building / garage splat masks swap their red and blue layers.
     // EVOVIEW_BGRA=0: as RGBA, as before.
-    if matches!(fmt, 5 | 6) && std::env::var("EVOVIEW_BGRA").map_or(true, |v| v != "0") {
+    if matches!(fmt, 5 | 6) && crate::envc::var("EVOVIEW_BGRA").map_or(true, |v| v != "0") {
         for p in out.chunks_exact_mut(4) {
             p.swap(0, 2);
         }
@@ -1144,7 +1179,7 @@ fn read_material(d: &[u8], file: &str) -> Option<Mat> {
                     let n = refs.len();
                     if let Some(r) = refs.into_iter().next() {
                         m.slots.insert(name, r);
-                    } else if std::env::var("EVOVIEW_SLOT_LOG").is_ok()
+                    } else if crate::envc::var("EVOVIEW_SLOT_LOG").is_ok()
                         && name.contains("BaseColorMap")
                     {
                         // ⚠ Only colour slots. A material declares the FULL slot
@@ -1566,7 +1601,7 @@ impl Vfs {
     /// encrypted ones in a package) - read from the package alone, every
     /// texture of such a mod came out empty (ks_bmw_m8_comp_mod_v1: 98 of 98).
     pub fn over_loose(&mut self, prefix: &str) {
-        let Some(home) = std::env::var_os("USERPROFILE") else { return };
+        let Some(home) = crate::envc::var_os("USERPROFILE") else { return };
         let root = Path::new(&home).join("Saved Games").join("ACE").join("mods");
         let dir = root.join(prefix.trim_end_matches('/').replace('/', std::path::MAIN_SEPARATOR_STR));
         if !dir.is_dir() {
@@ -1679,6 +1714,31 @@ impl Vfs {
         }
     }
 
+    /// A texture's `.texturemips` for header `hdr` at `skip_mips`: only from
+    /// the first level kept (the top ones are the front of the file and are
+    /// skipped unread - most of the bytes of a car on the grid), the rest
+    /// zero. Anything but a plain package entry holding the whole chain is
+    /// read whole, as before.
+    fn read_mips(&self, hdr: &[u8], key: &str, skip_mips: u32) -> Vec<u8> {
+        let Some(Src::Pkg(e, owner)) = self.entries.get(key) else { return self.read_inner(key) };
+        let e = *e;
+        let start = mips_skip_bytes(hdr, e.size as usize, skip_mips);
+        if start == 0 || !e.plain {
+            return self.read_inner(key);
+        }
+        if let Ok(mut r) = self.reads.lock() {
+            r.insert(key.to_string());
+        }
+        let got = match owner {
+            0 => self.pkg.as_ref().map(|p| p.read_from(e, start)).unwrap_or_default(),
+            k => self.extra.get(k - 1).map(|p| p.read_from(e, start)).unwrap_or_default(),
+        };
+        if got.len() == e.size as usize {
+            return got;
+        }
+        self.read_inner(key)
+    }
+
     /// Every file under the car's root (lowercase keys), and whether it
     /// has been read.
     pub fn audit_files(&self) -> Vec<(String, bool)> {
@@ -1728,7 +1788,7 @@ impl Vfs {
             Some(t) => Some(t),
             None => {
                 let hdr = self.read(key);
-                let mips = self.read(&key.replace(".texture", ".texturemips"));
+                let mips = self.read_mips(&hdr, &key.replace(".texture", ".texturemips"), skip_mips);
                 read_texture_lod(&hdr, &mips, skip_mips)
             }
         };
@@ -1799,7 +1859,7 @@ impl Vfs {
                             let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let Some(k) = keys.get(i) else { break };
                             let hdr = me.read_inner(k);
-                            let mips = me.read_inner(&k.replace(".texture", ".texturemips"));
+                            let mips = me.read_mips(&hdr, &k.replace(".texture", ".texturemips"), skip_mips);
                             if let Some(t) = read_texture_lod(&hdr, &mips, skip_mips) {
                                 out.push(((*k).clone(), t));
                             }
@@ -2120,7 +2180,7 @@ pub fn load_track_any(pkg: &Path, track: &str, base: Option<&Path>) -> Result<Lo
         load_track_dir_opts(dir, Some(pkg), None)
     } else {
         // a mod track id: installed loose under Saved Games/ACE/mods
-        let m = std::env::var_os("USERPROFILE")
+        let m = crate::envc::var_os("USERPROFILE")
             .map(|h| Path::new(&h).join("Saved Games").join("ACE").join("mods").join("content").join("tracks").join(track))
             .filter(|d| d.is_dir());
         match load_track_from_package_opts(pkg, track, base, None) {
@@ -2274,7 +2334,7 @@ fn build_track_anim(vfs: &mut Vfs, meshes: &[MeshEntry], list: Vec<(usize, Vec<B
     out.clips = clips;
     // EVOVIEW_ANIM_DUMP=<mesh name part>: the skin matrices of that mesh at
     // frame 63 (debugging against an offline skin)
-    if let Ok(want) = std::env::var("EVOVIEW_ANIM_DUMP") {
+    if let Ok(want) = crate::envc::var("EVOVIEW_ANIM_DUMP") {
         for am in &out.meshes {
             if !meshes[am.mesh].name.contains(want.as_str()) || meshes[am.mesh].name.contains('#') {
                 continue;
@@ -2304,7 +2364,7 @@ fn build_collision(vfs: &mut Vfs, colliders: &[(SceneInst, String, bool)], wall_
     let mut cache: HashMap<String, Option<(Vec<[f32; 3]>, Vec<u32>)>> = HashMap::new();
     // EVOVIEW_WALL_SRC="x,z": which collider / instance made the walls near a point
     let mut tri_src: Vec<(usize, usize, String)> = Vec::new();
-    let wall_src: Option<(f32, f32)> = std::env::var("EVOVIEW_WALL_SRC").ok().and_then(|v| { let (a, b) = v.split_once(',')?; Some((a.trim().parse().ok()?, b.trim().parse().ok()?)) });
+    let wall_src: Option<(f32, f32)> = crate::envc::var("EVOVIEW_WALL_SRC").ok().and_then(|v| { let (a, b) = v.split_once(',')?; Some((a.trim().parse().ok()?, b.trim().parse().ok()?)) });
     let near = |x: f32, z: f32| wall_src.map_or(false, |(px, pz)| (x - px).powi(2) + (z - pz).powi(2) < 9.0);
     let mut failed: std::collections::HashSet<String> = Default::default();
     for (inst, surf, hidden) in colliders {
@@ -2351,7 +2411,7 @@ fn build_collision(vfs: &mut Vfs, colliders: &[(SceneInst, String, bool)], wall_
     }
     // EVOVIEW_TRI_SRC="x,z": every collider triangle over that point (XZ),
     // its height there and the mesh it came from
-    if let Some((px, pz)) = std::env::var("EVOVIEW_TRI_SRC").ok().and_then(|v| { let (a, b) = v.split_once(',')?; Some((a.trim().parse::<f32>().ok()?, b.trim().parse::<f32>().ok()?)) }) {
+    if let Some((px, pz)) = crate::envc::var("EVOVIEW_TRI_SRC").ok().and_then(|v| { let (a, b) = v.split_once(',')?; Some((a.trim().parse::<f32>().ok()?, b.trim().parse::<f32>().ok()?)) }) {
         for (ti, t) in c.tris.iter().enumerate() {
             let [a, b, d] = t.map(|i| c.verts[i as usize]);
             let den = (b[2] - d[2]) * (a[0] - d[0]) + (d[0] - b[0]) * (a[2] - d[2]);
@@ -2455,7 +2515,7 @@ fn build_collision(vfs: &mut Vfs, colliders: &[(SceneInst, String, bool)], wall_
             // (the trunk, the feet). EVOVIEW_TRUNK_WALLS=0: the old box.
             let lpath = inst.path.to_lowercase();
             let band = if (lpath.contains("/vegetation/") || lpath.contains("/characters/"))
-                && std::env::var("EVOVIEW_TRUNK_WALLS").as_deref() != Ok("0") { 0.3 } else { 1.2 };
+                && crate::envc::var("EVOVIEW_TRUNK_WALLS").as_deref() != Ok("0") { 0.3 } else { 1.2 };
             let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
             for v in &vs {
                 hi[1] = hi[1].max(v[1]);
@@ -2467,7 +2527,7 @@ fn build_collision(vfs: &mut Vfs, colliders: &[(SceneInst, String, bool)], wall_
                     }
                 }
             }
-            if std::env::var_os("EVOVIEW_WALL_BOX_LOG").is_some() {
+            if crate::envc::var_os("EVOVIEW_WALL_BOX_LOG").is_some() {
                 let (mut l3, mut h3) = ([f32::MAX; 2], [f32::MIN; 2]);
                 for v in vs.iter().filter(|v| v[1] <= y0 + 0.3) {
                     l3 = [l3[0].min(v[0]), l3[1].min(v[2])];
@@ -2679,7 +2739,7 @@ fn skip_logic_scene(path: &str) -> bool {
         // and end gates): the game loads them only for that event - left in,
         // their inflatable arch stands on Imola's racing line, collider and all.
         // EVOVIEW_ACADEMY=1 shows them.
-        || ((l.contains("academy_event") || l.contains("academy_events")) && std::env::var_os("EVOVIEW_ACADEMY").is_none())
+        || ((l.contains("academy_event") || l.contains("academy_events")) && crate::envc::var_os("EVOVIEW_ACADEMY").is_none())
 }
 
 fn scene_basename(path: &str) -> String {
@@ -2753,7 +2813,7 @@ fn pick_race_layout_inner(containers: &[(String, bool)]) -> Option<String> {
     keys.dedup();
     // --layout <id> / EVOVIEW_LAYOUT=<id> (the ACECM Drive tab sends the
     // racing-line id, layout_<id>.ideal_line): that layout's containers
-    if let Ok(want) = std::env::var("EVOVIEW_LAYOUT") {
+    if let Ok(want) = crate::envc::var("EVOVIEW_LAYOUT") {
         let want = want.to_lowercase();
         if keys.iter().any(|k| *k == want) {
             return Some(want);
@@ -2921,7 +2981,7 @@ fn parse_scene_graph(d: &[u8], parent: glam::Mat4) -> SceneGraph {
         // swung them onto other terrain - a forest floating up to 89 m in
         // the sky (EVOVIEW_TREE_CHECK). EVOVIEW_NODE_ROT=neg / none for
         // comparisons.
-        let node = parent * trs(xf.0, match std::env::var("EVOVIEW_NODE_ROT").as_deref() {
+        let node = parent * trs(xf.0, match crate::envc::var("EVOVIEW_NODE_ROT").as_deref() {
             Ok("neg") => [-xf.1[0], -xf.1[1], -xf.1[2]],
             Ok("none") => [0.0; 3],
             _ => xf.1,
@@ -2937,12 +2997,12 @@ fn parse_scene_graph(d: &[u8], parent: glam::Mat4) -> SceneGraph {
         // Checked on Imola: the trackside big screens face the track and the
         // pit-out board the pit lane (side-on when mirrored).
         // EVOVIEW_STATIC_ROT=neg for comparisons.
-        let xf = if std::env::var("EVOVIEW_STATIC_ROT").as_deref() == Ok("neg") {
+        let xf = if crate::envc::var("EVOVIEW_STATIC_ROT").as_deref() == Ok("neg") {
             at(xf.0, [-xf.1[0], -xf.1[1], -xf.1[2]], xf.2)
         } else {
             at(xf.0, xf.1, xf.2)
         };
-        if std::env::var_os("EVOVIEW_STATIC_ROT_LOG").is_some() && xf.1.iter().any(|a| a.abs() > 0.5) {
+        if crate::envc::var_os("EVOVIEW_STATIC_ROT_LOG").is_some() && xf.1.iter().any(|a| a.abs() > 0.5) {
             fields(d, as_, ae, |kf, kv| if kf == 100 {
                 if let Some((hs, he)) = kv.range() {
                     fields(d, hs, he, |mf, mv| if let (1, Val::Bytes(a, b)) = (mf, mv) {
@@ -2999,13 +3059,13 @@ fn parse_scene_graph(d: &[u8], parent: glam::Mat4) -> SceneGraph {
                         // surface_id (f3) or a collider (f10): it is solid
                         (3, Val::Bytes(a, b)) => {
                             solid |= b > a;
-                            if std::env::var_os("EVOVIEW_COLLIDER_DUMP").is_some() {
+                            if crate::envc::var_os("EVOVIEW_COLLIDER_DUMP").is_some() {
                                 println!("SURFID {path} {:?}", String::from_utf8_lossy(&d[a..b]));
                             }
                         }
                         (10, Val::Bytes(a, b)) => {
                             solid = true;
-                            if std::env::var_os("EVOVIEW_COLLIDER_DUMP").is_some() {
+                            if crate::envc::var_os("EVOVIEW_COLLIDER_DUMP").is_some() {
                                 let mut o = String::new();
                                 fields(d, a, b, |g, w| o += &match w { Val::Bytes(x, y) => format!(" {g}=[{}B {:?}]", y - x, String::from_utf8_lossy(&d[x..y.min(x + 60)])), v => format!(" {g}={}", v.f32()) });
                                 println!("COLLIDER {path} {o}");
@@ -3033,7 +3093,7 @@ fn parse_scene_graph(d: &[u8], parent: glam::Mat4) -> SceneGraph {
                     // T1, and the M4 stopped dead in it at 108 km/h.
                     // EVOVIEW_CHARACTER_WALLS=1: they are walls again.
                     let soft = { let l = path.to_lowercase().replace('\\', "/"); l.contains("/vegetation/low/") || l.contains("/grass/")
-                        || (l.contains("/characters/") && std::env::var_os("EVOVIEW_CHARACTER_WALLS").is_none()) };
+                        || (l.contains("/characters/") && crate::envc::var_os("EVOVIEW_CHARACTER_WALLS").is_none()) };
                     if solid && !soft && path.to_lowercase().ends_with(".mesh") {
                         if let Some((ps, pe)) = pos_b {
                             for i in 0..(pe - ps) / 12 {
@@ -3058,7 +3118,7 @@ fn parse_scene_graph(d: &[u8], parent: glam::Mat4) -> SceneGraph {
                     }
                     let rot = rot_b.unwrap_or((0, 0));
                     let scl = scl_b.unwrap_or((0, 0));
-                    if std::env::var_os("EVOVIEW_NODE_LOG").is_some() {
+                    if crate::envc::var_os("EVOVIEW_NODE_LOG").is_some() {
                         let (s, r, tr) = node.to_scale_rotation_translation();
                         let first = f3_at(&d[ps..pe], 0);
                         println!("NODESET {path} n={n} node t=({:.1},{:.1},{:.1}) s=({:.2},{:.2},{:.2}) r={:.3?} parent_t=({:.1},{:.1},{:.1}) first=({:.1},{:.1},{:.1})",
@@ -3083,7 +3143,7 @@ fn parse_scene_graph(d: &[u8], parent: glam::Mat4) -> SceneGraph {
                         if inst.scale[0] == 0.0 && inst.scale[1] == 0.0 && inst.scale[2] == 0.0 {
                             inst.scale = [1.0; 3];
                         }
-                        if let Ok(f) = std::env::var("EVOVIEW_INST_LOG") {
+                        if let Ok(f) = crate::envc::var("EVOVIEW_INST_LOG") {
                             if path.contains(f.as_str()) {
                                 let (_, r, tr) = node.to_scale_rotation_translation();
                                 println!("INST {path} pos={:.2?} euler={:.2?} scale={:.2?} node_t=({:.1},{:.1},{:.1}) node_r={:.3?}",
@@ -3257,7 +3317,7 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
             || low.contains("ground_grass")
             || low.contains("wild_");
         // EVOVIEW_LOAD_VEG=1: load the big ground-vegetation scenes too
-        (veg && sz > 16_000_000 && std::env::var_os("EVOVIEW_LOAD_VEG").is_none())
+        (veg && sz > 16_000_000 && crate::envc::var_os("EVOVIEW_LOAD_VEG").is_none())
             || ((low.contains("/misc_") || low.contains("do_not_use")) && sz > 4_000_000)
     };
 
@@ -3341,7 +3401,7 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
                 if !session.is_empty() {
                     layout_set = session.iter().map(|c| c.replace('\\', "/").to_lowercase()).collect();
                     println!("layout {lay}: {} container(s) from the server's session", layout_set.len());
-                } else if std::env::var("EVOVIEW_LAYOUT_TABLE").map_or(true, |v| v != "0") {
+                } else if crate::envc::var("EVOVIEW_LAYOUT_TABLE").map_or(true, |v| v != "0") {
                     layout_set = layout_table_containers(vfs, lay);
                     if !layout_set.is_empty() {
                         println!("layout {lay}: {} container(s) from system/track_containers.table", layout_set.len());
@@ -3499,7 +3559,7 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
             Some(l) => l,
             None => continue,
         };
-        let dbg = std::env::var("EVOVIEW_MESH_LOG").is_ok();
+        let dbg = crate::envc::var("EVOVIEW_MESH_LOG").is_ok();
         if lod.positions.is_empty() || lod.indices.is_empty() {
             if dbg { println!("MESHSKIP empty {path}"); }
             continue;
@@ -3526,7 +3586,7 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
         let verts = lod.positions.len() / 12;
         // EVOVIEW_MESH_WHERE: each static mesh's world centre (finding a
         // landmark to aim a comparison camera at)
-        if std::env::var_os("EVOVIEW_MESH_WHERE").is_some() {
+        if crate::envc::var_os("EVOVIEW_MESH_WHERE").is_some() {
             let ps: &[f32] = bytemuck::cast_slice(&lod.positions);
             let (mut lo, mut hi) = (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN));
             for v in ps.chunks_exact(3) {
@@ -3619,7 +3679,7 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
     // cards (cf1_b, 40 vertices) to 24, which is why the far landscape looked
     // empty. The culler decides what is drawn now; this only guards memory
     // (80 bytes an instance). EVOVIEW_INST_BUDGET overrides.
-    let max_inst_total: usize = std::env::var("EVOVIEW_INST_BUDGET").ok()
+    let max_inst_total: usize = crate::envc::var("EVOVIEW_INST_BUDGET").ok()
         .and_then(|v| v.parse().ok()).unwrap_or(1_500_000);
     let already: std::collections::HashSet<String> = meshes
         .iter()
@@ -3651,7 +3711,7 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
         }
         // debugging aid: EVOVIEW_SKIP=substr,substr drops matching instanced
         // meshes, which is how a bad placement gets bisected to one asset
-        if let Ok(f) = std::env::var("EVOVIEW_SKIP") {
+        if let Ok(f) = crate::envc::var("EVOVIEW_SKIP") {
             if f.split(',').any(|t| !t.is_empty() && path.contains(t)) {
                 inst_bad += 1;
                 continue;
@@ -3695,7 +3755,7 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
         let span = mesh_span(&src.positions);
         // EVOVIEW_COLOR_HIST=<substr>: the vertex colour bytes of matching
         // instanced meshes (are the wind masks 0/1 or gradients?)
-        if let Ok(f) = std::env::var("EVOVIEW_COLOR_HIST") {
+        if let Ok(f) = crate::envc::var("EVOVIEW_COLOR_HIST") {
             if path.contains(f.as_str()) && !src.colors.is_empty() {
                 let mut line = format!("COLORHIST {path} verts={verts} bytes={}", src.colors.len());
                 let fl: &[f32] = bytemuck::cast_slice(&src.colors);
@@ -3751,7 +3811,7 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
         // they read as specks. Keep EVERY instance aside for the track
         // renderer, which draws the ones within its fade distance.
         if grass && !world_baked && span < 6.0 && verts <= 4000 && set.len() > 2000
-            && std::env::var("EVOVIEW_NO_CARPET").is_err()
+            && crate::envc::var("EVOVIEW_NO_CARPET").is_err()
         {
             let xforms: Vec<[f32; 16]> = set.iter().map(inst_matrix).collect();
             // every LOD level: MeshLodData f3 = switch distance in METRES
@@ -3772,14 +3832,14 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
                         // wider band draws thousands more tufts twice
                         e.lod_fade[0] = l.dlt;
                     }
-                    if std::env::var("EVOVIEW_LOD_DUMP").is_ok() {
+                    if crate::envc::var("EVOVIEW_LOD_DUMP").is_ok() {
                         eprintln!("CARPET {:<60} level {} at {:.1}±{:.1} dens {:.2}", path, levels.len(), d, l.dlt, dens);
                     }
                     levels.push(e);
                 }
             }
             carpet.push(levels);
-            if std::env::var("EVOVIEW_INST").is_ok() {
+            if crate::envc::var("EVOVIEW_INST").is_ok() {
                 eprintln!("INST {:<62} verts={:<7} span={:<8.1} want={:<7} -> carpet", path, verts, span, set.len());
             }
             continue;
@@ -3792,7 +3852,7 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
             floor_each
         };
         let take = cap.min(remain.max(floor_each.min(cap))).min(set.len());
-        if std::env::var("EVOVIEW_INST").is_ok() {
+        if crate::envc::var("EVOVIEW_INST").is_ok() {
             eprintln!(
                 "INST {:<62} verts={:<7} span={:<8.1} want={:<7} cap={:<6} take={} facing={} {}{}",
                 path, verts, span, set.len(), cap, take, src.facing,
@@ -3824,7 +3884,7 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
         // ditheredLodTransition, metres either side of it) and fades the
         // whole prop out past MeshData lodOut; lod_fade carries both to the
         // culler, which hands the shader a per-instance dither amount.
-        if std::env::var("EVOVIEW_LOD_DUMP").map_or(false, |v| v == "2") {
+        if crate::envc::var("EVOVIEW_LOD_DUMP").map_or(false, |v| v == "2") {
             for (i, (d, l)) in lods.iter().enumerate() {
                 eprintln!("RAWLOD {:<60} #{} in {:.1} v{} cast{} shlod{} proxy{} facing{} mats {:?}", path, i + 1, d, l.positions.len() / 12,
                           l.cast_shadows as u8, l.shadow_lod, l.shadow_proxy as u8, l.facing,
@@ -3858,7 +3918,7 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
                 }
             }
             let lod0 = meshes.len() - 1;
-            if std::env::var("EVOVIEW_LOD_DUMP").is_ok() {
+            if crate::envc::var("EVOVIEW_LOD_DUMP").is_ok() {
                 eprintln!("LODS {:<60} n={:<6} out={:<7.1} dlo={:<5.1} lod0 dens={:.2} sh{}/{} fsl{} | {}", path, xforms.len(), out, dlo,
                           src.density, src.cast_shadows as u8, src.shadow_lod, read_force_shadow_lod(&bytes),
                           levels.iter().map(|(d, l)| {
@@ -3892,7 +3952,7 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
                 // coarsest body - or not at all without castShadows. So a
                 // prop's shadow does not change shape as its LOD switches.
                 // EVOVIEW_SHADOW_LOD=0: each level casts itself.
-                if read_force_shadow_lod(&bytes) && std::env::var("EVOVIEW_SHADOW_LOD").map_or(true, |v| v != "0") {
+                if read_force_shadow_lod(&bytes) && crate::envc::var("EVOVIEW_SHADOW_LOD").map_or(true, |v| v != "0") {
                     let mut raw_mesh: Vec<(usize, usize)> = vec![(0, lod0)];
                     raw_mesh.extend(raw_of.iter().enumerate().map(|(k, &r)| (r, lod0 + 1 + k)));
                     let casts: Vec<(bool, i32)> = std::iter::once((src.cast_shadows, src.shadow_lod))
@@ -3924,7 +3984,7 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
                 // EVOVIEW_LOD_FORCE=k: every prop draws its level k (its
                 // coarsest when it has fewer) at every distance, no fades:
                 // a still per k compares the levels' looks (lodpop audit)
-                if let Some(f) = std::env::var("EVOVIEW_LOD_FORCE").ok().and_then(|v| v.parse::<usize>().ok()) {
+                if let Some(f) = crate::envc::var("EVOVIEW_LOD_FORCE").ok().and_then(|v| v.parse::<usize>().ok()) {
                     let pick = f.min(levels.len());
                     for (j, m) in meshes[lod0..].iter_mut().enumerate() {
                         if m.name.contains("#shadow") {
@@ -4102,7 +4162,7 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
                         if let Some(i) = idx {
                             resolved.insert(slot.to_string(), i);
                             crate::strict::note("TR6", &m.file, format!("{slot} <- {cand}"));
-                            if std::env::var("EVOVIEW_SIBLING_LOG").is_ok() {
+                            if crate::envc::var("EVOVIEW_SIBLING_LOG").is_ok() {
                                 eprintln!("SIBLING {} <- {}", m.file, cand);
                             }
                             return;
@@ -4167,7 +4227,7 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
         push_material(vfs, path, &mut blob, &mut textures, &mut tex_index, &mut materials);
     }
 
-    if std::env::var("EVOVIEW_REF_LOG").is_ok() {
+    if crate::envc::var("EVOVIEW_REF_LOG").is_ok() {
         let mut seen = std::collections::BTreeSet::new();
         for m in meshes.iter() {
             for b in m.batches.iter() {
@@ -4543,7 +4603,7 @@ pub fn load(vfs: &mut Vfs) -> Result<Loaded, String> {
         // the coarser LODs (CAR_LODS), skinned to the same bones by name; a
         // LOD naming a bone LOD0 does not have is left out
         if CAR_LODS.with(|c| c.get())
-            && std::env::var("EVOVIEW_CAR_LOD").map_or(true, |v| v != "0") {
+            && crate::envc::var("EVOVIEW_CAR_LOD").map_or(true, |v| v != "0") {
             // a LOD that keeps over 40% of the last kept one's triangles
             // costs its memory for little (an M4 GT3's body LOD1 is 54% of
             // LOD0): skipped, the finer one draws on to the next
@@ -4727,7 +4787,7 @@ pub fn load(vfs: &mut Vfs) -> Result<Loaded, String> {
             uv1: None,
         });
     }
-    if std::env::var_os("EVOVIEW_PARTS_AUDIT").is_some() {
+    if crate::envc::var_os("EVOVIEW_PARTS_AUDIT").is_some() {
         let hid: Vec<&str> = bone_names.iter().zip(&hidden).filter(|(_, h)| **h)
             .map(|(n, _)| n.as_str()).collect();
         println!("PARTS_AUDIT {}", serde_json::json!({
@@ -4809,7 +4869,7 @@ pub fn load(vfs: &mut Vfs) -> Result<Loaded, String> {
         // Red/Green/Blue_OpacityMap, which material.rs does not read yet - they
         // render as a solid silver disc.
         let blur_name = src_name.to_lowercase().replacen("_rim_", "_rim_blur_", 1);
-        if blur_name != src_name.to_lowercase() && std::env::var("EVOVIEW_RIM_BLUR").map_or(false, |v| v == "1") {
+        if blur_name != src_name.to_lowercase() && crate::envc::var("EVOVIEW_RIM_BLUR").map_or(false, |v| v == "1") {
             if let Some(k) = vfs.find(&blur_name, None) {
                 let bb = vfs.read(&k);
                 if let Some(mut bl) = read_mesh(&bb) {
@@ -5066,7 +5126,7 @@ pub fn load(vfs: &mut Vfs) -> Result<Loaded, String> {
                 i
             } else {
                 let Some(t) = vfs.texture(&found, skip) else { continue };
-                if std::env::var_os("EVOVIEW_TEX_LOG").is_some() {
+                if crate::envc::var_os("EVOVIEW_TEX_LOG").is_some() {
                     println!("car texture {:5}x{:<5} fmt {:2} {} {}", t.width, t.height, t.format, slot, found);
                 }
                 let name = base_of(&found).replace(".texture", "");
@@ -5248,7 +5308,7 @@ pub fn load(vfs: &mut Vfs) -> Result<Loaded, String> {
     let mut animations = merged;
     animations.sort_by(|a, b| a.name.cmp(&b.name));
 
-    if std::env::var_os("EVOVIEW_WHEEL_AUDIT").is_some() {
+    if crate::envc::var_os("EVOVIEW_WHEEL_AUDIT").is_some() {
         wheel_audit(&wheel_src, &meshes, &materials, &textures, &tyre_maps);
     }
     let mut skeleton = Skeleton::build(skeleton_bones);
@@ -5272,7 +5332,7 @@ pub fn load(vfs: &mut Vfs) -> Result<Loaded, String> {
     car.brdf = brdf_lut(vfs);
     car.rain_tex = rain_tex;
     car.rain_streaks = rain_streaks;
-    if let Ok(mode) = std::env::var("EVOVIEW_RENDER_AUDIT") {
+    if let Ok(mode) = crate::envc::var("EVOVIEW_RENDER_AUDIT") {
         render_audit(vfs, &car, &mesh_audit, &unresolved);
         if mode == "exit" {
             std::process::exit(0);
@@ -5589,7 +5649,7 @@ fn read_varint(d: &[u8], mut i: usize) -> Option<(u64, usize)> {
 /// honour that, and fall back to the first only when nothing matches.
 pub(crate) fn pick_visual_preset(vfs: &mut Vfs) -> Option<String> {
     let all = vfs.list("presets", "visualcarpreset");
-    let wanted = std::env::var("EVOVIEW_VISUAL")
+    let wanted = crate::envc::var("EVOVIEW_VISUAL")
         .unwrap_or_default()
         .to_lowercase();
     // Exact match on the file stem: `contains` let "visual_1" pick visual_10.
@@ -5611,7 +5671,7 @@ pub(crate) fn pick_visual_preset(vfs: &mut Vfs) -> Option<String> {
     // A chosen mech preset (EVOVIEW_MECH, or a mod's json) wears its own
     // default trim: the first of its visual_preset_paths (field 8), which is
     // the pairing the game's thumbnails and final states use.
-    let mech = std::env::var("EVOVIEW_MECH").unwrap_or_default().to_lowercase();
+    let mech = crate::envc::var("EVOVIEW_MECH").unwrap_or_default().to_lowercase();
     let mech = mech.trim().trim_end_matches(".mechanicalcarpreset");
     if !mech.is_empty() {
         let mk = vfs.list("presets", "mechanicalcarpreset").into_iter()
@@ -5922,7 +5982,7 @@ fn preset_rim_design(vfs: &mut Vfs) -> Option<String> {
 pub(crate) fn pick_mech_preset(vfs: &mut Vfs) -> Option<String> {
     let all = vfs.list("presets", "mechanicalcarpreset");
     let stem = |k: &str| base_name_lower(k).trim_end_matches(".mechanicalcarpreset").to_string();
-    let wanted = std::env::var("EVOVIEW_MECH").unwrap_or_default().to_lowercase();
+    let wanted = crate::envc::var("EVOVIEW_MECH").unwrap_or_default().to_lowercase();
     let wanted = wanted.trim().trim_end_matches(".mechanicalcarpreset").to_string();
     if !wanted.is_empty() {
         if let Some(hit) = all.iter().find(|k| stem(k) == wanted) {
@@ -6615,7 +6675,7 @@ fn add_contact_decals(
     materials: &mut Vec<MaterialEntry>,
     blob: &mut Vec<u8>,
 ) {
-    if std::env::var("EVOVIEW_NO_CONTACT").is_ok() {
+    if crate::envc::var("EVOVIEW_NO_CONTACT").is_ok() {
         return;
     }
     let Some(a) = vfs.list("", "actor").into_iter().next() else { return };
@@ -6659,7 +6719,7 @@ fn add_contact_decals(
         let Some(t) = read_texture(&hdr, &mips) else { return };
         // ⚠ Format 27 is 4 bpp and was read as BC1, but the shadow masks are
         // single-channel BC4: decoded as BC1 they come out as purple noise.
-        let fmt = if t.format == "bc1" && std::env::var("EVOVIEW_CONTACT_BC1").is_err() {
+        let fmt = if t.format == "bc1" && crate::envc::var("EVOVIEW_CONTACT_BC1").is_err() {
             "bc4".to_string()
         } else {
             t.format.clone()
@@ -6750,7 +6810,7 @@ pub(crate) fn body_paints(vfs: &mut Vfs) -> Vec<String> {
 }
 
 fn apply_paints(vfs: &mut Vfs, materials: &mut [MaterialEntry]) {
-    let wanted = std::env::var("EVOVIEW_PAINT").unwrap_or_default().to_lowercase();
+    let wanted = crate::envc::var("EVOVIEW_PAINT").unwrap_or_default().to_lowercase();
     let chosen = preset_paints(vfs);
     // materials the preset paints channel by channel (apply_preset_paints)
     let by_preset: std::collections::HashSet<String> = preset_material_paints(vfs)
@@ -7171,7 +7231,7 @@ pub fn tex_audit(pkg_path: &Path) {
         // a package's missing payload may sit in the game's loose override
         // root (Vfs::over_loose), as mods with their own textures ship it
         if raw.is_empty() && pkg.is_some() {
-            if let Some(home) = std::env::var_os("USERPROFILE") {
+            if let Some(home) = crate::envc::var_os("USERPROFILE") {
                 let p = Path::new(&home).join("Saved Games").join("ACE").join("mods").join(&mk);
                 raw = std::fs::read(p).unwrap_or_default();
             }
@@ -7303,7 +7363,7 @@ pub fn mat_audit(path: &Path, known_track: &[&str], known_car: &[&str]) {
     };
     // EVOVIEW_MATAUDIT_REFS=<text>: every non-texture file naming it (who
     // uses a material)
-    if let (Ok(want), Some(pk)) = (std::env::var("EVOVIEW_MATAUDIT_REFS"), pkg.as_ref()) {
+    if let (Ok(want), Some(pk)) = (crate::envc::var("EVOVIEW_MATAUDIT_REFS"), pkg.as_ref()) {
         let w = want.to_lowercase().into_bytes();
         let mut n = 0;
         for k in pk.by_path.keys() {
@@ -7329,7 +7389,7 @@ pub fn mat_audit(path: &Path, known_track: &[&str], known_car: &[&str]) {
         let sh = read_material(&d, k).and_then(|m| m.shader).map(|s| s.to_lowercase())
             .unwrap_or_else(|| "(inherits)".to_string());
         // EVOVIEW_MATAUDIT_LIST=<shader>: every material on it
-        if std::env::var("EVOVIEW_MATAUDIT_LIST").map_or(false, |v| v.eq_ignore_ascii_case(&sh)) {
+        if crate::envc::var("EVOVIEW_MATAUDIT_LIST").map_or(false, |v| v.eq_ignore_ascii_case(&sh)) {
             println!("MATLIST {sh} {k}");
         }
         let e = counts.entry((tree.to_string(), sh)).or_insert((0, k.clone()));

@@ -1105,7 +1105,7 @@ fn particle_material(vfs: &mut Vfs, mesh_ref: &str, blob: &mut Vec<u8>,
         && p("Refraction_Transmission", 0.0) <= 0.0;
     pm.refracting = p("Refraction_Transmission", 0.0) > 0.0;
     let fl = mref.to_lowercase();
-    if std::env::var_os("EVOVIEW_FX_PARAMS").is_some() && (fl.contains("spray") || fl.contains("splash")) {
+    if crate::envc::var_os("EVOVIEW_FX_PARAMS").is_some() && (fl.contains("spray") || fl.contains("splash")) {
         let mut v: Vec<_> = params.iter().collect();
         v.sort_by(|a, b| a.0.cmp(b.0));
         eprintln!("FXPARAMS {mref} {v:?} colors {colors:?} slots {slots:?}");
@@ -1259,7 +1259,7 @@ pub fn load(vfs: &mut Vfs, wheel_pos: &HashMap<String, [f32; 3]>, blob: &mut Vec
                 if def.material.color_tex.is_none() && def.material.opacity_tex.is_none() {
                     fx.problems.push(format!("particle texture missing: {p}"));
                 }
-                if std::env::var_os("EVOVIEW_FX_DEFS").is_some() {
+                if crate::envc::var_os("EVOVIEW_FX_DEFS").is_some() {
                     println!("FXDEF t{t} {p} rate {} cap {} life {:?} speed {:?} scale {:?} alpha {:?} burst {} grav {:?} pps {} additive {} tex {}",
                              def.spawn_rate, def.capacity, def.lifetime, def.speed, def.scale, def.alpha, def.burst, def.gravity,
                              def.pps_strength.first().map_or(0, |c| c.0.len()), def.material.additive, def.material.color_tex.is_some());
@@ -1283,7 +1283,7 @@ pub fn load(vfs: &mut Vfs, wheel_pos: &HashMap<String, [f32; 3]>, blob: &mut Vec
                 None => fx.problems.push(format!("emitter {} on unknown wheel {}", e.name, e.bone)),
             }
         }
-        if std::env::var_os("EVOVIEW_FX_DEFS").is_some() {
+        if crate::envc::var_os("EVOVIEW_FX_DEFS").is_some() {
             println!("FXSLOT {} kind {} bone {} pos {:?} rot {:?} defs {}", e.name, e.kind, e.bone, pos, e.rot, defs.len());
         }
         fx.emitters.push(EmitterSlot { name: e.name.clone(), kind: e.kind, pos, rot: e.rot, defs });

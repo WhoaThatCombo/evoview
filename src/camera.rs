@@ -128,7 +128,7 @@ impl Follow {
             }
             // EVOVIEW_SIDE_EYE=r,u,f,tr,tu,tf: eye and target in car
             // right/up/forward metres from `pos` (wheel close-ups in captures)
-            Follow::Side => match std::env::var("EVOVIEW_SIDE_EYE").ok()
+            Follow::Side => match crate::envc::var("EVOVIEW_SIDE_EYE").ok()
                 .map(|v| v.split(',').filter_map(|x| x.trim().parse::<f32>().ok()).collect::<Vec<_>>())
                 .filter(|v| v.len() == 6)
             {

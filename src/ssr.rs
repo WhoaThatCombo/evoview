@@ -37,7 +37,7 @@ static ON: AtomicBool = AtomicBool::new(false);
 
 /// EVOVIEW_SSR=0 turns it off.
 pub fn wanted() -> bool {
-    std::env::var("EVOVIEW_SSR").map_or(true, |v| v != "0")
+    crate::envc::var("EVOVIEW_SSR").map_or(true, |v| v != "0")
 }
 
 /// Whether the main pass carries the two SSR targets (set once at startup,
@@ -96,7 +96,7 @@ fn targets_with(env: Option<Option<wgpu::BlendState>>) -> Vec<Option<wgpu::Color
 }
 
 fn env_f32(k: &str, d: f32) -> f32 {
-    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+    crate::envc::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
 }
 
 #[repr(C)]
@@ -155,7 +155,7 @@ impl Ssr {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ssr"),
             // EVOVIEW_SSR_SHADER=<path>: the WGSL from disk, for tuning without a rebuild
-            source: wgpu::ShaderSource::Wgsl(std::env::var("EVOVIEW_SSR_SHADER").ok()
+            source: wgpu::ShaderSource::Wgsl(crate::envc::var("EVOVIEW_SSR_SHADER").ok()
                 .and_then(|p| std::fs::read_to_string(p).ok())
                 .unwrap_or_else(|| include_str!("ssr.wgsl").to_string()).into()),
         });

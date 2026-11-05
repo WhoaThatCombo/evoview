@@ -161,7 +161,7 @@ pub fn by_name(n: &str) -> Option<Preset> {
         // ground - Laguna's sand read as snow). EVOVIEW_VIVID="sat,contrast,
         // path_to_white" tunes it
         "vivid" => {
-            let f: Vec<f32> = std::env::var("EVOVIEW_VIVID").unwrap_or_default().split(',').filter_map(|v| v.trim().parse().ok()).collect();
+            let f: Vec<f32> = crate::envc::var("EVOVIEW_VIVID").unwrap_or_default().split(',').filter_map(|v| v.trim().parse().ok()).collect();
             let g = |i: usize, d: f32| f.get(i).copied().unwrap_or(d);
             Some(Preset {
                 contrast: g(1, 1.15),
@@ -245,7 +245,7 @@ fn wb_matrix(temp: f32, tint: f32) -> Option<[[f32; 3]; 3]> {
     if temp == 0.0 && tint == 0.0 {
         return None;
     }
-    let sg: f32 = std::env::var("EVOVIEW_WB_SIGN").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+    let sg: f32 = crate::envc::var("EVOVIEW_WB_SIGN").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
     let (temp, tint) = (temp * sg, tint * sg);
     let (sx, sy) = daylight_xy(6500.0 + temp * 100.0);
     let src = mat3(&BRADFORD, xy_to_xyz(sx, sy + tint * 0.001));
@@ -416,12 +416,12 @@ pub fn bake_pair(studio: &Preset, outdoor: &Preset) -> Vec<u8> {
 /// Presets in use, honouring EVOVIEW_GRADE_STUDIO / EVOVIEW_GRADE_TRACK.
 pub fn presets() -> (Preset, Preset) {
     let pick = |var: &str, dflt: Preset| {
-        std::env::var(var).ok().and_then(|v| by_name(&v)).unwrap_or(dflt)
+        crate::envc::var(var).ok().and_then(|v| by_name(&v)).unwrap_or(dflt)
     };
     let mut s = pick("EVOVIEW_GRADE_STUDIO", STUDIO);
     // EVOVIEW_TONE=contrast,mid_start,mid_len,black overrides the studio
     // tonemapper (tuning)
-    if let Ok(v) = std::env::var("EVOVIEW_TONE") {
+    if let Ok(v) = crate::envc::var("EVOVIEW_TONE") {
         let f: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
         if f.len() == 4 {
             s.contrast = f[0];
@@ -431,7 +431,7 @@ pub fn presets() -> (Preset, Preset) {
         }
     }
     // EVOVIEW_WB=temp,tint overrides the studio white balance (tuning)
-    if let Ok(v) = std::env::var("EVOVIEW_WB") {
+    if let Ok(v) = crate::envc::var("EVOVIEW_WB") {
         let f: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
         if f.len() == 2 {
             s.wb_temp = f[0];
@@ -487,13 +487,13 @@ pub fn upload(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
 /// CALIBRATED against the game's own renders instead (car thumbnails for the
 /// studio). EVOVIEW_EV adds stops on top, for comparisons.
 pub fn exposure() -> (f32, f32) {
-    let ev: f32 = std::env::var("EVOVIEW_EV").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let ev: f32 = crate::envc::var("EVOVIEW_EV").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
     let k = ev.exp2();
     // outdoors only: half a stop down by default (EVOVIEW_EV_TRACK). With
     // the lower ambient and the vivid grade it brings sunlit ground back
     // from white (Laguna's sand read as snow). A whole stop (with clarity
     // and shafts on) read as overcast and gloomy next to the game.
-    let t: f32 = std::env::var("EVOVIEW_EV_TRACK").ok().and_then(|v| v.parse().ok()).unwrap_or(-0.5);
+    let t: f32 = crate::envc::var("EVOVIEW_EV_TRACK").ok().and_then(|v| v.parse().ok()).unwrap_or(-0.5);
     (STUDIO_EXPOSURE * k, OUTDOOR_EXPOSURE * k * t.exp2())
 }
 
@@ -506,7 +506,7 @@ pub const OUTDOOR_EXPOSURE: f32 = 1.0;
 /// thumbnail studio: the game lights its thumbnails with sky and sun only.
 pub fn rig() -> f32 {
     let dflt = if studio() == Studio::Thumbnail { 0.0 } else { RIG };
-    std::env::var("EVOVIEW_RIG").ok().and_then(|v| v.parse().ok()).unwrap_or(dflt)
+    crate::envc::var("EVOVIEW_RIG").ok().and_then(|v| v.parse().ok()).unwrap_or(dflt)
 }
 
 /// Which environment lights a car.
@@ -521,7 +521,7 @@ pub enum Studio {
 /// EVOVIEW_STUDIO=paint picks the paint-studio cube; default is the thumbnail.
 pub fn studio() -> Studio {
     static S: std::sync::OnceLock<Studio> = std::sync::OnceLock::new();
-    *S.get_or_init(|| match std::env::var("EVOVIEW_STUDIO").as_deref() {
+    *S.get_or_init(|| match crate::envc::var("EVOVIEW_STUDIO").as_deref() {
         Ok("paint") | Ok("cube") => Studio::Paint,
         _ => Studio::Thumbnail,
     })
@@ -537,7 +537,7 @@ pub fn studio_clear() -> [f64; 3] {
             // exposure-invariant: TH_BACKDROP is already the exposed value
             let e = 1.0;
             let mut b = TH_BACKDROP;
-            if let Ok(v) = std::env::var("EVOVIEW_BACKDROP") {
+            if let Ok(v) = crate::envc::var("EVOVIEW_BACKDROP") {
                 let f: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
                 if f.len() == 3 {
                     b = [f[0], f[1], f[2]];
@@ -570,7 +570,7 @@ pub const RIG: f32 = 1.0;
 
 /// EVOVIEW_TONEMAP=aces keeps the old ACES curve (for before/after shots).
 pub fn use_lut() -> bool {
-    !matches!(std::env::var("EVOVIEW_TONEMAP").as_deref(), Ok("aces"))
+    !matches!(crate::envc::var("EVOVIEW_TONEMAP").as_deref(), Ok("aces"))
 }
 
 #[cfg(test)]

@@ -263,7 +263,7 @@ impl TrackAnim {
     /// (plus a little per mesh). EVOVIEW_TRACK_ANIM_SYNC: no phase shift
     /// (debugging a frame).
     fn times(&self, t: f32) -> impl Iterator<Item = (usize, u32, f32)> + '_ {
-        let sync = std::env::var_os("EVOVIEW_TRACK_ANIM_SYNC").is_some();
+        let sync = crate::envc::var_os("EVOVIEW_TRACK_ANIM_SYNC").is_some();
         self.meshes.iter().enumerate().flat_map(move |(mi, m)| {
             let a = &self.clips[m.clip];
             let len = (a.frames as f32 / a.fps.max(1.0)).max(0.05);
@@ -603,7 +603,7 @@ pub fn load_lights(vfs: &mut Vfs) -> Vec<TrackLight> {
     for key in keys {
         let d = vfs.read(&key);
         let cont = placed.get(&norm(&key)).copied().unwrap_or(glam::Mat4::IDENTITY);
-        if std::env::var_os("EVOVIEW_LIGHT_LOG").is_some() && cont != glam::Mat4::IDENTITY {
+        if crate::envc::var_os("EVOVIEW_LIGHT_LOG").is_some() && cont != glam::Mat4::IDENTITY {
             println!("LIGHTCONT {key} at {:?}", cont.w_axis.truncate());
         }
         fields(&d, 0, d.len(), |f, v| {
@@ -671,7 +671,7 @@ pub fn load_lights(vfs: &mut Vfs) -> Vec<TrackLight> {
                     let f3 = |s: usize, i: usize| -> [f32; 3] {
                         std::array::from_fn(|k| f32::from_le_bytes(d[s + i * 12 + k * 4..s + i * 12 + k * 4 + 4].try_into().unwrap()))
                     };
-                    if std::env::var_os("EVOVIEW_LIGHT_LOG").is_some() {
+                    if crate::envc::var_os("EVOVIEW_LIGHT_LOG").is_some() {
                         println!("LIGHTSET {} lamps node pos {pos:?} rot {rot:?}", (pe - ps) / 12);
                     }
                     for i in 0..(pe - ps) / 12 {
@@ -939,7 +939,7 @@ pub const PANO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 impl SkyPano {
     fn new(device: &wgpu::Device) -> SkyPano {
         // EVOVIEW_SKY_MODEL=old: the gradient sky, clouds marched per pixel
-        let on = std::env::var("EVOVIEW_SKY_MODEL").map_or(true, |v| v != "old");
+        let on = crate::envc::var("EVOVIEW_SKY_MODEL").map_or(true, |v| v != "old");
         let (w, h, sky_w, sky_h) = if on {
             (env_f32("EVOVIEW_PANO_W", 4096.0) as u32, env_f32("EVOVIEW_PANO_H", 1024.0) as u32,
              env_f32("EVOVIEW_ATM_W", 512.0) as u32, env_f32("EVOVIEW_ATM_H", 256.0) as u32)
@@ -1078,7 +1078,7 @@ pub struct TrackMatUniform {
 /// How many of the scene's materials (from index 0) the track pipeline
 /// shades - 0 when it is disabled (EVOVIEW_OLD_TRACK) or there is no track.
 pub fn owned_material_count(car: &Car) -> usize {
-    if std::env::var("EVOVIEW_OLD_TRACK").is_ok() {
+    if crate::envc::var("EVOVIEW_OLD_TRACK").is_ok() {
         return 0;
     }
     car.track_env.as_ref().map_or(0, |e| e.n_materials)
@@ -1149,7 +1149,7 @@ fn v2(m: &MaterialEntry, name: &str, d: [f32; 2]) -> [f32; 2] {
 /// Whether single-sided track materials drop the face the game culls
 /// (EVOVIEW_TRACK_CULL=0: everything two-sided, as before).
 fn track_cull() -> bool {
-    std::env::var("EVOVIEW_TRACK_CULL").map_or(true, |v| v != "0")
+    crate::envc::var("EVOVIEW_TRACK_CULL").map_or(true, |v| v != "0")
 }
 
 /// Track shader templates evoview models (others: a generic surface; strict TR25).
@@ -1428,7 +1428,7 @@ impl TrackMatUniform {
                 | (((p("Splatmap_DisableRestrictBlendToTwoLayers", 0.0) > 0.5) as u32) << 1)
                 | (((p("doNotInvertNormalOnBackside", 0.0) > 0.5) as u32) << 2)
                 // bit 3 MaterialData.windable (vegetation wind, track.wgsl vs_main)
-                | (((p("__windable", 0.0) > 0.5 && std::env::var_os("EVOVIEW_NO_WIND").is_none()) as u32) << 3)
+                | (((p("__windable", 0.0) > 0.5 && crate::envc::var_os("EVOVIEW_NO_WIND").is_none()) as u32) << 3)
                 // bits 4 / 5: MaterialData.cullMode Front / Back - the face
                 // the game culls is discarded (track.wgsl shade). Opaque
                 // materials only: our cutouts include foliage chosen by file
@@ -1506,7 +1506,7 @@ impl TrackMatUniform {
             u.flags = [0.0, 0.0, if s.opacity.is_some() { 1.0 } else { 0.0 }, if grass { 1.0 } else { 0.0 }];
             crate::strict::note("TR60", &m.file, "DynamicTrack road: lifted colour recipe");
         }
-        if let Ok(f) = std::env::var("EVOVIEW_MAT_PARAMS") {
+        if let Ok(f) = crate::envc::var("EVOVIEW_MAT_PARAMS") {
             if m.file.contains(f.as_str()) {
                 let mut ks: Vec<String> = m.params.iter().map(|(k, v)| format!("{k}={v}")).collect();
                 ks.extend(m.colors.iter().map(|(k, v)| format!("{k}={v:?}")));
@@ -1517,7 +1517,7 @@ impl TrackMatUniform {
         }
         // EVOVIEW_TRACKMAT_HL=a,b: those track materials (file name contains)
         // drawn flat magenta, to find which one owns a pixel
-        if let Ok(hl) = std::env::var("EVOVIEW_TRACKMAT_HL") {
+        if let Ok(hl) = crate::envc::var("EVOVIEW_TRACKMAT_HL") {
             if hl.split(',').any(|k| !k.is_empty() && m.file.contains(k)) {
                 u.base = [1.0, 0.0, 1.0, u.base[3]];
                 u.base_uv[3] = 0.0;
@@ -1875,7 +1875,7 @@ impl CarpetSet {
 /// game's preset / fov term), or 1 with EVOVIEW_CARPET_SCALE=0 (the
 /// carpet's raw distances, as before).
 fn carpet_scale(view_proj: glam::Mat4) -> f32 {
-    if std::env::var("EVOVIEW_CARPET_SCALE").map_or(false, |v| v == "0") {
+    if crate::envc::var("EVOVIEW_CARPET_SCALE").map_or(false, |v| v == "0") {
         return 1.0;
     }
     let fy = view_proj.row(1).truncate().length().max(1e-6);
@@ -1883,7 +1883,7 @@ fn carpet_scale(view_proj: glam::Mat4) -> f32 {
 }
 
 fn env_f32(name: &str, d: f32) -> f32 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+    crate::envc::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
 }
 
 impl TrackRender {
@@ -1901,7 +1901,7 @@ impl TrackRender {
         materials: &crate::material::Materials,
         clouds: &crate::clouds::CloudGpu,
     ) -> Option<Self> {
-        if std::env::var("EVOVIEW_OLD_TRACK").is_ok() {
+        if crate::envc::var("EVOVIEW_OLD_TRACK").is_ok() {
             return None;
         }
         // The track loader's materials come first (a replay scene merges the
@@ -2011,7 +2011,7 @@ impl TrackRender {
         let anim = car.track_env.as_ref().and_then(|e| e.anim.clone());
         let bone_buf = {
             // EVOVIEW_TRACK_ANIM_T: the time a still shot is posed at
-            let t0 = std::env::var("EVOVIEW_TRACK_ANIM_T").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+            let t0 = crate::envc::var("EVOVIEW_TRACK_ANIM_T").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
             let p = anim.as_ref().map_or(vec![crate::load::IDENTITY], |a| a.pose(t0));
             wgpu::util::DeviceExt::create_buffer_init(device, &wgpu::util::BufferInitDescriptor {
                 label: Some("track bones"),
@@ -2464,7 +2464,7 @@ impl TrackRender {
                 && m.params.get("HasSubsurfaceColorMap").map_or(false, |v| *v > 0.5) {
                 slots.blue = m.slot(&["SubsurfaceColorMap"]);
             }
-            if std::env::var("EVOVIEW_MAT_PARAMS").map_or(false, |f| m.file.contains(f.as_str())) {
+            if crate::envc::var("EVOVIEW_MAT_PARAMS").map_or(false, |f| m.file.contains(f.as_str())) {
                 let nm = |s: Option<usize>| s.and_then(|i| car.textures.get(i)).map_or("-".to_string(), |t| t.name.clone());
                 eprintln!("MATSLOTS {} base={} base_n={} base_r={} splat={} red={} red_n={} green={} green_n={} blue={} blue_n={} detail={} opacity={}",
                           m.file, nm(slots.base), nm(slots.base_n), nm(slots.base_r), nm(slots.splat), nm(slots.red), nm(slots.red_n),
@@ -2503,7 +2503,7 @@ impl TrackRender {
                 get(m.slot(&[&format!("{l}_DetailMaskMap")]), false)
             } else { None };
             let (red_m, green_m, blue_m) = (dmask("Red"), dmask("Green"), dmask("Blue"));
-            u.dmask[0] = if use_masks && std::env::var("EVOVIEW_DETAIL_MASKS").map_or(true, |v| v != "0") { 1.0 } else { 0.0 };
+            u.dmask[0] = if use_masks && crate::envc::var("EVOVIEW_DETAIL_MASKS").map_or(true, |v| v != "0") { 1.0 } else { 0.0 };
             u.ao = [ao_k, if ao_view.is_some() { ao_mode } else { 0.0 }, u.ao[2], u.ao[3]];
             // textures; a missing map clears its flag so the shader never
             // samples a placeholder as if it were data
@@ -2593,7 +2593,7 @@ impl TrackRender {
                 layout: &mat_bgl,
                 entries: &entries,
             });
-            if std::env::var("EVOVIEW_TRACKMAT_LOG").is_ok() {
+            if crate::envc::var("EVOVIEW_TRACKMAT_LOG").is_ok() {
                 eprintln!(
                     "TRACKMAT {:<40} kind={} splat={} R={} G={} B={} base={} grass={} cut={}/{}/{}/{} blend={} shader={}",
                     m.file, u.base[3], u.splat[0], u.red[3], u.green[3], u.blue[3],
@@ -2613,7 +2613,7 @@ impl TrackRender {
             // tuning without a rebuild (like EVOVIEW_SHADER for cars)
             source: wgpu::ShaderSource::Wgsl(
                 {
-                    let src = std::env::var("EVOVIEW_TRACK_SHADER")
+                    let src = crate::envc::var("EVOVIEW_TRACK_SHADER")
                         .ok()
                         .and_then(|p| std::fs::read_to_string(p).ok())
                         .map(|t| crate::clouds::track_source(&t))
@@ -3042,12 +3042,12 @@ impl TrackRender {
         // The solar position from the track's latitude is only used when
         // EVOVIEW_SUN_GEO is set (and then shadows are wrong until the shadow
         // pass takes its direction from here).
-        let (az, el) = match std::env::var("EVOVIEW_SUN").ok().and_then(|v| {
+        let (az, el) = match crate::envc::var("EVOVIEW_SUN").ok().and_then(|v| {
             let p: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
             (p.len() == 2).then(|| (p[0], p[1]))
         }) {
             Some(ae) => ae,
-            None if std::env::var("EVOVIEW_SUN_GEO").is_ok() => {
+            None if crate::envc::var("EVOVIEW_SUN_GEO").is_ok() => {
                 let lat = env.filter(|e| e.has_geo).map(|e| e.lat).unwrap_or(45.0);
                 sun_direction(lat, env_f32("EVOVIEW_SUN_DAY", 160.0) as f64,
                               env_f32("EVOVIEW_SUN_HOUR", 15.5) as f64)
@@ -3118,7 +3118,7 @@ impl TrackRender {
             carpet_reach: carpet.iter().map(|c| c.reach).fold(0.0f32, f32::max).max(40.0),
             carpet,
             a2c: samples > 1,
-            facing: std::env::var("EVOVIEW_TRACK_FACING").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0),
+            facing: crate::envc::var("EVOVIEW_TRACK_FACING").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0),
             lamp_rect,
             lamp_info,
             shadow_cut,
@@ -3183,7 +3183,7 @@ impl TrackRender {
         count: &dyn Fn(usize, u32) -> u32,
     ) {
         static ON: std::sync::OnceLock<(bool, f32)> = std::sync::OnceLock::new();
-        let (on, wind_m) = *ON.get_or_init(|| (std::env::var("EVOVIEW_MOTION_TRACK").map_or(true, |v| v != "0"),
+        let (on, wind_m) = *ON.get_or_init(|| (crate::envc::var("EVOVIEW_MOTION_TRACK").map_or(true, |v| v != "0"),
                                                env_f32("EVOVIEW_MOTION_WIND", 0.0)));
         let wind = wind_m > 0.0;
         if !on {
@@ -3400,7 +3400,7 @@ impl TrackRender {
             cmap: {
                 let t = CMAP_SPAN / CMAP_DIM as f32;
                 let h = CMAP_SPAN * 0.5;
-                let on = std::env::var("EVOVIEW_CLOUD_MAP").map_or(true, |v| v != "0");
+                let on = crate::envc::var("EVOVIEW_CLOUD_MAP").map_or(true, |v| v != "0");
                 [(eye.x / t).round() * t - h, (eye.z / t).round() * t - h, CMAP_SPAN, if on { 1.0 } else { 0.0 }]
             },
             // w: the dry-line map is live
@@ -3591,7 +3591,7 @@ impl TrackRender {
             (&self.atm_pipe, &pn.sky_view, &pn.sky, &pn.sky_hist_tex, pn.sky_w, pn.sky_h, wgpu::LoadOp::Clear(wgpu::Color::BLACK)),
             (&self.pano_pipe, &pn.cloud_view, &pn.cloud, &pn.cloud_hist_tex, pn.w, pn.h, wgpu::LoadOp::Load),
         ];
-        for (pipe, view, a, b, w, h, load) in passes {
+        for (k, (pipe, view, a, b, w, h, load)) in passes.into_iter().enumerate() {
             {
                 let mut p = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("sky pano"),
@@ -3606,8 +3606,10 @@ impl TrackRender {
                 p.set_bind_group(0, &self.pano_bg, &[]);
                 p.draw(0..3, 0..1);
             }
+            crate::bench::mark(enc, ["sky atm", "sky clouds"][k]);
             let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
             enc.copy_texture_to_texture(a.as_image_copy(), b.as_image_copy(), size);
+            crate::bench::mark(enc, ["sky atm copy", "sky clouds copy"][k]);
         }
     }
 

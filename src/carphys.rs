@@ -534,7 +534,7 @@ pub struct Assists {
 impl Assists {
     pub fn read() -> Assists {
         let mut a = Assists::default();
-        if let Some(home) = std::env::var_os("USERPROFILE") {
+        if let Some(home) = crate::envc::var_os("USERPROFILE") {
             let dir = std::path::Path::new(&home).join("Saved Games").join("ACE").join("AssistSettings");
             let preset = |d: &[u8], s: usize, e: usize, a: &mut Assists| fields(d, s, e, |f, v| match (f, v) {
                 (1, Val::Varint(x)) => a.gear = x > 0,
@@ -553,14 +553,14 @@ impl Assists {
                 preset(&d, 0, d.len(), &mut a);
             }
         }
-        let on = |k: &str| std::env::var(k).ok().map(|v| v != "0");
+        let on = |k: &str| crate::envc::var(k).ok().map(|v| v != "0");
         if let Some(x) = on("EVOVIEW_AUTO_SHIFT") {
             a.gear = x;
         }
         if let Some(x) = on("EVOVIEW_AUTO_BLIP") {
             a.blip = x;
         }
-        match std::env::var("EVOVIEW_AUTO_CLUTCH").as_deref() {
+        match crate::envc::var("EVOVIEW_AUTO_CLUTCH").as_deref() {
             Ok("0") => (a.clutch_changes, a.clutch_start) = (false, false),
             Ok("1") => (a.clutch_changes, a.clutch_start) = (true, true),
             Ok("start") => (a.clutch_changes, a.clutch_start) = (false, true),
@@ -574,12 +574,12 @@ impl Assists {
 /// EVOVIEW_TYRES=wet / dry decides; otherwise rain (EVOVIEW_RAIN) of 0.3 or
 /// more. (The rain key F5 changes the sky, not the car already loaded.)
 pub fn wants_wet() -> bool {
-    match std::env::var("EVOVIEW_TYRES").as_deref() {
+    match crate::envc::var("EVOVIEW_TYRES").as_deref() {
         Ok("wet") => return true,
         Ok("dry") => return false,
         _ => {}
     }
-    std::env::var("EVOVIEW_RAIN").ok().and_then(|v| v.parse::<f32>().ok()).is_some_and(|r| r >= 0.3)
+    crate::envc::var("EVOVIEW_RAIN").ok().and_then(|v| v.parse::<f32>().ok()).is_some_and(|r| r >= 0.3)
 }
 
 /// The setup the car loads with: in the wet CarData f191 wet_setup (else a
@@ -913,9 +913,9 @@ fn apply_setup(vfs: &mut Vfs, p: &mut Physics, s: &Setup) {
     if let Some(v) = ok(s.diff[3], 0.0, 5000.0, "diff preload") {
         p.diff.preload = v;
     }
-    let lut_on = std::env::var("EVOVIEW_DAMPER_LUT").map_or(true, |v| v != "0");
-    let static_camber = std::env::var("EVOVIEW_SETUP_CAMBER").is_ok_and(|v| v == "static");
-    let collars = std::env::var("EVOVIEW_SETUP_COLLAR").map_or(true, |v| v != "0");
+    let lut_on = crate::envc::var("EVOVIEW_DAMPER_LUT").map_or(true, |v| v != "0");
+    let static_camber = crate::envc::var("EVOVIEW_SETUP_CAMBER").is_ok_and(|v| v == "static");
+    let collars = crate::envc::var("EVOVIEW_SETUP_COLLAR").map_or(true, |v| v != "0");
     // per axle from its left wheel: FL (0) and RL (2)
     for (ax, i) in [(0usize, 0usize), (1, 2)] {
         if let Some(u) = s.susp.get(i) {
@@ -1026,10 +1026,10 @@ fn apply_stock_setup(vfs: &mut Vfs, p: &mut Physics) -> Option<Setup> {
 
 /// Where the game keeps the player's setups (EVOVIEW_SETUPS_DIR overrides).
 pub fn setups_dir() -> Option<std::path::PathBuf> {
-    if let Some(d) = std::env::var_os("EVOVIEW_SETUPS_DIR") {
+    if let Some(d) = crate::envc::var_os("EVOVIEW_SETUPS_DIR") {
         return Some(d.into());
     }
-    let home = std::env::var_os("USERPROFILE")?;
+    let home = crate::envc::var_os("USERPROFILE")?;
     Some(std::path::Path::new(&home).join("Saved Games").join("ACE").join("Car Setups"))
 }
 
@@ -1103,7 +1103,7 @@ fn car_id_of(source: &str) -> Option<String> {
 /// tail ("lagua", "laguna seca/lagua", "ferrari 296 gt3/laguna seca/lagua").
 /// Err says why it was not used (the car then runs its stock setup).
 fn user_setup(car: Option<&str>, screen: &str) -> Option<Result<(String, Vec<u8>, Setup), String>> {
-    let want = std::env::var("EVOVIEW_SETUP").ok().filter(|v| !v.trim().is_empty())?;
+    let want = crate::envc::var("EVOVIEW_SETUP").ok().filter(|v| !v.trim().is_empty())?;
     let path = if std::path::Path::new(&want).is_file() {
         std::path::PathBuf::from(&want)
     } else {
@@ -1150,7 +1150,7 @@ fn user_setup(car: Option<&str>, screen: &str) -> Option<Result<(String, Vec<u8>
         (_, None) => true,
         (sc, Some(c)) => car_fits(sc, c),
     };
-    if !fits && std::env::var_os("EVOVIEW_SETUP_FORCE").is_none() {
+    if !fits && crate::envc::var_os("EVOVIEW_SETUP_FORCE").is_none() {
         return Some(Err(format!("{shown} was saved for {} ({}), not {} - EVOVIEW_SETUP_FORCE=1 applies it anyway",
                                 if s.car().is_empty() { "?" } else { s.car() }, folder.unwrap_or_default(),
                                 car.unwrap_or(screen))));
@@ -1202,7 +1202,7 @@ fn first_time(key: String) -> bool {
 
 /// The before / after table: the changed rows (EVOVIEW_SETUP_TABLE=1: all).
 fn print_setup_change(before: &[(&'static str, String)], after: &[(&'static str, String)]) {
-    let all = std::env::var_os("EVOVIEW_SETUP_TABLE").is_some();
+    let all = crate::envc::var_os("EVOVIEW_SETUP_TABLE").is_some();
     let mut n = 0;
     for ((name, b), (_, a)) in before.iter().zip(after) {
         if a != b || all {
@@ -1643,7 +1643,7 @@ impl Physics {
         // the player's setup (EVOVIEW_SETUP): checked against this car now,
         // applied over the stock setup below
         let car_id = car_id_of(&key);
-        let user = if std::env::var_os("EVOVIEW_NO_SETUP").is_none() {
+        let user = if crate::envc::var_os("EVOVIEW_NO_SETUP").is_none() {
             match user_setup(car_id.as_deref(), &p.screen_name) {
                 Some(Ok(u)) => Some(u),
                 Some(Err(e)) => {
@@ -1661,7 +1661,7 @@ impl Physics {
         };
         // the tyres the setup fits (the wet setup's in the wet; the
         // player's compound when theirs is loaded)
-        if std::env::var_os("EVOVIEW_NO_SETUP").is_none() {
+        if crate::envc::var_os("EVOVIEW_NO_SETUP").is_none() {
             let from = match &user {
                 Some((k, sd, _)) => Some((k.clone(), sd.clone())),
                 None => chosen_setup(vfs, &d).map(|k| { let sd = vfs.read(&k); (k, sd) }),
@@ -1676,7 +1676,7 @@ impl Physics {
         // EVOVIEW_COMPOUND=<part of a name>: one of the car's compatible
         // compounds instead (the stock MX-5 NA setup fits ECO; a time
         // attack lap is on SUPERCAR)
-        if let Ok(want) = std::env::var("EVOVIEW_COMPOUND") {
+        if let Ok(want) = crate::envc::var("EVOVIEW_COMPOUND") {
             let want = want.to_ascii_lowercase();
             if let Some((_, t)) = compatible_tyres(vfs, &key).into_iter().find(|(_, t)| t[0].to_ascii_lowercase().contains(&want)) {
                 p.notes.push(format!("tyres from EVOVIEW_COMPOUND: {} / {}", t[0], t[1]));
@@ -1702,7 +1702,7 @@ impl Physics {
                 p.tyres[ax] = Some(m);
             }
             p.thermal[ax] = crate::tyretherm::Data::read(&td, &mut |c| read_curve_path(vfs, c));
-            if std::env::var_os("EVOVIEW_TYRE_LOG").is_some() {
+            if crate::envc::var_os("EVOVIEW_TYRE_LOG").is_some() {
                 if let Some(d) = &p.thermal[ax] {
                     println!("TYRE RR axle {ax}: rr {:?} pressure gain {} ideal {} psi spring gain {} curve {:?} limit-angle gain {}", d.rr, d.rr_p_gain, d.ideal_p, d.spring_gain, d.spring_curve, d.limit_gain);
                 }
@@ -1722,7 +1722,7 @@ impl Physics {
                 }
             }
         }
-        if std::env::var_os("EVOVIEW_NO_SETUP").is_none() {
+        if crate::envc::var_os("EVOVIEW_NO_SETUP").is_none() {
             let stock = apply_stock_setup(vfs, &mut p).unwrap_or_default();
             if let Some((path, _, mut s)) = user {
                 let before = setup_rows(&p);
@@ -1748,7 +1748,7 @@ impl Physics {
         }
         // the fuel the setup carries (EVOVIEW_FUEL_MASS=0: the dry mass, as
         // before). GUESS that totalMass excludes it, as AC1's TOTALMASS does
-        if std::env::var("EVOVIEW_FUEL_MASS").map_or(true, |v| v != "0") {
+        if crate::envc::var("EVOVIEW_FUEL_MASS").map_or(true, |v| v != "0") {
             p.mass = p.mass_dry + p.fuel_mass();
         }
         p.limiter_raw = p.limiter_rpm;

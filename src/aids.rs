@@ -99,7 +99,7 @@ pub enum Outcome {
 /// EVOVIEW_AIDS_UNLOCK=1: change what the car's limits lock (and past their
 /// range, up to the car's own tables)
 fn unlocked() -> bool {
-    std::env::var_os("EVOVIEW_AIDS_UNLOCK").is_some()
+    crate::envc::var_os("EVOVIEW_AIDS_UNLOCK").is_some()
 }
 
 /// The ABS / TC level the car runs, 0 when the system is switched off.
@@ -184,7 +184,7 @@ pub fn car_id(rc: &crate::rigcar::RigCar) -> String {
 }
 
 fn cfg_path() -> std::path::PathBuf {
-    let base = std::env::var_os("APPDATA").map(std::path::PathBuf::from).unwrap_or_else(|| ".".into());
+    let base = crate::envc::var_os("APPDATA").map(std::path::PathBuf::from).unwrap_or_else(|| ".".into());
     base.join("evoview").join("aids.cfg")
 }
 
@@ -220,7 +220,7 @@ pub fn save(rc: &crate::rigcar::RigCar) {
 /// so does a player setup (`use_saved` false: its own bias / TC / ABS win).
 pub fn startup(rc: &mut crate::rigcar::RigCar, use_saved: bool) {
     let car = car_id(rc);
-    if let Some((b, tc, abs)) = saved(&car).filter(|_| use_saved && std::env::var_os("EVOVIEW_AIDS_FRESH").is_none()) {
+    if let Some((b, tc, abs)) = saved(&car).filter(|_| use_saved && crate::envc::var_os("EVOVIEW_AIDS_FRESH").is_none()) {
         let l = rc.limits().bias;
         if l.map_or(false, |l| l.modifiable && l.max > l.min) {
             let l = l.unwrap();
@@ -232,7 +232,7 @@ pub fn startup(rc: &mut crate::rigcar::RigCar, use_saved: bool) {
             }
         }
     }
-    let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f32>().ok());
+    let env = |k: &str| crate::envc::var(k).ok().and_then(|v| v.parse::<f32>().ok());
     if let Some(b) = env("EVOVIEW_BIAS") {
         rc.set_brake_bias((b * 0.01).clamp(0.0, 1.0));
     }

@@ -341,7 +341,7 @@ impl Culler {
             });
         }
         // EVOVIEW_CULL_GRID=0: test every instance in every view
-        let grid = if std::env::var("EVOVIEW_CULL_GRID").map_or(true, |v| v != "0") {
+        let grid = if crate::envc::var("EVOVIEW_CULL_GRID").map_or(true, |v| v != "0") {
             let big: Vec<&[Vec4]> = entries.iter().filter(|e| e.spheres.len() >= GRID_MIN).map(|e| e.spheres.as_slice()).collect();
             Grid::build(&big)
         } else {
@@ -409,7 +409,7 @@ impl Culler {
             return;
         }
         self.scale = s;
-        if lod_log() || std::env::var_os("EVOVIEW_LOD_DUMP").is_some() {
+        if lod_log() || crate::envc::var_os("EVOVIEW_LOD_DUMP").is_some() {
             println!("lodDistanceScale {s:.3}");
         }
         for e in self.entries.iter_mut() {
@@ -657,11 +657,11 @@ impl Culler {
 pub fn lod_scale(fov_y: Option<f32>) -> f32 {
     static FIXED: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
     static PRESET: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    if let Some(x) = *FIXED.get_or_init(|| std::env::var("EVOVIEW_LOD_SCALE").ok().and_then(|v| v.parse().ok())) {
+    if let Some(x) = *FIXED.get_or_init(|| crate::envc::var("EVOVIEW_LOD_SCALE").ok().and_then(|v| v.parse().ok())) {
         return x;
     }
     let p = *PRESET.get_or_init(|| {
-        match std::env::var("EVOVIEW_LOD_QUALITY").unwrap_or_default().trim().to_lowercase().as_str() {
+        match crate::envc::var("EVOVIEW_LOD_QUALITY").unwrap_or_default().trim().to_lowercase().as_str() {
             "low" => 0.5,
             "high" => 1.25,
             "ultra" => 1.5,
@@ -676,7 +676,7 @@ pub fn lod_scale(fov_y: Option<f32>) -> f32 {
 
 fn lod_log() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("EVOVIEW_LOD_LOG").is_some())
+    *ON.get_or_init(|| crate::envc::var_os("EVOVIEW_LOD_LOG").is_some())
 }
 
 impl Culler {

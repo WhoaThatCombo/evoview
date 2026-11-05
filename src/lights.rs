@@ -385,7 +385,7 @@ pub fn led_values(fx: Option<&CarFx>, st: &FxState) -> [(f32, [f32; 3]); 26] {
             out[i] = (l.value_off, [l.color_off[0], l.color_off[1], l.color_off[2]]);
         }
     };
-    if std::env::var_os("EVOVIEW_LED_LOG").is_some() {
+    if crate::envc::var_os("EVOVIEW_LED_LOG").is_some() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
             for g in 0..48u32 {

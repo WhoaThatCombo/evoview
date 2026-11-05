@@ -323,7 +323,7 @@ impl Tyre {
         };
         h *= 1.0 + d.cool_factor_rain as f64 * wet as f64;
         self.air = air;
-        if d.explosion_t > 0.0 && self.core > d.explosion_t as f64 && std::env::var_os("EVOVIEW_NO_BLOWOUT").is_none() {
+        if d.explosion_t > 0.0 && self.core > d.explosion_t as f64 && crate::envc::var_os("EVOVIEW_NO_BLOWOUT").is_none() {
             self.blown = true;
         }
         let prev = self.t;
@@ -397,7 +397,7 @@ impl Tyre {
     pub fn flat_spot(&mut self, d: &Data, omega: f32, sr: f32, speed: f32, fz: f32, dt: f32) {
         if (omega.abs() <= 0.3 || sr < -0.98) && speed > 3.0 && fz > 0.0 {
             self.flat = (self.flat + d.flat_spot_k * speed * fz * 1e-5 * dt).min(1.0);
-            if self.flat >= 1.0 && std::env::var_os("EVOVIEW_NO_BLOWOUT").is_none() {
+            if self.flat >= 1.0 && crate::envc::var_os("EVOVIEW_NO_BLOWOUT").is_none() {
                 self.blown = true;
             }
         }
@@ -446,7 +446,7 @@ impl Tyre {
         self.tread[0] -= (1.0 + c) * per;
         self.tread[1] -= per;
         self.tread[2] -= (1.0 - c) * per;
-        if self.tread.iter().any(|t| *t <= 0.0) && std::env::var_os("EVOVIEW_NO_BLOWOUT").is_none() {
+        if self.tread.iter().any(|t| *t <= 0.0) && crate::envc::var_os("EVOVIEW_NO_BLOWOUT").is_none() {
             self.blown = true;
         }
         for t in self.tread.iter_mut() {

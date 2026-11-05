@@ -139,7 +139,7 @@ impl Default for FxState {
 }
 
 fn env_f(name: &str) -> Option<f32> {
-    std::env::var(name).ok().and_then(|v| v.trim().parse::<f32>().ok())
+    crate::envc::var(name).ok().and_then(|v| v.trim().parse::<f32>().ok())
 }
 
 impl FxState {
@@ -154,7 +154,7 @@ impl FxState {
         if let Some(v) = env_f("EVOVIEW_RPM") { s.rpm = v.max(0.0); }
         if let Some(v) = env_f("EVOVIEW_SPEED") { s.speed_mps = v / 3.6; }
         if let Some(v) = env_f("EVOVIEW_GEAR") { s.gear = v as i32; }
-        s.indicator = match std::env::var("EVOVIEW_INDICATOR").unwrap_or_default().to_lowercase().as_str() {
+        s.indicator = match crate::envc::var("EVOVIEW_INDICATOR").unwrap_or_default().to_lowercase().as_str() {
             "left" | "l" => Indicator::Left,
             "right" | "r" => Indicator::Right,
             "hazard" | "h" | "both" => Indicator::Hazard,

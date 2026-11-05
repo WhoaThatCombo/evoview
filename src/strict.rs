@@ -34,7 +34,7 @@ pub struct Guess {
 
 /// Strict rendering requested (`--strict` or EVOVIEW_STRICT=1).
 pub fn on() -> bool {
-    ON.load(Ordering::Relaxed) || std::env::var_os("EVOVIEW_STRICT").map_or(false, |v| v != "0")
+    ON.load(Ordering::Relaxed) || crate::envc::var_os("EVOVIEW_STRICT").map_or(false, |v| v != "0")
 }
 
 pub fn set_on(v: bool) {

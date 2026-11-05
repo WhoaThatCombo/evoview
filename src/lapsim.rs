@@ -419,7 +419,7 @@ pub fn run(pkg: &std::path::Path, base: Option<&std::path::Path>, track: &str, l
     println!("lapsim: aero at 200 km/h: downforce {:.0} N ({:.0}% front), drag {:.0} N", k_l * 3086.4, k_lf / k_l.max(1e-6) * 100.0, k_d * 3086.4);
     println!("lapsim: {track} {}: {:.0} m, ideal lap {}:{:06.3} ({:.1} km/h average), top {:.0} km/h, slowest {:.0} km/h",
              layout.unwrap_or("gp"), total, (t / 60.0).floor() as i32, t % 60.0, total / t * 3.6, top * 3.6, low * 3.6);
-    if let Ok(dump) = std::env::var("EVOVIEW_LAPSIM_DUMP") {
+    if let Ok(dump) = crate::envc::var("EVOVIEW_LAPSIM_DUMP") {
         let mut s = String::from("s_m,x,z,y,curv,v_kmh\n");
         for i in 0..n {
             s += &format!("{:.0},{:.1},{:.1},{:.1},{:.5},{:.1}\n", i as f32 * ds, pts[i].x, pts[i].z, pts[i].y, curv[i], v[i] * 3.6);

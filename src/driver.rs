@@ -68,7 +68,7 @@ const HEAD_SWAP: [f32; 16] = [
 
 /// EVOVIEW_DRIVER: unset/1 = on, 0 = off, `racing` / `street` force an outfit.
 pub fn setting() -> Option<Option<bool>> {
-    match std::env::var("EVOVIEW_DRIVER").unwrap_or_default().trim().to_lowercase().as_str() {
+    match crate::envc::var("EVOVIEW_DRIVER").unwrap_or_default().trim().to_lowercase().as_str() {
         "0" | "off" | "false" | "no" => None,
         "racing" | "race" => Some(Some(true)),
         "street" | "road" => Some(Some(false)),

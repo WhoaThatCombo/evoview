@@ -180,7 +180,7 @@ impl TrackFiles {
         if let Some(p) = crate::pkg::Package::open_filtered(pkg, &[pre.as_str()]).ok().filter(|p| !p.by_path.is_empty()) {
             return Some(TrackFiles::Pkg(p));
         }
-        let dir = std::path::Path::new(&std::env::var_os("USERPROFILE")?)
+        let dir = std::path::Path::new(&crate::envc::var_os("USERPROFILE")?)
             .join("Saved Games").join("ACE").join("mods").join("content").join("tracks").join(track);
         let mut files = HashMap::new();
         let mut stack = vec![dir.clone()];
@@ -326,7 +326,7 @@ impl PitLane {
         // several layouts' containers: the running layout's (EVOVIEW_LAYOUT,
         // which an online session sets: spawnpoints_pitlane_<layout>.scene),
         // else the GP one, else the plainest name
-        let lay = std::env::var("EVOVIEW_LAYOUT").ok().map(|l| l.to_lowercase()).filter(|l| !l.is_empty());
+        let lay = crate::envc::var("EVOVIEW_LAYOUT").ok().map(|l| l.to_lowercase()).filter(|l| !l.is_empty());
         let rank = |k: &String| (!lay.as_ref().map_or(false, |l| k.contains(l.as_str())), !k.contains("gp"), k.len());
         zone_sets.sort_by_key(|z| rank(&z.0));
         spot_sets.sort_by_key(|s| rank(&s.0));
@@ -457,7 +457,7 @@ impl Rules {
     /// EVOVIEW_PIT_RULES: practice (default: the test drive's), race (the
     /// instant race's), off (the limit, no penalties).
     pub fn load(pkg: &std::path::Path) -> Rules {
-        let mode = std::env::var("EVOVIEW_PIT_RULES").unwrap_or_default();
+        let mode = crate::envc::var("EVOVIEW_PIT_RULES").unwrap_or_default();
         let file = if mode == "race" { "instant_race" } else { "test_drive" };
         let key = format!("content\\data\\{file}.seasondefinition");
         let mut r = crate::pkg::Package::open_filtered(pkg, &["content\\data\\"]).ok()
@@ -472,7 +472,7 @@ impl Rules {
             r.checks.clear();
             r.name += " (no penalties)";
         }
-        if let Some(v) = std::env::var("EVOVIEW_PIT_SPEED").ok().and_then(|v| v.parse::<f32>().ok()) {
+        if let Some(v) = crate::envc::var("EVOVIEW_PIT_SPEED").ok().and_then(|v| v.parse::<f32>().ok()) {
             r.limit_kmh = v;
         }
         r
@@ -640,7 +640,7 @@ impl PitCar {
             }).unwrap_or(0)
         });
         let names: Vec<&str> = compounds.iter().map(|c| c.name.as_str()).collect();
-        if std::env::var_os("EVOVIEW_TYRE_LOG").is_some() {
+        if crate::envc::var_os("EVOVIEW_TYRE_LOG").is_some() {
             for c in &compounds {
                 println!("TYRE compound {} kind {}: {:?}", c.name, c.kind, c.fit.iter().map(|f| f.as_ref().map(|(m, _)| (m.dy0, m.dx0, m.fz0, m.ls_y))).collect::<Vec<_>>());
             }
@@ -864,7 +864,7 @@ const DIM: [f32; 4] = [1.0, 1.0, 1.0, 0.55];
 
 impl Pits {
     pub fn new(lane: Option<PitLane>, rules: Rules, car: PitCar, rig_arb: [f32; 2]) -> Pits {
-        let want = std::env::var("EVOVIEW_PIT_BOX").ok().and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+        let want = crate::envc::var("EVOVIEW_PIT_BOX").ok().and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
         let box_i = lane.as_ref().and_then(|l| l.pits.iter().position(|s| s.slot == want)).unwrap_or(0);
         let psi = [0, 1, 2, 3].map(|k| {
             let s = car.setup_psi[k];
@@ -879,7 +879,7 @@ impl Pits {
         let plan = Plan { tyres: [true, true], compound: car.fitted, psi, fuel: 0.0, body: false, susp: false, arb: rig_arb, aero: car.aero_now };
         Pits {
             lane, rules, car, limiter: false,
-            auto_limiter: std::env::var_os("EVOVIEW_PIT_AUTOLIMITER").is_some(),
+            auto_limiter: crate::envc::var_os("EVOVIEW_PIT_AUTOLIMITER").is_some(),
             in_lane: false, in_limit: false, speeding: false, peak: 0.0, fired: 0,
             box_i, stage: Stage::Driving, held_left: 0.0, menu: false, row: 0, plan, service: None,
             drive_through: false, stop_go: 0.0, through_clean: false, msgs: Vec::new(), time: 0.0,
@@ -1564,13 +1564,13 @@ fn box_marker(hud: &mut crate::hud::Hud, vp: Mat4, s: Spot, aspect: f32, c: [f32
 /// the garage's menu up or the crew at work (captures);
 /// EVOVIEW_PIT_LIMITER=1 starts with the limiter on.
 pub fn start(td: &mut TrackDrive, p: &mut Pits) {
-    if std::env::var_os("EVOVIEW_PIT_LIMITER").is_some() {
+    if crate::envc::var_os("EVOVIEW_PIT_LIMITER").is_some() {
         p.limiter = true;
     }
     // drive straight out of wherever the session starts; the box only
     // takes the car once it has left and come back (Released -> Driving)
     p.stage = Stage::Released;
-    let Ok(at) = std::env::var("EVOVIEW_PIT_START") else { return };
+    let Ok(at) = crate::envc::var("EVOVIEW_PIT_START") else { return };
     match at.as_str() {
         // a session starts free to drive out; the box takes the car once it
         // has left and come back

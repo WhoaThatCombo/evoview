@@ -423,7 +423,7 @@ impl Sctm {
 /// EVOVIEW_SCTM_OLDNC=1 (the earlier new-combined reading).
 fn sctm_dbg() -> (bool, bool) {
     static D: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
-    *D.get_or_init(|| (std::env::var_os("EVOVIEW_SCTM_NOPOST").is_some(), std::env::var_os("EVOVIEW_SCTM_OLDNC").is_some()))
+    *D.get_or_init(|| (crate::envc::var_os("EVOVIEW_SCTM_NOPOST").is_some(), crate::envc::var_os("EVOVIEW_SCTM_OLDNC").is_some()))
 }
 
 #[cfg(test)]
@@ -509,7 +509,7 @@ pub fn dump(pkg: &std::path::Path) {
     for k in keys {
         let td = p.read(p.by_path[&k]);
         let Some(m) = Sctm::from_compound(&td) else { continue };
-        if std::env::var("EVOVIEW_SCTM_CURVES").is_ok() {
+        if crate::envc::var("EVOVIEW_SCTM_CURVES").is_ok() {
             let txt = String::from_utf8_lossy(&td).to_string();
             for w in txt.split(|c: char| !(c.is_ascii_alphanumeric() || "_./\\".contains(c))).filter(|w| w.ends_with(".curve")) {
                 let ck = p.by_path.keys().find(|q| q.ends_with(&w.to_lowercase().replace('/', "\\"))).cloned();
@@ -517,7 +517,7 @@ pub fn dump(pkg: &std::path::Path) {
                 println!("SCTMCURVE {k} {w} {pts:?}");
             }
         }
-        if std::env::var("EVOVIEW_SCTM_SUBS").is_ok() {
+        if crate::envc::var("EVOVIEW_SCTM_SUBS").is_ok() {
             for sf in [3u32, 4, 5, 6, 8, 12] {
                 let Some((a, b)) = sub(&td, sf) else { continue };
                 let mut out = String::new();

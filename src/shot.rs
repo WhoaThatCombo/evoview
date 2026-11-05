@@ -121,7 +121,7 @@ impl Still {
         // Tracks are outdoors — a studio sweep under a circuit is nonsense.
         let eye_y = view.map_or_else(|| cam.eye().y, |v| v.1.y);
         if !outdoor && !crate::grid::wanted() && eye_y > lo.y + 1e-3
-            && std::env::var("EVOVIEW_NO_GROUND").is_err() {
+            && crate::envc::var("EVOVIEW_NO_GROUND").is_err() {
             let mut g = ground_quad(&device, lo, hi);
             g.draws = vec![(0, 6, materials.ground)];
             meshes.push(g);
@@ -150,7 +150,7 @@ impl Still {
 
         // Shadows only outdoors: the studio rig is area lights, which this map
         // cannot represent, and the car already has its contact shadow.
-        let shadows = outdoor && std::env::var("EVOVIEW_NO_SHADOW").is_err();
+        let shadows = outdoor && crate::envc::var("EVOVIEW_NO_SHADOW").is_err();
         let vp = view.map_or_else(|| cam.view_proj(width as f32 / height as f32), |v| v.0);
         let eye = view.map_or_else(|| cam.eye(), |v| v.1);
         // Aim the map where the camera is looking, not at the centre of a
@@ -158,8 +158,8 @@ impl Still {
         let focus = if outdoor && view.is_some() { crate::render::view_focus(vp, eye) } else { cam.target };
         // Cars get the game's hero shadow instead: a map fitted to the car,
         // rendered once (the pose is fixed for a still).
-        let hero = !outdoor && std::env::var("EVOVIEW_NO_SHADOW").is_err()
-            && std::env::var("EVOVIEW_NO_HERO").is_err();
+        let hero = !outdoor && crate::envc::var("EVOVIEW_NO_SHADOW").is_err()
+            && crate::envc::var("EVOVIEW_NO_HERO").is_err();
         let cam_u = if shadows {
             uniforms_shadowed(vp, eye, lo, hi, outdoor, true, focus)
         } else if hero {
@@ -260,7 +260,7 @@ impl Still {
         u.view_proj = self.vp.to_cols_array_2d();
         u.eye = [self.eye.x, self.eye.y, self.eye.z, 1.0];
         u.fx = crate::lights::fx_block(self.car.fx.as_deref(), st, self.outdoor);
-        if std::env::var("EVOVIEW_FX_LOG").is_ok() {
+        if crate::envc::var("EVOVIEW_FX_LOG").is_ok() {
             if let Some(l) = self.car.fx.as_ref().and_then(|f| f.led_sys.as_ref()) {
                 let mut k: Vec<_> = l.groups.keys().collect();
                 k.sort();
@@ -342,7 +342,7 @@ impl Still {
                 // alpha is the car's silhouette (lookcmp camera fitting)
                 let c = crate::grade::studio_clear_scaled(u.fx[0][0]);
                 wgpu::Color { r: c[0], g: c[1], b: c[2],
-                    a: if std::env::var("EVOVIEW_SHOT_ALPHA").is_ok() { 0.0 } else { 1.0 } }
+                    a: if crate::envc::var("EVOVIEW_SHOT_ALPHA").is_ok() { 0.0 } else { 1.0 } }
             };
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shot"),
@@ -510,13 +510,13 @@ pub async fn shot(car: Car, out: &Path, width: u32, height: u32, yaw: f32,
     // EVOVIEW_BENCH: time to first frame since process start. (The old N-frame
     // uncapped loop is retired - frame timing is `--bench` / tools/bench.py,
     // which honours EVOVIEW_MAX_FPS and runs the real culled renderer.)
-    if std::env::var("EVOVIEW_BENCH").is_ok() {
+    if crate::envc::var("EVOVIEW_BENCH").is_ok() {
         if let Some(t0) = crate::T0.get() {
             println!("BENCH first_frame_s {:.3}", t0.elapsed().as_secs_f64());
         }
     }
     // EVOVIEW_DASH_DUMP=<dir>: the dash screens as they were drawn
-    if let Ok(dir) = std::env::var("EVOVIEW_DASH_DUMP") {
+    if let Ok(dir) = crate::envc::var("EVOVIEW_DASH_DUMP") {
         for (k, (pi, t)) in still.materials.dash_targets.iter().enumerate() {
             let (w, h, px) = crate::fxgpu::read_rgba(&still.device, &still.queue, t);
             write_png(&Path::new(&dir).join(format!("dash_{k}_page{pi}.png")), w, h, &px);

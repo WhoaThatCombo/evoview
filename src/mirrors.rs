@@ -255,7 +255,7 @@ impl Mirrors {
             let range = (uvhi - uvlo).max(Vec2::splat(1e-4));
             let (du, dv) = (tsum / wsum, bsum / wsum);
             let aspect = ((du.length() * range.x) / (dv.length() * range.y).max(1e-4)).clamp(0.5, 6.0);
-            let fixed: Option<u32> = std::env::var("EVOVIEW_MIRROR_RES").ok().and_then(|v| v.parse().ok());
+            let fixed: Option<u32> = crate::envc::var("EVOVIEW_MIRROR_RES").ok().and_then(|v| v.parse().ok());
             // until fitted to the screen (`fit`): the old fixed size
             let h: u32 = fixed.unwrap_or(if d.kind == 0 { 200 } else { 240 });
             let w = ((h as f32 * aspect).round() as u32).clamp(64, 1024);
@@ -374,8 +374,8 @@ impl Mirrors {
         });
         Some(Mirrors {
             list, pipe, tex_bgl, samp, mip_pipe, mip_bgl, format,
-            fixed: std::env::var("EVOVIEW_MIRROR_RES").ok().and_then(|v| v.parse().ok()),
-            ss: std::env::var("EVOVIEW_MIRROR_SS").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5f32).clamp(0.5, 4.0),
+            fixed: crate::envc::var("EVOVIEW_MIRROR_RES").ok().and_then(|v| v.parse().ok()),
+            ss: crate::envc::var("EVOVIEW_MIRROR_SS").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5f32).clamp(0.5, 4.0),
             cam, cam_bg, bone_bg, pose: Vec::new(), next: 0, samples,
         })
     }
@@ -499,7 +499,7 @@ impl Mirrors {
             let t = Targets::new(device, &self.tex_bgl, &self.samp, &self.mip_bgl, &m.params, self.format, self.samples, w, want);
             let m = &mut self.list[i];
             (m.msaa, m.depth, m.resolve, m.mips, m.bg, m.height) = (t.msaa, t.depth, t.resolve, t.mips, t.bg, want);
-            if std::env::var_os("EVOVIEW_MIRROR_LOG").is_some() {
+            if crate::envc::var_os("EVOVIEW_MIRROR_LOG").is_some() {
                 println!("mirror {}: {w}x{want} ({px:.0} px tall on screen)", m.def.kind);
             }
         }

@@ -396,7 +396,7 @@ fn transmittance(alt_deg: f32) -> [f32; 3] {
 }
 
 fn env_k(name: &str, d: f32) -> f32 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+    crate::envc::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
 }
 
 fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
@@ -637,7 +637,7 @@ fn apply_flags(c: &mut Clock) {
     let args: Vec<String> = std::env::args().collect();
     let flag = |name: &str, env: &str| {
         args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
-            .or_else(|| std::env::var(env).ok())
+            .or_else(|| crate::envc::var(env).ok())
     };
     if let Some(t) = flag("--tod", "EVOVIEW_TOD") {
         let p: Vec<f64> = t.split(':').filter_map(|x| x.trim().parse().ok()).collect();

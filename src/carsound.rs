@@ -102,7 +102,7 @@ fn engine_params(fm: &Fmod, i: Inst, f: &Feed, shift: Option<bool>, d: f32, vol:
     fm.pset(i, "bov", if f.throttle < 0.1 && f.boost > 0.3 { 1.0 } else { 0.0 });
     fm.pset(i, "gear_up", if shift == Some(true) { 1.0 } else { 0.0 });
     fm.pset(i, "gear_dn", if shift == Some(false) { 1.0 } else { 0.0 });
-    fm.pset(i, "ignition", std::env::var("EVOVIEW_SND_IGN").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0));
+    fm.pset(i, "ignition", crate::envc::var("EVOVIEW_SND_IGN").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0));
     fm.pset(i, "traction_control", if f.tc_active { 1.0 } else { 0.0 });
     fm.pset(i, "brake_position", f.brake);
     fm.pset(i, "engine_distance", d);
@@ -173,7 +173,7 @@ impl CarSound {
         let mut mod_strings = Vec::new();
         if car.is_empty() {
             let id = model.to_ascii_lowercase();
-            let mp = std::env::var_os("USERPROFILE").map(|h| Path::new(&h).join("Saved Games").join("ACE").join("mods").join(format!("{id}.kspkg")));
+            let mp = crate::envc::var_os("USERPROFILE").map(|h| Path::new(&h).join("Saved Games").join("ACE").join("mods").join(format!("{id}.kspkg")));
             let pre = format!(r"content\cars\{id}\sfx\");
             if let Some(Ok(m)) = mp.filter(|p| p.exists()).map(|p| crate::pkg::Package::open_filtered(&p, &[pre.as_str()])) {
                 let rd = |n: &str| m.by_path.get(&format!("{pre}{n}.bank")).copied().map(|e| m.read(e)).unwrap_or_default();
@@ -193,7 +193,7 @@ impl CarSound {
         }
         // EVOVIEW_SND_NO_SHARED: the car bank alone (comparing what the
         // shared banks add)
-        let shared: &[&str] = if std::env::var_os("EVOVIEW_SND_NO_SHARED").is_some() { &[] } else { SHARED };
+        let shared: &[&str] = if crate::envc::var_os("EVOVIEW_SND_NO_SHARED").is_some() { &[] } else { SHARED };
         for b in shared {
             let d = grab(b);
             if !d.is_empty() {
@@ -366,8 +366,8 @@ impl CarSound {
     /// The opponents' engines this frame (before `update`, which mixes):
     /// `cars` in the race's AI order, `ear` the listener's position.
     pub fn update_ai(&mut self, cars: &[AiCar], ear: [f32; 3], dt: f32) {
-        let n_max = std::env::var("EVOVIEW_AI_SOUND_N").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(5);
-        let r_max = std::env::var("EVOVIEW_AI_SOUND_M").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(300.0);
+        let n_max = crate::envc::var("EVOVIEW_AI_SOUND_N").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(5);
+        let r_max = crate::envc::var("EVOVIEW_AI_SOUND_M").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(300.0);
         if self.ai.voices.len() != cars.len() {
             self.ai.voices.resize_with(cars.len(), AiVoice::default);
         }
@@ -408,7 +408,7 @@ impl CarSound {
         rank.sort_by(|a, b| a.0.total_cmp(&b.0));
         rank.truncate(n_max);
         // EVOVIEW_AI_VOLUME: the opponents against the player's car (1 = the game's mix)
-        let gain = std::env::var("EVOVIEW_AI_VOLUME").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0);
+        let gain = crate::envc::var("EVOVIEW_AI_VOLUME").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0);
         let master = if self.muted { 0.0 } else { self.volume * gain };
         let fm = &self.fmod;
         for (k, c) in cars.iter().enumerate() {
@@ -443,7 +443,7 @@ impl CarSound {
             engine_params(fm, i, f, (v.shift_t < 0.18).then_some(v.shift_up), dist(c), master);
         }
         // EVOVIEW_AI_SND_LOG=1: the live voices twice a second
-        if std::env::var_os("EVOVIEW_AI_SND_LOG").is_some() {
+        if crate::envc::var_os("EVOVIEW_AI_SND_LOG").is_some() {
             self.ai.log_t -= dt;
             if self.ai.log_t <= 0.0 {
                 self.ai.log_t = 0.5;

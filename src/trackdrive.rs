@@ -79,7 +79,7 @@ impl Ground {
             .collect();
         let mut wall_tris = 0usize;
         for (ti, t) in c.tris.iter().enumerate() {
-            if std::env::var_os("EVOVIEW_WALLS_AS_GROUND").is_none() && c.tri_surf.get(ti).map_or(false, |&s| wall_surf.get(s as usize).copied().unwrap_or(false)) {
+            if crate::envc::var_os("EVOVIEW_WALLS_AS_GROUND").is_none() && c.tri_surf.get(ti).map_or(false, |&s| wall_surf.get(s as usize).copied().unwrap_or(false)) {
                 wall_tris += 1;
                 continue;
             }
@@ -117,7 +117,7 @@ impl Ground {
         let bump = c.surfaces.iter().map(|s| def(s).map_or((0.0, 1.0), |d| (d.sin_height, d.sin_length.max(0.05)))).collect();
         let kind = c.surfaces.iter().map(|s| def(s).map_or(0, |d| d.kind)).collect();
         let vib = c.surfaces.iter().map(|s| def(s).map_or((0.0, 0.0), |d| (d.vibration_gain, d.vibration_length))).collect();
-        if std::env::var_os("EVOVIEW_SURF_LIST").is_some() {
+        if crate::envc::var_os("EVOVIEW_SURF_LIST").is_some() {
             let grip_v: &Vec<f32> = &grip;
             for (i, s) in c.surfaces.iter().enumerate() {
                 let n = c.tri_surf.iter().filter(|t| **t as usize == i).count();
@@ -139,11 +139,11 @@ impl Ground {
         // WALL-category surfaces, untagged faces are not walls.
         // EVOVIEW_UNTAGGED_WALLS=1: they are again.
         let has_walls = c.surfaces.iter().any(|s| def(s).map_or(false, |d| d.category == 2));
-        let untagged_walls = !has_walls || std::env::var_os("EVOVIEW_UNTAGGED_WALLS").is_some();
+        let untagged_walls = !has_walls || crate::envc::var_os("EVOVIEW_UNTAGGED_WALLS").is_some();
         let mut dropped = 0usize;
         let mut wall_grid: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
         // EVOVIEW_WALL_DUMP="x,z,r": every wall segment within r m, kept or not
-        let dump: Option<(f32, f32, f32)> = std::env::var("EVOVIEW_WALL_DUMP").ok().and_then(|v| {
+        let dump: Option<(f32, f32, f32)> = crate::envc::var("EVOVIEW_WALL_DUMP").ok().and_then(|v| {
             let p: Vec<f32> = v.split(',').filter_map(|a| a.trim().parse().ok()).collect();
             (p.len() == 3).then(|| (p[0], p[1], p[2]))
         });
@@ -161,7 +161,7 @@ impl Ground {
             // distance markers - things a car knocks over): a polystyrene
             // arrow on Fuji's hairpin apex stopped the M4 dead at 65 km/h
             // every lap. EVOVIEW_OBJECT_WALLS=1: walls again.
-            let object_walls = std::env::var_os("EVOVIEW_OBJECT_WALLS").is_some();
+            let object_walls = crate::envc::var_os("EVOVIEW_OBJECT_WALLS").is_some();
             let drop = board || c.wall_surf.get(wi).map_or(false, |&s| c.surfaces.get(s as usize).map_or(false, |n| {
                 (n.is_empty() && !untagged_walls) || n == "distance_markers"
                     || (!object_walls && def(n).map_or(false, |d| d.category == 3))
@@ -194,7 +194,7 @@ impl Ground {
         // EVOVIEW_GROUND_DUMP=<file>: the drivable ground for the offline
         // placement audit (tools/place_audit.py): u32 vertex count, u32
         // triangle count, then f32 x3 vertices and u32 x3 triangles
-        if let Ok(p) = std::env::var("EVOVIEW_GROUND_DUMP") {
+        if let Ok(p) = crate::envc::var("EVOVIEW_GROUND_DUMP") {
             let mut b: Vec<u8> = Vec::new();
             b.extend_from_slice(&(c.verts.len() as u32).to_le_bytes());
             b.extend_from_slice(&(c.tris.len() as u32).to_le_bytes());
@@ -202,11 +202,11 @@ impl Ground {
             b.extend_from_slice(bytemuck::cast_slice(&c.tris));
             let _ = std::fs::write(&p, b);
         }
-        let tagged = if std::env::var_os("EVOVIEW_UNTAGGED_GROUND").is_some() { vec![false; c.surfaces.len()] } else { c.surfaces.iter().map(|s| !s.is_empty()).collect() };
+        let tagged = if crate::envc::var_os("EVOVIEW_UNTAGGED_GROUND").is_some() { vec![false; c.surfaces.len()] } else { c.surfaces.iter().map(|s| !s.is_empty()).collect() };
         // the same triangles the grid keeps (no walls, nothing steep)
         let ode = crate::groundode::OdeGround::enabled().then(|| {
             let keep = |ti: usize| {
-                if std::env::var_os("EVOVIEW_WALLS_AS_GROUND").is_none() && c.tri_surf.get(ti).map_or(false, |&s| wall_surf.get(s as usize).copied().unwrap_or(false)) {
+                if crate::envc::var_os("EVOVIEW_WALLS_AS_GROUND").is_none() && c.tri_surf.get(ti).map_or(false, |&s| wall_surf.get(s as usize).copied().unwrap_or(false)) {
                     return false;
                 }
                 let p = c.tris[ti].map(|i| Vec3::from(c.verts[i as usize]));
@@ -529,7 +529,7 @@ pub struct TrackDrive {
 
 impl TrackDrive {
     pub fn new(ground: Ground, slot: Slot, phys: Option<crate::carphys::Physics>) -> TrackDrive {
-        let rig = std::env::var_os("EVOVIEW_RIGCAR").is_some();
+        let rig = crate::envc::var_os("EVOVIEW_RIGCAR").is_some();
         Self::with_model(std::sync::Arc::new(ground), slot, phys, rig, true)
     }
 
@@ -598,7 +598,7 @@ impl TrackDrive {
                 4 => 0.6,
                 _ => 0.0,
             },
-            tc: std::env::var("EVOVIEW_TC").map_or(true, |v| v != "0"),
+            tc: crate::envc::var("EVOVIEW_TC").map_or(true, |v| v != "0"),
             snd: SoundState::default(),
             mz_front: 0.0,
             rig: None,
@@ -624,9 +624,9 @@ impl TrackDrive {
     /// rigid-body car.
     pub fn set_aero(&mut self, k: [f32; 3]) {
         if let Some((rc, _)) = self.rig.as_mut() {
-            rc.aero = std::env::var("EVOVIEW_RIG_AERO").ok().and_then(|v| v.parse::<f32>().ok()).map_or(k, |m| k.map(|x| x * m));
+            rc.aero = crate::envc::var("EVOVIEW_RIG_AERO").ok().and_then(|v| v.parse::<f32>().ok()).map_or(k, |m| k.map(|x| x * m));
             // EVOVIEW_RIG_AERO_FRONT=0..1: diagnostic downforce balance
-            if let Some(f) = std::env::var("EVOVIEW_RIG_AERO_FRONT").ok().and_then(|v| v.parse::<f32>().ok()) {
+            if let Some(f) = crate::envc::var("EVOVIEW_RIG_AERO_FRONT").ok().and_then(|v| v.parse::<f32>().ok()) {
                 let t = rc.aero[0] + rc.aero[1];
                 rc.aero[0] = t * f;
                 rc.aero[1] = t * (1.0 - f);
@@ -659,7 +659,7 @@ impl TrackDrive {
         self.settle(0.0);
         // EVOVIEW_MP_HLOG=1: how high the game's position is over the road
         // (what the sent position must match, or our car sinks in theirs)
-        if std::env::var_os("EVOVIEW_MP_HLOG").is_some() && s.vel.length() < 30.0 {
+        if crate::envc::var_os("EVOVIEW_MP_HLOG").is_some() && s.vel.length() < 30.0 {
             use std::sync::atomic::{AtomicU32, Ordering};
             static N: AtomicU32 = AtomicU32::new(0);
             if N.fetch_add(1, Ordering::Relaxed) % 97 == 0 {
@@ -1066,14 +1066,14 @@ impl TrackDrive {
         // the grip multiplier, tread at temperature. Combined slip stays
         // this model's friction circle until wheel spin is simulated (the
         // per-wheel slip ratio, physics step 4).
-        let tyre_t = std::env::var("EVOVIEW_TYRE_T").ok().and_then(|v| v.parse().ok()).unwrap_or(f32::NAN);
+        let tyre_t = crate::envc::var("EVOVIEW_TYRE_T").ok().and_then(|v| v.parse().ok()).unwrap_or(f32::NAN);
         let sctm_axle = |ax: usize, fz: f32, alpha: f32, grip: f32| -> Option<crate::sctm::Output> {
             let m = self.tyres[ax]?.sctm?;
             let o = m.solve(&crate::sctm::Input { fz: fz * 0.5, alpha, speed: sp, grip, temp: tyre_t, wet: crate::rain::track_wetness(), ..Default::default() });
             Some(crate::sctm::Output { fy: o.fy * 2.0, mz: o.mz * 2.0, ..o })
         };
         let hb = if c.handbrake { 0.45 } else { 1.0 };
-        let no_sctm = std::env::var_os("EVOVIEW_NO_SCTM").is_some();
+        let no_sctm = crate::envc::var_os("EVOVIEW_NO_SCTM").is_some();
         let (fyf, fyr) = match (sctm_axle(0, fz_f, af, gf).filter(|_| !no_sctm), sctm_axle(1, fz_r, ar, gr * hb).filter(|_| !no_sctm)) {
             (Some(of), Some(or)) => {
                 // what the rack feels, as the rig car builds it: the tyre's
@@ -1156,7 +1156,7 @@ impl TrackDrive {
             self.collide_walls();
         }
         if blocked {
-            if std::env::var_os("EVOVIEW_DRIVE_LOG").is_some() {
+            if crate::envc::var_os("EVOVIEW_DRIVE_LOG").is_some() {
                 eprintln!("blocked at ({:.1} {:.1} {:.1}) v {:.1}", next.x, next.y, next.z, self.vx);
             }
             self.vx *= -0.25;
@@ -1204,7 +1204,7 @@ impl TrackDrive {
                 }
             }
         }
-        if any && std::env::var_os("EVOVIEW_DRIVE_LOG").is_some() {
+        if any && crate::envc::var_os("EVOVIEW_DRIVE_LOG").is_some() {
             eprintln!("wall at ({:.1} {:.1} {:.1}) v {:.1}", self.pos.x, self.pos.y, self.pos.z, self.vx);
         }
     }
@@ -1232,7 +1232,7 @@ impl TrackDrive {
         // fwd x left = up (left x fwd pointed DOWN, so every pose fell back
         // to level: the car never took the road's slope or camber).
         // EVOVIEW_FLAT_BODY=1: the old level body.
-        let up = if std::env::var_os("EVOVIEW_FLAT_BODY").is_some() { Vec3::Y } else { fwd.cross(lat).normalize_or_zero() };
+        let up = if crate::envc::var_os("EVOVIEW_FLAT_BODY").is_some() { Vec3::Y } else { fwd.cross(lat).normalize_or_zero() };
         let up = if up.y > 0.3 { up } else { Vec3::Y };
         self.pos.y = (front.y + rear.y) * 0.5;
         // springs: pitch from ax, roll from ay (visual)
@@ -1278,7 +1278,7 @@ impl TrackDrive {
     /// share, from the suspension geometry; (0, 1) without one.
     /// EVOVIEW_FFB_NOCASTER=1: the bare tyre Mz, as before.
     fn caster_arm(&self) -> (f32, f32) {
-        if std::env::var_os("EVOVIEW_FFB_NOCASTER").is_some() {
+        if crate::envc::var_os("EVOVIEW_FFB_NOCASTER").is_some() {
             return (0.0, 1.0);
         }
         match self.phys.as_ref().and_then(|p| p.geo[0].kingpin()) {
@@ -1363,7 +1363,7 @@ impl TrackDrive {
 /// runs where no GP-Strecke ground was loaded, so the car fell out of the
 /// world at the start.
 pub fn racing_line(pkg: &std::path::Path, track: &str) -> Vec<Vec3> {
-    let lay = std::env::var("EVOVIEW_LAYOUT").ok().map(|l| l.to_lowercase()).or_else(crate::load::loaded_layout);
+    let lay = crate::envc::var("EVOVIEW_LAYOUT").ok().map(|l| l.to_lowercase()).or_else(crate::load::loaded_layout);
     if let Some(l) = lay.as_deref() {
         let pts = racing_line_layout(pkg, track, Some(l));
         if !pts.is_empty() {
@@ -1426,11 +1426,11 @@ fn mod_spawn(track: &str) -> Option<(Vec3, f32)> {
     let dir = if dir.is_dir() {
         dir.to_path_buf()
     } else {
-        std::path::Path::new(&std::env::var_os("USERPROFILE")?).join("Saved Games").join("ACE").join("mods").join("content").join("tracks").join(track)
+        std::path::Path::new(&crate::envc::var_os("USERPROFILE")?).join("Saved Games").join("ACE").join("mods").join("content").join("tracks").join(track)
     };
     // per-layout files too (spawnpoints_hotlap_gp.scene): the running layout's
     // first, else the plainest name - a track with only those spawned at 0,0
-    let lay = std::env::var("EVOVIEW_LAYOUT").ok().map(|l| l.to_lowercase()).filter(|l| !l.is_empty());
+    let lay = crate::envc::var("EVOVIEW_LAYOUT").ok().map(|l| l.to_lowercase()).filter(|l| !l.is_empty());
     let names: Vec<String> = std::fs::read_dir(dir.join("containers")).map(|rd| {
         rd.flatten().map(|e| e.file_name().to_string_lossy().to_lowercase()).collect()
     }).unwrap_or_default();
@@ -1504,7 +1504,7 @@ pub struct LineDriver {
 
 impl LineDriver {
     pub fn new(line: Vec<Vec3>) -> LineDriver {
-        let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f32>().ok());
+        let env = |k: &str| crate::envc::var(k).ok().and_then(|v| v.parse::<f32>().ok());
         let line = match (env("EVOVIEW_KERB_ATTACK"), env("EVOVIEW_LINE_WANDER")) {
             (None, None) => line,
             (m, w) => kerb_attack(line, m.unwrap_or(0.0), w.unwrap_or(0.0)),
@@ -1521,7 +1521,7 @@ impl LineDriver {
     /// EVOVIEW_LINE_CLEAR=0: the line as shipped.
     /// `half_w`: the car's half width as the wall collision sees it.
     pub fn clear_walls(&mut self, ground: &Ground, half_w: f32) {
-        if std::env::var("EVOVIEW_LINE_CLEAR").map_or(false, |v| v == "0") {
+        if crate::envc::var("EVOVIEW_LINE_CLEAR").map_or(false, |v| v == "0") {
             return;
         }
         let n = self.line.len();
@@ -1540,7 +1540,7 @@ impl LineDriver {
             let tan = Vec3::new(-left.z, 0.0, left.x);
             ground.walls_near(c, need + 0.5, c.y + 0.15, c.y + 1.2, &mut hits);
             let (mut l, mut r) = (0.0f32, 0.0f32);
-            if std::env::var("EVOVIEW_CLEAR_DBG").ok().and_then(|v| v.parse::<usize>().ok()) == Some(i) {
+            if crate::envc::var("EVOVIEW_CLEAR_DBG").ok().and_then(|v| v.parse::<usize>().ok()) == Some(i) {
                 println!("CLEAR {i} at ({:.1} {:.1} {:.1}) left {left:?}: {:?}", c.x, c.y, c.z, hits.iter().map(|h| (h.0.x, h.0.z, h.1)).collect::<Vec<_>>());
             }
             for &(q, _, _) in hits.iter() {
@@ -1592,7 +1592,7 @@ impl LineDriver {
     /// every time. A lap goes when every wheel is 1.2 m past a limit; the
     /// line's centre may sit 0.8 m past one. EVOVIEW_LINE_CLEAR=0: as shipped.
     pub fn keep_inside(&mut self, tt: &crate::laps::TimingTrack) {
-        if std::env::var("EVOVIEW_LINE_CLEAR").map_or(false, |v| v == "0") {
+        if crate::envc::var("EVOVIEW_LINE_CLEAR").map_or(false, |v| v == "0") {
             return;
         }
         let Some((l, sl, r, sr)) = tt.limits.as_ref() else { return };
@@ -1774,7 +1774,7 @@ impl LineDriver {
             // Tamburello until the rear lets go (EVOVIEW_LINE_DAMP, 0 = off; at
             // 1.5 the MX-5 and M4 lap Imola clean for 5 min, 0.5 still spun
             // the MX-5 at Rivazza)
-            let kd = std::env::var("EVOVIEW_LINE_DAMP").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5f32);
+            let kd = crate::envc::var("EVOVIEW_LINE_DAMP").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5f32);
             let r_des = v * 2.0 * local_x / (local_x * local_x + local_z * local_z);
             let damp = if v > 5.0 { -kd * ((td.r - r_des) * self.a_b(td) / v).atan() } else { 0.0 };
             // catch a slide: the rears past their peak (6 deg) and slipping
@@ -1786,7 +1786,7 @@ impl LineDriver {
             // Hatzenbach's downhill flick, rears 6 -> 20 deg in a second,
             // and spun into the wall every lap (EVOVIEW_LINE_CATCH=0: off)
             let cap = match td.rig.as_ref() {
-                Some((rc, _)) if v > 8.0 && std::env::var("EVOVIEW_LINE_CATCH").map_or(true, |v| v != "0") => {
+                Some((rc, _)) if v > 8.0 && crate::envc::var("EVOVIEW_LINE_CATCH").map_or(true, |v| v != "0") => {
                     let af = 0.5 * (rc.c[0].alpha + rc.c[1].alpha);
                     let ar = 0.5 * (rc.c[2].alpha + rc.c[3].alpha);
                     (ar.abs() > 6f32.to_radians() && ar.abs() > af.abs() + 2f32.to_radians())
@@ -1800,7 +1800,7 @@ impl LineDriver {
             // at 11 and falls past it). Into COTA's esses it wound the
             // fronts to 15-19 deg, lost force, and ran 10 m wide
             // (EVOVIEW_LINE_FPEAK, degrees; 0 = off)
-            let fpeak = std::env::var("EVOVIEW_LINE_FPEAK").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(11.0).to_radians();
+            let fpeak = crate::envc::var("EVOVIEW_LINE_FPEAK").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(11.0).to_radians();
             if let Some((rc, _)) = td.rig.as_ref().filter(|_| v > 8.0 && fpeak > 0.0) {
                 let af0 = 0.5 * (rc.c[0].alpha + rc.c[1].alpha) - rc.steer;
                 s = s.clamp(-fpeak - af0, fpeak - af0);
@@ -1829,7 +1829,7 @@ impl LineDriver {
             let ang = a.normalize_or_zero().dot(b.normalize_or_zero()).clamp(-1.0, 1.0).acos();
             (a.x * b.z - a.z * b.x).signum() * ang / (a.length() + b.length()).max(0.1)
         };
-        let sbend = if td.rig.is_some() { std::env::var("EVOVIEW_LINE_SBEND").ok().and_then(|v| v.parse().ok()).unwrap_or(0.85f32) } else { 1.0 };
+        let sbend = if td.rig.is_some() { crate::envc::var("EVOVIEW_LINE_SBEND").ok().and_then(|v| v.parse().ok()).unwrap_or(0.85f32) } else { 1.0 };
         let behind = (0..20usize).map(|k| turn((self.i + n - k) % n)).fold(0.0f32, |m, t| if t.abs() > m.abs() { t } else { m });
         let (mut j, mut d) = (self.i, 0.0);
         while d < look {
@@ -1852,17 +1852,17 @@ impl LineDriver {
                 // linkage) ran wide into Villeneuve (MX-5) and out of Variante
                 // Alta (M4) until 0.36. Explicit was 0.43 until its hubs rode with
                 // the body (rigcar hub_ride): now it corners like the slider
-                let k_rig = match std::env::var("EVOVIEW_RIG_ODE").as_deref() {
+                let k_rig = match crate::envc::var("EVOVIEW_RIG_ODE").as_deref() {
                     Ok("links") | Err(_) => 0.38,
                     _ => 0.36,
                 };
-                let k = if td.rig.is_some() { std::env::var("EVOVIEW_LINE_K").ok().and_then(|v| v.parse().ok()).unwrap_or(k_rig) } else { 0.85 };
+                let k = if td.rig.is_some() { crate::envc::var("EVOVIEW_LINE_K").ok().and_then(|v| v.parse().ok()).unwrap_or(k_rig) } else { 0.85 };
                 // over a crest the road falls away under the car and takes
                 // load off the tyres (v^2 x the vertical curvature): Mount
                 // Panorama's Skyline (7 -> 13 % down in ~40 m) at 135 km/h
                 // is ~20 % lighter, and the MX-5 ran wide into the Esses.
                 // v^2 = k mu g r / (1 + k mu r kv) (EVOVIEW_LINE_CREST=0: off)
-                let kv = if td.rig.is_some() && std::env::var("EVOVIEW_LINE_CREST").map_or(true, |v| v != "0") {
+                let kv = if td.rig.is_some() && crate::envc::var("EVOVIEW_LINE_CREST").map_or(true, |v| v != "0") {
                     let (q0, q1, q2) = (self.line[j], self.line[(j + 12) % n], self.line[(j + 24) % n]);
                     let h = |a: Vec3, b: Vec3| Vec2::new(b.x - a.x, b.z - a.z).length().max(0.5);
                     let (d1, d2) = (h(q0, q1), h(q1, q2));
@@ -1885,7 +1885,7 @@ impl LineDriver {
                 // Panorama's drop from Skyline into the Esses (~13 %) left
                 // the MX-5 5-8 m wide at full lock into the tyre stacks
                 // (rigid-body car; EVOVIEW_LINE_SLOPE=0: flat braking)
-                if td.rig.is_some() && d > 5.0 && std::env::var("EVOVIEW_LINE_SLOPE").map_or(true, |v| v != "0") {
+                if td.rig.is_some() && d > 5.0 && crate::envc::var("EVOVIEW_LINE_SLOPE").map_or(true, |v| v != "0") {
                     let drop = (self.line[self.i].y - self.line[j].y) / d;
                     brake_g = (brake_g - G * drop.max(0.0)).max(2.0);
                 }
@@ -1918,7 +1918,7 @@ impl LineDriver {
         // understeer: the fronts saturated (past ~9 deg and 3 more than
         // the rears) - lift, and brake a little past 13 deg, as a driver
         // does when the wheel goes light (EVOVIEW_LINE_LIFT=0: off)
-        if std::env::var("EVOVIEW_LINE_LIFT").map_or(true, |v| v != "0") {
+        if crate::envc::var("EVOVIEW_LINE_LIFT").map_or(true, |v| v != "0") {
             if let Some((rc, _)) = td.rig.as_ref().filter(|_| v > 8.0) {
                 let af = (0.5 * (rc.c[0].alpha + rc.c[1].alpha)).abs().to_degrees();
                 let ar = (0.5 * (rc.c[2].alpha + rc.c[3].alpha)).abs().to_degrees();
@@ -1946,7 +1946,7 @@ impl LineDriver {
         // slides (all of it to 5 deg of slip, none from 10) and keep some of
         // the tyres for the corner (friction circle on the lateral g asked
         // of them); EVOVIEW_LINE_FOOT=0: the old foot
-        if std::env::var("EVOVIEW_LINE_FOOT").map_or(true, |v| v != "0") {
+        if crate::envc::var("EVOVIEW_LINE_FOOT").map_or(true, |v| v != "0") {
             if let Some((rc, _)) = td.rig.as_ref() {
                 let ar = rc.c[2].alpha.abs().max(rc.c[3].alpha.abs()).to_degrees();
                 let slide = ((10.0 - ar) / 5.0).clamp(0.0, 1.0);
@@ -2068,21 +2068,21 @@ fn kerb_attack(line: Vec<Vec3>, m: f32, wander: f32) -> Vec<Vec3> {
 /// a gentle weave, a stop) and print the state every half second - a check
 /// of the physics without a keyboard.
 pub fn test_run(td: &mut TrackDrive, secs: f32, mut driver: Option<LineDriver>, mut laps: Option<&mut crate::laps::Session>) {
-    if std::env::var_os("EVOVIEW_RIG_PAD").is_some() {
+    if crate::envc::var_os("EVOVIEW_RIG_PAD").is_some() {
         if let Some((rc, _)) = td.rig.as_mut() {
-            if std::env::var_os("EVOVIEW_RIG_STEADY").is_some() {
+            if crate::envc::var_os("EVOVIEW_RIG_STEADY").is_some() {
                 crate::rigcar::steady_test(rc);
                 return;
             }
-            if std::env::var_os("EVOVIEW_RIG_DONUT").is_some() {
+            if crate::envc::var_os("EVOVIEW_RIG_DONUT").is_some() {
                 crate::rigcar::donut_test(rc);
                 return;
             }
-            if std::env::var_os("EVOVIEW_RIG_FFB").is_some() {
+            if crate::envc::var_os("EVOVIEW_RIG_FFB").is_some() {
                 crate::rigcar::ffb_table(rc);
                 return;
             }
-            if std::env::var_os("EVOVIEW_RIG_GEARTEST").is_some() {
+            if crate::envc::var_os("EVOVIEW_RIG_GEARTEST").is_some() {
                 crate::rigcar::gear_test(rc);
             } else {
                 crate::rigcar::pad_test(rc);
@@ -2096,7 +2096,7 @@ pub fn test_run(td: &mut TrackDrive, secs: f32, mut driver: Option<LineDriver>, 
     }
     // EVOVIEW_PROBE_AT=x,z,dx,dz: the ground along a line from (x, z), every
     // 0.5 m for 10 m (surface, height) - what is under a wall hit
-    if let Some(v) = std::env::var("EVOVIEW_PROBE_AT").ok().map(|s| s.split(',').filter_map(|t| t.trim().parse::<f32>().ok()).collect::<Vec<_>>()).filter(|v| v.len() == 4) {
+    if let Some(v) = crate::envc::var("EVOVIEW_PROBE_AT").ok().map(|s| s.split(',').filter_map(|t| t.trim().parse::<f32>().ok()).collect::<Vec<_>>()).filter(|v| v.len() == 4) {
         let d = Vec3::new(v[2], 0.0, v[3]).normalize_or_zero();
         for i in 0..=20 {
             let p = Vec3::new(v[0], 0.0, v[1]) + d * (i as f32 * 0.5);
@@ -2106,7 +2106,7 @@ pub fn test_run(td: &mut TrackDrive, secs: f32, mut driver: Option<LineDriver>, 
             }
         }
     }
-    if std::env::var_os("EVOVIEW_DRIVE_PROBE").is_some() {
+    if crate::envc::var_os("EVOVIEW_DRIVE_PROBE").is_some() {
         let f = td.forward();
         let l = td.left();
         for i in 0..24 {
@@ -2150,7 +2150,7 @@ pub fn test_run(td: &mut TrackDrive, secs: f32, mut driver: Option<LineDriver>, 
         }
     }
     // EVOVIEW_PROBE_AT="x,z[,top];...": what the ground probe finds there
-    if let Ok(v) = std::env::var("EVOVIEW_PROBE_AT") {
+    if let Ok(v) = crate::envc::var("EVOVIEW_PROBE_AT") {
         for p in v.split(';') {
             let v: Vec<f32> = p.split(',').filter_map(|a| a.trim().parse().ok()).collect();
             if v.len() >= 2 {
@@ -2166,7 +2166,7 @@ pub fn test_run(td: &mut TrackDrive, secs: f32, mut driver: Option<LineDriver>, 
     let mut t = 0.0f32;
     let mut next = 0.0f32;
     // EVOVIEW_LINE_NEAR="x,z": the racing line's points within 120 m of a spot
-    if let (Some(d), Ok(v)) = (driver.as_ref(), std::env::var("EVOVIEW_LINE_NEAR")) {
+    if let (Some(d), Ok(v)) = (driver.as_ref(), crate::envc::var("EVOVIEW_LINE_NEAR")) {
         if let Some((x, z)) = v.split_once(',').and_then(|(a, b)| Some((a.parse::<f32>().ok()?, b.parse::<f32>().ok()?))) {
             for (i, p) in d.line.iter().enumerate() {
                 if (p.x - x).powi(2) + (p.z - z).powi(2) < 120.0 * 120.0 {
@@ -2201,7 +2201,7 @@ pub fn test_run(td: &mut TrackDrive, secs: f32, mut driver: Option<LineDriver>, 
             Some(d) => d.controls(td, dt),
             // EVOVIEW_DRIVE_SPIN: 4 s flat out, then handbrake + full lock
             // (a car sliding past 90 degrees must keep sliding, not stop)
-            None if std::env::var_os("EVOVIEW_DRIVE_SPIN").is_some() => Controls {
+            None if crate::envc::var_os("EVOVIEW_DRIVE_SPIN").is_some() => Controls {
                 throttle: if t < 8.0 { 1.0 } else { 0.0 },
                 brake: 0.0,
                 steer: if (8.0..9.0).contains(&t) { 1.0 } else { 0.0 },
@@ -2211,7 +2211,7 @@ pub fn test_run(td: &mut TrackDrive, secs: f32, mut driver: Option<LineDriver>, 
             },
             // EVOVIEW_DRIVE_STRAIGHT: flat out, wheel straight, until the
             // first barrier (does the car stop at it?)
-            None if std::env::var_os("EVOVIEW_DRIVE_STRAIGHT").is_some() => Controls {
+            None if crate::envc::var_os("EVOVIEW_DRIVE_STRAIGHT").is_some() => Controls {
                 throttle: 1.0,
                 analog: false,
                 ..Default::default()
@@ -2226,7 +2226,7 @@ pub fn test_run(td: &mut TrackDrive, secs: f32, mut driver: Option<LineDriver>, 
             },
         };
         // a scripted drive shifts for itself (EVOVIEW_AUTO_SHIFT=0: not)
-        c.auto_box = std::env::var("EVOVIEW_AUTO_SHIFT").map_or(true, |v| v != "0");
+        c.auto_box = crate::envc::var("EVOVIEW_AUTO_SHIFT").map_or(true, |v| v != "0");
         if let Some(p) = probe.as_mut() {
             p.controls(td, t, &mut c);
         }
@@ -2234,7 +2234,7 @@ pub fn test_run(td: &mut TrackDrive, secs: f32, mut driver: Option<LineDriver>, 
         // before the line point nearest (x, z) - to replay one spot of a long
         // track (the Nordschleife's out lap is ~11 min)
         if t == 0.0 {
-            if let (Some(d), Some(v)) = (driver.as_mut(), std::env::var("EVOVIEW_DRIVE_START_XZ").ok()) {
+            if let (Some(d), Some(v)) = (driver.as_mut(), crate::envc::var("EVOVIEW_DRIVE_START_XZ").ok()) {
                 let n: Vec<f32> = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
                 if n.len() >= 2 {
                     let len = d.line.len();
@@ -2330,7 +2330,7 @@ pub fn test_run(td: &mut TrackDrive, secs: f32, mut driver: Option<LineDriver>, 
             fxpk[5] = fxpk[5].max(ffb.fx.abs());
         }
         if t >= next {
-            next += if std::env::var_os("EVOVIEW_DRIVE_SPIN").is_some() { 0.25 } else if std::env::var_os("EVOVIEW_FFB_LOG").is_some() { 0.1 } else { 0.5 };
+            next += if crate::envc::var_os("EVOVIEW_DRIVE_SPIN").is_some() { 0.25 } else if crate::envc::var_os("EVOVIEW_FFB_LOG").is_some() { 0.1 } else { 0.5 };
             let sp = (td.vx * td.vx + td.vy * td.vy).sqrt() * 3.6;
             // how far off the racing line (m), from the driver's own line
             let off = driver.as_ref().map_or(f32::NAN, |d| {
@@ -2340,7 +2340,7 @@ pub fn test_run(td: &mut TrackDrive, secs: f32, mut driver: Option<LineDriver>, 
                      t, td.speed_kmh(), sp, td.vy.atan2(td.vx).to_degrees(), td.gear, td.rpm,
                      td.pos.x, td.pos.y, td.pos.z, td.yaw.to_degrees(), fpeak, hub, td.vx * td.r / G, off);
             fpeak = 0.0;
-            if std::env::var_os("EVOVIEW_FFB_FX_LOG").is_some() {
+            if crate::envc::var_os("EVOVIEW_FFB_FX_LOG").is_some() {
                 println!("      road fx: kerb {:.2} bump {:.2} slip {:.2} abs {:.2} -> offset {:.2}", fxpk[0], fxpk[1], fxpk[2], fxpk[4], fxpk[5]);
             }
             fxpk = [0.0; 6];
@@ -2389,7 +2389,7 @@ struct AidsProbe {
 
 impl AidsProbe {
     fn from_env() -> Option<AidsProbe> {
-        let v = std::env::var("EVOVIEW_AIDS_PROBE").ok()?;
+        let v = crate::envc::var("EVOVIEW_AIDS_PROBE").ok()?;
         let (kind, arg) = v.split_once(':').map_or((v.as_str(), None), |(a, b)| (a, Some(b)));
         Some(AidsProbe {
             brake: kind == "brake",
@@ -2529,7 +2529,7 @@ struct Clutch2 { inertia: f32, max_torque: f32, auto: (bool, f32, f32, bool) }
 pub fn downshift_at() -> f32 {
     use std::sync::OnceLock;
     static D: OnceLock<f32> = OnceLock::new();
-    *D.get_or_init(|| match std::env::var("EVOVIEW_DOWNSHIFT").ok().and_then(|v| v.parse::<f32>().ok()) {
+    *D.get_or_init(|| match crate::envc::var("EVOVIEW_DOWNSHIFT").ok().and_then(|v| v.parse::<f32>().ok()) {
         Some(v) if v <= 0.0 => 0.62,
         Some(v) => v.clamp(0.3, 0.9),
         None => 0.8,
@@ -2538,7 +2538,7 @@ pub fn downshift_at() -> f32 {
 
 /// EVOVIEW_DOWNSHIFT=0: the rig car's old bog-only downshift.
 pub fn downshift_old() -> bool {
-    std::env::var("EVOVIEW_DOWNSHIFT").map_or(false, |v| v.parse::<f32>().map_or(false, |f| f <= 0.0))
+    crate::envc::var("EVOVIEW_DOWNSHIFT").map_or(false, |v| v.parse::<f32>().map_or(false, |f| f <= 0.0))
 }
 
 /// EVOVIEW_LINE_RECOVER=0: the racing-line driver keeps the line's speed
@@ -2546,5 +2546,5 @@ pub fn downshift_old() -> bool {
 fn recover() -> bool {
     use std::sync::OnceLock;
     static R: OnceLock<bool> = OnceLock::new();
-    *R.get_or_init(|| std::env::var("EVOVIEW_LINE_RECOVER").map_or(true, |v| v != "0"))
+    *R.get_or_init(|| crate::envc::var("EVOVIEW_LINE_RECOVER").map_or(true, |v| v != "0"))
 }

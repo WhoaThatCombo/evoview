@@ -34,10 +34,10 @@ fn kspkg_in(dir: &Path) -> Option<PathBuf> {
 fn steam_libraries() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     let mut steam: Vec<PathBuf> = Vec::new();
-    if let Ok(p) = std::env::var("ProgramFiles(x86)") {
+    if let Ok(p) = crate::envc::var("ProgramFiles(x86)") {
         steam.push(PathBuf::from(p).join("Steam"));
     }
-    if let Ok(p) = std::env::var("ProgramFiles") {
+    if let Ok(p) = crate::envc::var("ProgramFiles") {
         steam.push(PathBuf::from(p).join("Steam"));
     }
     for s in &steam {
@@ -60,7 +60,7 @@ fn steam_libraries() -> Vec<PathBuf> {
 
 /// The player's `content.kspkg`, or `None` if the game cannot be found.
 pub fn find_content_kspkg() -> Option<PathBuf> {
-    if let Ok(v) = std::env::var("EVOVIEW_KSPKG") {
+    if let Ok(v) = crate::envc::var("EVOVIEW_KSPKG") {
         let p = PathBuf::from(&v);
         if p.is_file() {
             return Some(p);

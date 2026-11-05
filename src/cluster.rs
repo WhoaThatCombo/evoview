@@ -37,7 +37,7 @@ pub struct Cluster {
 }
 
 fn cfg() -> Option<std::path::PathBuf> {
-    std::env::var_os("APPDATA").map(|a| std::path::Path::new(&a).join("evoview").join("hud.cfg"))
+    crate::envc::var_os("APPDATA").map(|a| std::path::Path::new(&a).join("evoview").join("hud.cfg"))
 }
 
 impl Cluster {
@@ -233,7 +233,7 @@ impl Cluster {
 pub fn mph() -> bool {
     use std::sync::OnceLock;
     static M: OnceLock<bool> = OnceLock::new();
-    *M.get_or_init(|| std::env::var("EVOVIEW_SPEED_UNITS").map_or(false, |v| v.eq_ignore_ascii_case("mph")))
+    *M.get_or_init(|| crate::envc::var("EVOVIEW_SPEED_UNITS").map_or(false, |v| v.eq_ignore_ascii_case("mph")))
 }
 
 /// A speed in the chosen units, e.g. "58 km/h".

@@ -129,7 +129,7 @@ impl Drive {
         for z in corner_z.iter_mut() {
             *z -= cg_z;
         }
-        if std::env::var_os("EVOVIEW_ATTITUDE_LOG").is_some() {
+        if crate::envc::var_os("EVOVIEW_ATTITUDE_LOG").is_some() {
             eprintln!("rig springs: kf {kf:.0} kr {kr:.0} arb {arbf:.0}/{arbr:.0} N/m, track {:.2}/{:.2}, mass {mass:.0}, h_cg {h_cg:.2}, box {:?}",
                       track[0], track[1], bx);
         }

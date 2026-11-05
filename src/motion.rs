@@ -33,7 +33,7 @@ struct U {
 }
 
 pub fn wanted() -> bool {
-    std::env::var("EVOVIEW_MOTION").map_or(true, |v| v != "0")
+    crate::envc::var("EVOVIEW_MOTION").map_or(true, |v| v != "0")
 }
 
 pub struct Motion {
@@ -62,8 +62,8 @@ impl Motion {
     pub fn new(device: &wgpu::Device, rw: u32, rh: u32, samples: u32, rg: bool, bone_bytes: u64) -> Motion {
         // EVOVIEW_WHEEL_MV_PX: a wheel spinning more than this many render
         // px a frame moves with its centre only (0 / EVOVIEW_WHEEL_MV=0: off)
-        let wheel_px = if std::env::var("EVOVIEW_WHEEL_MV").map_or(false, |v| v == "0") { 0.0 }
-            else { std::env::var("EVOVIEW_WHEEL_MV_PX").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(3.0) };
+        let wheel_px = if crate::envc::var("EVOVIEW_WHEEL_MV").map_or(false, |v| v == "0") { 0.0 }
+            else { crate::envc::var("EVOVIEW_WHEEL_MV_PX").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(3.0) };
         let src = include_str!("motion.wgsl")
             .replace("WHEEL_MV_PX", &format!("{wheel_px:.3}"))
             .replace("DEPTH_TEXTURE", if samples > 1 { "texture_depth_multisampled_2d" } else { "texture_depth_2d" })
@@ -353,6 +353,17 @@ impl Motion {
             if n > 0 {
                 queue.write_buffer(b, 0, bytemuck::cast_slice(&rows[..n]));
             }
+        }
+    }
+
+    /// Last frame's bones for bone blocks from `first` (of 256 bones): a
+    /// replay car posed this frame but not the last (carcull.rs skips the
+    /// rigs of cars off screen) takes this frame's pose, not a stale one -
+    /// stale, its first frame blurred along a huge false vector.
+    pub fn set_prev_bones(&self, queue: &wgpu::Queue, first: usize, bones: &[[f32; 16]]) {
+        let off = (first * crate::render::MAX_BONES * 64) as u64;
+        if off + (bones.len() * 64) as u64 <= self.prev_bones.size() {
+            queue.write_buffer(&self.prev_bones, off, bytemuck::cast_slice(bones));
         }
     }
 

@@ -103,7 +103,7 @@ impl Settings {
     /// _DAMP / _GAMMA / _MIN_DAMPER / _DAMPER_GAIN / _INVERT / _LEGACY.
     pub fn from_env() -> Self {
         let mut s = Settings::default();
-        let legacy = std::env::var("EVOVIEW_FFB_LEGACY").map(|v| v == "1").unwrap_or(false);
+        let legacy = crate::envc::var("EVOVIEW_FFB_LEGACY").map(|v| v == "1").unwrap_or(false);
         if let Some(e) = evo_device_settings() {
             if e.gain > 0.0 { s.gain = e.gain; }
             if e.steer_lock > 0.0 { s.wheel_range = e.steer_lock; }
@@ -117,8 +117,8 @@ impl Settings {
             s.legacy = true;
             s.fade_floor = 1.0;
         }
-        if let Some(v) = std::env::var("EVOVIEW_WHEEL_RANGE").ok().and_then(|v| v.parse::<f32>().ok()) { s.wheel_range = v; }
-        let f = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f32>().ok());
+        if let Some(v) = crate::envc::var("EVOVIEW_WHEEL_RANGE").ok().and_then(|v| v.parse::<f32>().ok()) { s.wheel_range = v; }
+        let f = |k: &str| crate::envc::var(k).ok().and_then(|v| v.parse::<f32>().ok());
         if let Some(v) = f("EVOVIEW_FFB_GAIN") { s.gain = v; }
         if let Some(v) = f("EVOVIEW_FFB_SMOOTH") { s.smooth = v.clamp(0.0, 0.99); }
         if let Some(v) = f("EVOVIEW_FFB_DAMP") { s.rate_damping = v; }
@@ -129,24 +129,24 @@ impl Settings {
         if let Some(v) = f("EVOVIEW_FFB_DAMPER_GAIN").or_else(|| f("EVOVIEW_FFB_DAMPER")) { s.damper_gain = v.max(0.0); }
         // the tab's Steering damping is a share of the player's own
         if let Some(v) = f("EVOVIEW_FFB_DAMP_SCALE") { s.rate_damping *= v.max(0.0); }
-        s.soft_clip = std::env::var("EVOVIEW_FFB_SOFTCLIP").map_or(false, |v| v == "1");
+        s.soft_clip = crate::envc::var("EVOVIEW_FFB_SOFTCLIP").map_or(false, |v| v == "1");
         if let Some(v) = f("EVOVIEW_FFB_MIN_FORCE") { s.min_force = v.clamp(0.0, 0.5); }
         if let Some(v) = f("EVOVIEW_FFB_CURBS") { s.enh.curbs = v.max(0.0); }
         if let Some(v) = f("EVOVIEW_FFB_GFORCE") { s.enh.gforce = v.max(0.0); }
         if let Some(v) = f("EVOVIEW_FFB_SLIPS") { s.enh.slips = v.max(0.0); }
         if let Some(v) = f("EVOVIEW_FFB_ABS") { s.enh.abs = v.max(0.0); }
         s.boost = load_boost();
-        s.invert = std::env::var("EVOVIEW_FFB_INVERT").map(|v| v == "1").unwrap_or(false);
+        s.invert = crate::envc::var("EVOVIEW_FFB_INVERT").map(|v| v == "1").unwrap_or(false);
         s
     }
 }
 
 fn boost_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("APPDATA").map(|a| std::path::Path::new(&a).join("evoview").join("ffb.cfg"))
+    crate::envc::var_os("APPDATA").map(|a| std::path::Path::new(&a).join("evoview").join("ffb.cfg"))
 }
 
 fn load_boost() -> f32 {
-    if let Some(v) = std::env::var("EVOVIEW_FFB_BOOST").ok().and_then(|v| v.parse::<f32>().ok()) {
+    if let Some(v) = crate::envc::var("EVOVIEW_FFB_BOOST").ok().and_then(|v| v.parse::<f32>().ok()) {
         return v;
     }
     boost_path().and_then(|p| std::fs::read_to_string(p).ok())
@@ -254,7 +254,7 @@ impl Effects {
 /// 2 steer_lock, 3 dynamic_damping, 5 min_damper, 6 damper_gain} and
 /// f4 ForceFeedbackEnhancements), when the file is there.
 pub fn evo_device_settings() -> Option<EvoDevice> {
-    let home = std::env::var_os("USERPROFILE")?;
+    let home = crate::envc::var_os("USERPROFILE")?;
     let p = std::path::Path::new(&home).join("Saved Games").join("ACE").join("input_settings.inputsettings");
     let d = std::fs::read(p).ok()?;
     let mut out = None;

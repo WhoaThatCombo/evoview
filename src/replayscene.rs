@@ -325,7 +325,7 @@ fn mesh_bounds(car: &Car, m: &MeshEntry) -> (Vec3, Vec3) {
 /// smallest eigenvector of their covariance), turned to +X. Falls back to X
 /// when it is not near X (EVOVIEW_SPIN_AXIS=car: always X).
 pub(crate) fn tyre_axle(car: &Car, m: &MeshEntry) -> Vec3 {
-    if std::env::var("EVOVIEW_SPIN_AXIS").map_or(false, |v| v == "car") {
+    if crate::envc::var("EVOVIEW_SPIN_AXIS").map_or(false, |v| v == "car") {
         return Vec3::X;
     }
     let p = car.floats(m.positions);
@@ -489,7 +489,7 @@ impl Scene {
         // replay of ~10 models took 9 GB at full size on a 12 GB card, it
         // paged, and every pass ran 15-30x slow (4 fps; TAA alone 11 ms).
         // EVOVIEW_REPLAY_TEX_SKIP=n overrides.
-        let skip = std::env::var("EVOVIEW_REPLAY_TEX_SKIP").ok().and_then(|v| v.parse::<u32>().ok())
+        let skip = crate::envc::var("EVOVIEW_REPLAY_TEX_SKIP").ok().and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(match slots.len() { 0..=2 => 0, 3..=6 => 1, _ => 2 });
         if skip > 0 {
             println!("replay: {} car models, their textures {skip} mip(s) down", slots.len());
@@ -500,7 +500,7 @@ impl Scene {
             // a mod car is in its own package (Saved Games/ACE/mods/<model>
             // .kspkg) over the base game, as the race path (below) opens it
             let loaded = crate::load::load_from_package(pkg, &s.model, base).or_else(|e| {
-                let m = std::env::var_os("USERPROFILE").map(|h| std::path::Path::new(&h).join("Saved Games")
+                let m = crate::envc::var_os("USERPROFILE").map(|h| std::path::Path::new(&h).join("Saved Games")
                     .join("ACE").join("mods").join(format!("{}.kspkg", s.model)));
                 match m.filter(|m| m.exists()) {
                     Some(m) => {
@@ -573,7 +573,7 @@ impl Scene {
                 for k in 0..4 {
                     let local = basis.transform_vector3(p.wheels[k] - p.pos);
                     d += local - s.centres[k];
-                    if std::env::var("EVOVIEW_REPLAY_LOG").is_ok() {
+                    if crate::envc::var("EVOVIEW_REPLAY_LOG").is_ok() {
                         eprintln!(
                             "{} wheel{k}: mesh ({:6.3},{:6.3},{:6.3})  replay ({:6.3},{:6.3},{:6.3})  r={:.3}",
                             s.model, s.centres[k].x, s.centres[k].y, s.centres[k].z,
@@ -591,7 +591,7 @@ impl Scene {
                 c.iter().find(|c| c.name.eq_ignore_ascii_case("cockpit")).or_else(|| c.iter().find(|c| c.mode == 1)).cloned()
             });
             // EVOVIEW_REPLAY_RIG=0: the old rigid bodies and wheels
-            if loaded.skeleton.rig.is_some() && std::env::var("EVOVIEW_REPLAY_RIG").map_or(true, |v| v != "0") {
+            if loaded.skeleton.rig.is_some() && crate::envc::var("EVOVIEW_REPLAY_RIG").map_or(true, |v| v != "0") {
                 s.skel = Some(std::sync::Arc::new(loaded.skeleton));
             }
             kept.push(s);
@@ -716,7 +716,7 @@ impl Scene {
             match crate::load::package_vfs(pkg, model, base) {
                 Ok(v) => Ok(v),
                 Err(e) => {
-                    let m = std::env::var_os("USERPROFILE").map(|h| std::path::Path::new(&h).join("Saved Games").join("ACE").join("mods").join(format!("{model}.kspkg")));
+                    let m = crate::envc::var_os("USERPROFILE").map(|h| std::path::Path::new(&h).join("Saved Games").join("ACE").join("mods").join(format!("{model}.kspkg")));
                     match m.filter(|m| m.exists()) {
                         Some(m) => {
                             println!("car {model}: the mod {}", m.display());
@@ -734,19 +734,19 @@ impl Scene {
         let s = measure_slot(&mut meshes, range, &loaded.car, model, 1);
         let mut slots = vec![s];
         let player_look = crate::load::pick_visual_preset(&mut vfs).map(|k| crate::livery::stem_of(&k));
-        let max_looks = std::env::var("EVOVIEW_AI_LIVERIES").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(6);
+        let max_looks = crate::envc::var("EVOVIEW_AI_LIVERIES").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(6);
         let mut ai_vfs: Vec<(String, crate::load::Vfs)> = Vec::new();
         let mut place = vec![(0usize, 0usize, 0usize); ai.len()];
         // the env the loader reads a look from, put back after
-        let saved = (std::env::var("EVOVIEW_VISUAL").ok(), std::env::var("EVOVIEW_PAINT").ok());
+        let saved = (crate::envc::var("EVOVIEW_VISUAL").ok(), crate::envc::var("EVOVIEW_PAINT").ok());
         let restore = |k: &str, v: &Option<String>| match v {
-            Some(v) => std::env::set_var(k, v),
-            None => std::env::remove_var(k),
+            Some(v) => crate::envc::set_var(k, v),
+            None => crate::envc::remove_var(k),
         };
         let t_ai = std::time::Instant::now();
         // the opponents' textures EVOVIEW_AI_TEX_SKIP mips down: 1 (a quarter
         // of the memory), 2 online (a whole server of liveries)
-        let ai_skip = std::env::var("EVOVIEW_AI_TEX_SKIP").ok().and_then(|v| v.parse::<u32>().ok())
+        let ai_skip = crate::envc::var("EVOVIEW_AI_TEX_SKIP").ok().and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(if own.iter().any(|o| o.is_some()) { 2 } else { 1 });
         crate::load::CAR_TEX_SKIP.store(ai_skip, std::sync::atomic::Ordering::Relaxed);
         crate::load::set_car_lods(true);
@@ -767,14 +767,14 @@ impl Scene {
                 let mine = if *m == model { player_look.as_deref() } else { None };
                 // each livery's own paints (env-selected, as the loader reads them)
                 let own: Vec<(String, Vec<String>)> = list.iter().map(|l| {
-                    std::env::set_var("EVOVIEW_VISUAL", &l.stem);
+                    crate::envc::set_var("EVOVIEW_VISUAL", &l.stem);
                     let p = crate::load::preset_paints(&mut v);
                     (l.stem.clone(), p)
                 }).collect();
                 restore("EVOVIEW_VISUAL", &saved.0);
                 let own_of = |s: &str| own.iter().find(|o| o.0 == s).map_or(Vec::new(), |o| o.1.clone());
                 println!("AI model {m}: {} livery(s), {} body colour(s)", list.len(), paints.len());
-                if std::env::var_os("EVOVIEW_AI_LOOK_LOG").is_some() {
+                if crate::envc::var_os("EVOVIEW_AI_LOOK_LOG").is_some() {
                     for ext in ["design", "cardesign", "visualcarpreset", "oemmultilayercolor"] {
                         for d in ["skins", "presets", "", "skins/designs"] {
                             for k in v.list(d, ext) {
@@ -812,9 +812,9 @@ impl Scene {
             }
             for look in &distinct {
                 if let Some(l) = look {
-                    std::env::set_var("EVOVIEW_VISUAL", &l.visual);
+                    crate::envc::set_var("EVOVIEW_VISUAL", &l.visual);
                     match &l.paint {
-                        Some(p) => std::env::set_var("EVOVIEW_PAINT", p),
+                        Some(p) => crate::envc::set_var("EVOVIEW_PAINT", p),
                         None => restore("EVOVIEW_PAINT", &saved.1),
                     }
                 }
@@ -825,7 +825,7 @@ impl Scene {
                 let si = slots.len();
                 let mine: Vec<usize> = cars.iter().zip(&looks).filter(|(_, x)| *x == look).map(|(&c, _)| c).collect();
                 let tag = format!("a{}", si - 1);
-                let range = if std::env::var("EVOVIEW_AI_SHARE_TEX").map_or(true, |v| v != "0") {
+                let range = if crate::envc::var("EVOVIEW_AI_SHARE_TEX").map_or(true, |v| v != "0") {
                     merge_shared(&mut meshes, &mut textures, &mut tex_src, &mut materials, &mut blob, &l.car, &tag)
                 } else {
                     let r = merge(&mut meshes, &mut textures, &mut tex_src, &mut materials, &mut blob, &l.car, Some(&tag));
@@ -870,23 +870,23 @@ impl Scene {
 /// appended to the running one. Runs off the render thread.
 pub fn load_net_car(pkg: &Path, base: Option<&Path>, model: &str, own: Option<&[u8]>, tag: &str) -> Result<(Car, Slot), String> {
     let mut v = crate::load::package_vfs(pkg, model, base).map_err(|e| format!("car {model}: {e}"))?;
-    let saved = std::env::var("EVOVIEW_VISUAL").ok();
+    let saved = crate::envc::var("EVOVIEW_VISUAL").ok();
     if let Some(fs) = own {
         if let Some(bytes) = crate::load::netcar_visual(&mut v, fs) {
             let stem = format!("mp_{tag}");
             v.add_file(&format!("presets/{stem}.visualcarpreset"), bytes);
-            std::env::set_var("EVOVIEW_VISUAL", &stem);
+            crate::envc::set_var("EVOVIEW_VISUAL", &stem);
         }
     }
-    let skip = std::env::var("EVOVIEW_AI_TEX_SKIP").ok().and_then(|x| x.parse::<u32>().ok()).unwrap_or(2);
+    let skip = crate::envc::var("EVOVIEW_AI_TEX_SKIP").ok().and_then(|x| x.parse::<u32>().ok()).unwrap_or(2);
     crate::load::CAR_TEX_SKIP.store(skip, std::sync::atomic::Ordering::Relaxed);
     crate::load::set_car_lods(true);
     let r = crate::load::load(&mut v);
     crate::load::CAR_TEX_SKIP.store(0, std::sync::atomic::Ordering::Relaxed);
     crate::load::set_car_lods(false);
     match saved {
-        Some(x) => std::env::set_var("EVOVIEW_VISUAL", x),
-        None => std::env::remove_var("EVOVIEW_VISUAL"),
+        Some(x) => crate::envc::set_var("EVOVIEW_VISUAL", x),
+        None => crate::envc::remove_var("EVOVIEW_VISUAL"),
     }
     let l = r.map_err(|e| format!("car {model}: {e}"))?;
     let (mut meshes, mut textures, mut materials, mut blob, mut tex_src) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());

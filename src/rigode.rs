@@ -75,7 +75,7 @@ pub struct Frame<'a> {
 
 impl OdeRig {
     pub fn enabled() -> bool {
-        std::env::var("EVOVIEW_RIG_ODE").map_or(false, |v| v != "0" && v != "links")
+        crate::envc::var("EVOVIEW_RIG_ODE").map_or(false, |v| v != "0" && v != "links")
     }
 
     /// `inertia`: the chassis' principal moments (body axes); hubs of
