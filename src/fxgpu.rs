@@ -679,7 +679,14 @@ impl FxGpu {
             let _t = crate::bench::cpu("fx particles");
             self.upload_particles(queue, fx, eye);
         }
+        // Seen from outside the car the screens are a few pixels: refreshed
+        // at 10 Hz there (checking a page for changes formats its whole
+        // draw list, ~0.5 ms a frame). In the cockpit, every frame.
         self.dash_t += dt;
+        if !crate::render::DASH_LIVE.load(std::sync::atomic::Ordering::Relaxed) && self.dash_t < 0.1 {
+            return;
+        }
+        self.dash_t = 0.0;
         let _t = crate::bench::cpu("fx dash");
         self.render_dash(device, queue, enc, fx, st, false);
     }

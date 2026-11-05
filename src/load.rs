@@ -1690,6 +1690,29 @@ impl Vfs {
         if let Ok(mut r) = self.reads.lock() {
             r.insert(key.to_string());
         }
+        if crate::envc::var_os("EVOVIEW_IO_BY_EXT").is_some() {
+            if let Some(Src::Pkg(e, _)) = self.entries.get(key) {
+                let ext = key.rsplit('.').next().unwrap_or("");
+                let name: &'static str = match ext {
+                    "texturemips" => "io: texturemips", "texture" => "io: texture", "mesh" => "io: mesh",
+                    "scene" => "io: scene", "material" => "io: material", "bank" => "io: bank",
+                    "animation" | "anim" => "io: animation", _ => "io: other",
+                };
+                crate::perf::add_bytes(name, e.size as u64);
+                static SEEN: std::sync::Mutex<Option<HashMap<String, (u32, u64)>>> = std::sync::Mutex::new(None);
+                if let Ok(mut g) = SEEN.lock() {
+                    let m = g.get_or_insert_with(HashMap::new);
+                    let x = m.entry(key.to_string()).or_insert((0, e.size as u64));
+                    x.0 += 1;
+                    if x.0 >= 2 {
+                        crate::perf::add_bytes("io: re-read", e.size as u64);
+                        if x.0 == 2 && e.size > 8 << 20 {
+                            eprintln!("IOREREAD {key} {:.1} MB", e.size as f64 / 1048576.0);
+                        }
+                    }
+                }
+            }
+        }
         match self.entries.get(key) {
             Some(Src::File(p)) => std::fs::read(p).unwrap_or_default(),
             Some(Src::Bytes(b)) => b.to_vec(),

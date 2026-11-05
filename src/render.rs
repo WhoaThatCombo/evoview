@@ -375,6 +375,10 @@ pub fn trace_clock() -> f64 {
 }
 
 pub static INTERIOR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The dash screens are drawn every frame (an in-car camera, the showroom);
+/// false: the camera is outside a driven / replayed car and they refresh at
+/// 10 Hz (fxgpu.rs update).
+pub static DASH_LIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 fn grade_uniform(outdoor: bool) -> [f32; 4] {
@@ -4049,6 +4053,9 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 h.road_up = td.road_up();
                                 h.step(dt, drawn, td.ffb_inputs().1.to_degrees(), m);
                             }
+                            DASH_LIVE.store(follow != crate::camera::Follow::Free
+                                && car_cams.get(cam_sel).map_or(false, |c| c.mode == 1 || c.mode == 4),
+                                std::sync::atomic::Ordering::Relaxed);
                             if follow != crate::camera::Follow::Free {
                                 let p = td.pose();
                                 INTERIOR.store(car_cams.get(cam_sel).map_or(false, |c| {
@@ -4132,6 +4139,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         // replacing it, so C can hand control back without the
                         // free view having moved in the meantime.
                         if let Some(pb) = opts.playback.as_ref() {
+                            DASH_LIVE.store(follow == crate::camera::Follow::Onboard, std::sync::atomic::Ordering::Relaxed);
                             if follow != crate::camera::Follow::Free {
                                 if let Some(&(ci, _)) = drivers.get(watched) {
                                     if let Some(p) = pb.replay.sample(ci, play_t) {
