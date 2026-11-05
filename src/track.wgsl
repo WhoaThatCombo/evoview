@@ -1147,6 +1147,22 @@ fn cutout_drop(p: vec2<f32>, alpha: f32) -> bool {
 }
 
 
+/// This material's texture LOD bias (track.rs turns every plain
+/// textureSample into a textureSampleBias by it): TAA's sharpening bias
+/// (taa.rs mip_bias, -1), except on alpha-blended materials (extra.w bit
+/// 6: fences, nets, screens; not the cutout foliage), which take frame.atm4.y of
+/// it (EVOVIEW_SEETHROUGH_MIP_K, 0). ⚠ A chain-link mesh sampled sharper
+/// than the pixel grid beats against it: the fences crawled and shimmered
+/// in motion (1 cm/frame dolly past Monza's: frame-to-frame fine change
+/// 2.69 at -1, 1.33 at 0), and the blended pass gives TAA nothing to
+/// clamp them with.
+fn lod_bias() -> f32 {
+    if ((u32(mat.extra.w + 0.5) & 64u) != 0u) {
+        return frame.lod.x * frame.atm4.y;
+    }
+    return frame.lod.x;
+}
+
 /// Dither for alpha-tested cards and the grass fade, stable per pixel.
 fn dither(p: vec2<f32>) -> f32 {
     return fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715))));
@@ -1260,9 +1276,9 @@ fn surface(in: VsOut, ng: vec3<f32>) -> Surface {
     // game's prepass reads it
     if (mat.surf.w > 0.0 && mat.ao.w != 0.0) {
         if (mat.flags.z > 0.5) {
-            s.alpha = textureSampleBias(t_opacity, s_wrap, buv, frame.lod.x + mat.ao.w).r;
+            s.alpha = textureSampleBias(t_opacity, s_wrap, buv, lod_bias() + mat.ao.w).r;
         } else if (mat.base_uv.w > 0.5) {
-            s.alpha = textureSampleBias(t_base, s_wrap, buv, frame.lod.x + mat.ao.w).a;
+            s.alpha = textureSampleBias(t_base, s_wrap, buv, lod_bias() + mat.ao.w).a;
         }
     }
 

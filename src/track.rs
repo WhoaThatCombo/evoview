@@ -902,7 +902,8 @@ pub struct FrameUniform {
     /// cloud light: x sun gain, y ambient gain, z extinction scale toward
     /// the sun, w powder strength
     pub atm3: [f32; 4],
-    /// x the deck's extinction as seen (not as shadow) over the shadow's
+    /// x the deck's extinction as seen (not as shadow) over the shadow's,
+    /// y the share of TAA's mip bias see-through materials take
     pub atm4: [f32; 4],
 }
 
@@ -1414,7 +1415,11 @@ impl TrackMatUniform {
                 // materials only: our cutouts include foliage chosen by file
                 // name and turned cards. EVOVIEW_TRACK_CULL=0 two-sided.
                 | (((blend == Blend::Opaque && track_cull() && p("__cull", 0.0) < 0.5) as u32) << 4)
-                | (((blend == Blend::Opaque && track_cull() && (p("__cull", 0.0) - 1.0).abs() < 0.5) as u32) << 5)) as f32,
+                | (((blend == Blend::Opaque && track_cull() && (p("__cull", 0.0) - 1.0).abs() < 0.5) as u32) << 5)
+                // bit 6: alpha-blended (fences, nets, screens): their own
+                // texture LOD bias (track.wgsl lod_bias). Not the cutouts:
+                // grass and foliage cards went visibly soft at 0
+                | (((blend == Blend::Alpha) as u32) << 6)) as f32,
         ];
         u.flags = [
             if s.base_n.is_some() { 1.0 } else { 0.0 },
@@ -2570,7 +2575,7 @@ impl TrackRender {
                         .unwrap_or_else(|| crate::clouds::track_source(include_str!("track.wgsl")));
                     // TAA resolves the track: its texture LOD bias (taa.rs),
                     // per view from the frame uniform (`lod`)
-                    crate::taa::with_mip_bias_expr(&src, "frame.lod.x")
+                    crate::taa::with_mip_bias_expr(&src, "lod_bias()")
                         .replace("MV_DEPTH", if samples > 1 { "texture_depth_multisampled_2d" } else { "texture_depth_2d" })
                         .into()
                 }),
@@ -3384,7 +3389,9 @@ impl TrackRender {
             // through, it gave thin, fuzzy, uniformly white puffs. Real
             // cumulus is optically thick (crisp edges, grey bases): 8x as
             // seen. The ground shadow keeps the old scale.
-            atm4: [if self.pano.on { env_f32("EVOVIEW_CLOUD_VIEW_DENSITY", 8.0) } else { 1.0 }, 0.0, 0.0, 0.0],
+            // y: the share of TAA's mip bias see-through materials take (lod_bias)
+            atm4: [if self.pano.on { env_f32("EVOVIEW_CLOUD_VIEW_DENSITY", 8.0) } else { 1.0 },
+                   env_f32("EVOVIEW_SEETHROUGH_MIP_K", 0.0), 0.0, 0.0],
         };
         queue.write_buffer(&self.frame_buf, 0, bytemuck::bytes_of(&u));
         self.last_frame.set(Some(u));
