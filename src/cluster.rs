@@ -19,6 +19,10 @@ pub struct Reading {
     pub handbrake: f32,
     pub stalled: bool,
     pub on_limiter: bool,
+    /// rpm and gear are known (a replay can lack them for other cars)
+    pub engine: bool,
+    /// clutch and handbrake are known (not in replays)
+    pub aux: bool,
 }
 
 pub struct Cluster {
@@ -53,6 +57,12 @@ impl Cluster {
             }
         }
         c
+    }
+
+    /// Shown, placed by its owner every frame (the replay overlay), not
+    /// read from or saved to hud.cfg.
+    pub fn fixed() -> Cluster {
+        Cluster { x: f32::NAN, y: 0.0, on: true, rect: (0.0, 0.0, 0.0, 0.0), drag: None }
     }
 
     fn save(&self) {
@@ -134,7 +144,7 @@ impl Cluster {
         // red; all red and flashing on the limiter
         let n = 10;
         let f = ((r.rpm / r.limiter.max(1.0) - 0.75) / 0.23).clamp(0.0, 1.0);
-        let lit = (f * n as f32).round() as usize;
+        let lit = if r.engine { (f * n as f32).round() as usize } else { 0 };
         let flash = r.on_limiter && (hud_time() * 8.0).fract() < 0.5;
         let gap = u(0.003);
         let sw = (iw - gap * (n - 1) as f32) / n as f32;
@@ -156,13 +166,16 @@ impl Cluster {
         let ls = 0.0105;
         let pw = u(0.012);
         let pg = u(0.007);
-        let pcol = pw * 3.0 + pg * 2.0;
+        let pedals: Vec<(f32, [f32; 4], &str)> = if r.aux {
+            vec![(r.clutch, t::hex(0x6ea8e0, 1.0), "C"), (r.brake, t::red(1.0), "B"), (r.throttle, t::ok(1.0), "T")]
+        } else {
+            vec![(r.brake, t::red(1.0), "B"), (r.throttle, t::ok(1.0), "T")]
+        };
+        let np = pedals.len() as f32;
+        let pcol = pw * np + pg * (np - 1.0);
         let px0 = ix + iw - pcol;
         let ph = bottom - top - hud.line_h(ls);
-        for (i, (v, c, l)) in [(r.clutch, t::hex(0x6ea8e0, 1.0), "C"), (r.brake, t::red(1.0), "B"), (r.throttle, t::ok(1.0), "T")]
-            .into_iter()
-            .enumerate()
-        {
+        for (i, (v, c, l)) in pedals.into_iter().enumerate() {
             let bx = px0 + i as f32 * (pw + pg);
             hud.round_rect(bx, top, pw, ph, 2.0, t::well(0.75));
             let v = v.clamp(0.0, 1.0);
@@ -181,11 +194,12 @@ impl Cluster {
         };
         let gs = 0.072;
         let gear = match r.gear {
+            _ if !r.engine => "–".to_string(),
             g if g < 0 => "R".to_string(),
             0 => "N".to_string(),
             g => g.to_string(),
         };
-        let gc = if r.stalled { t::dim2(1.0) } else if flash { t::red(1.0) } else { t::fg(1.0) };
+        let gc = if r.stalled || !r.engine { t::dim2(1.0) } else if flash { t::red(1.0) } else { t::fg(1.0) };
         // digits sit ~0.22 em below the line's top: pull the gear up to the lights
         centre(hud, &gear, top - gs * 0.22, gs, Weight::Semibold, gc);
         let mph = mph();
@@ -195,8 +209,17 @@ impl Cluster {
         centre(hud, &format!("{v:.0}"), sy, ss, Weight::Semibold, t::fg(1.0));
         let ry = sy + hud.line_h(ss) - 0.006;
         let unit = if mph { "mph" } else { "km/h" };
-        let rs = if r.stalled { "Stalled".to_string() } else { format!("{unit}   {:.0} rpm", r.rpm) };
+        let rs = if r.stalled {
+            "Stalled".to_string()
+        } else if r.engine {
+            format!("{unit}   {:.0} rpm", r.rpm)
+        } else {
+            unit.to_string()
+        };
         centre(hud, &rs, ry, ls, Weight::Regular, if r.stalled { t::red(1.0) } else { t::dim(1.0) });
+        if !r.aux {
+            return;
+        }
         let hb = r.handbrake > 0.05;
         let hh = hud.line_h(ls) + 0.003;
         let hy = bottom - hh;

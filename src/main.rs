@@ -96,6 +96,7 @@ mod grade;
 mod render;
 mod replay;
 mod replayscene;
+mod replayhud;
 mod shot;
 mod track;
 mod mirrors;

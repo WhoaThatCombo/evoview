@@ -1524,7 +1524,8 @@ KEYS
            F12 hot exhaust
   manual   (drive mode off) PageUp/PageDown rpm, Shift+PageUp/PageDown gear,
            Home/End speed, Insert brake pedal, Delete reverse
-  replay   P play, , . scrub, - = speed, R restart, C camera, [ ] car
+  replay   Space / P play, Left / Right 5 s (Shift 30 s), Up / Down or - = speed, , . scrub,
+           R restart, C camera, [ ] car, Tab car list, ` hide the overlay; click / drag the timeline
   Esc quit
 ";
 
@@ -2356,6 +2357,9 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
             v
         })
         .unwrap_or_default();
+    // the replay overlay (replayhud.rs) and its copy of the driving cluster
+    let mut rui = opts.playback.as_ref().map(|pb| crate::replayhud::ReplayUi::new(&pb.replay, &drivers));
+    let mut rcluster = crate::cluster::Cluster::fixed();
     // Slots address meshes by SOURCE index; build_scene drops some meshes, so
     // translate once here rather than searching every frame.
     #[allow(clippy::type_complexity)]
@@ -2549,6 +2553,9 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         }
                         if let PhysicalKey::Code(code) = event.physical_key {
                             if pressed {
+                                if let Some(r) = rui.as_mut() {
+                                    r.wake();
+                                }
                                 held.insert(code);
                             } else {
                                 held.remove(&code);
@@ -2669,11 +2676,36 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     KeyCode::KeyP if opts.playback.is_some() => {
                                         playing = !playing;
                                     }
+                                    KeyCode::Space if opts.playback.is_some() && fly.is_none() => {
+                                        playing = !playing;
+                                    }
+                                    KeyCode::ArrowLeft | KeyCode::ArrowRight if opts.playback.is_some() => {
+                                        let span = opts.playback.as_ref().map_or(0.0, |pb| pb.replay.captured());
+                                        let step = if held.contains(&KeyCode::ShiftLeft) || held.contains(&KeyCode::ShiftRight) { 30.0 } else { 5.0 };
+                                        let d = if code == KeyCode::ArrowLeft { -step } else { step };
+                                        play_t = (play_t + d).clamp(0.0, (span - 0.01).max(0.0));
+                                    }
+                                    KeyCode::ArrowUp if opts.playback.is_some() => {
+                                        play_speed = (play_speed * 2.0).min(16.0);
+                                    }
+                                    KeyCode::ArrowDown if opts.playback.is_some() => {
+                                        play_speed = (play_speed * 0.5).max(0.125);
+                                    }
+                                    KeyCode::Tab if rui.is_some() => {
+                                        if let Some(r) = rui.as_mut() {
+                                            r.list = !r.list;
+                                        }
+                                    }
+                                    KeyCode::Backquote if rui.is_some() => {
+                                        if let Some(r) = rui.as_mut() {
+                                            r.show = !r.show;
+                                        }
+                                    }
                                     KeyCode::KeyR if opts.playback.is_some() => {
                                         play_t = 0.0;
                                     }
                                     KeyCode::Minus if opts.playback.is_some() => {
-                                        play_speed = (play_speed * 0.5).max(0.0625);
+                                        play_speed = (play_speed * 0.5).max(0.125);
                                         println!("speed {play_speed}x");
                                     }
                                     KeyCode::Equal if opts.playback.is_some() => {
@@ -3046,25 +3078,47 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             });
                             if let Some(a) = hit {
                                 use crate::hud::Action::*;
+                                let span = opts.playback.as_ref().map_or(0.0, |pb| pb.replay.captured());
+                                let end = (span - 0.01).max(0.0);
                                 match a {
                                     PlayPause => playing = !playing,
-                                    Slower => play_speed = (play_speed * 0.5).max(0.0625),
+                                    Slower => play_speed = (play_speed * 0.5).max(0.125),
                                     Faster => play_speed = (play_speed * 2.0).min(16.0),
                                     Restart => play_t = 0.0,
-                                    Camera => follow = follow.next(),
+                                    Back => play_t = (play_t - 5.0).clamp(0.0, end),
+                                    Fwd => play_t = (play_t + 5.0).clamp(0.0, end),
+                                    Camera => {
+                                        follow = follow.next();
+                                        title_at = 1e9;
+                                    }
                                     PrevCar if !drivers.is_empty() => {
                                         watched = (watched + drivers.len() - 1) % drivers.len();
                                     }
                                     NextCar if !drivers.is_empty() => {
                                         watched = (watched + 1) % drivers.len();
                                     }
+                                    Watch(i) if i < drivers.len() => watched = i,
+                                    ToggleList => {
+                                        if let Some(r) = rui.as_mut() {
+                                            r.list = !r.list;
+                                        }
+                                    }
+                                    // a press on the timeline jumps there and
+                                    // keeps following the cursor until release
                                     Seek(f) => {
-                                        if let Some(pb) = opts.playback.as_ref() {
-                                            play_t = f * pb.replay.captured();
+                                        play_t = (f * span).clamp(0.0, end);
+                                        if let Some(r) = rui.as_mut() {
+                                            r.scrub = true;
                                         }
                                     }
                                     _ => {}
                                 }
+                                return;
+                            }
+                        }
+                        if !down && button == MouseButton::Left {
+                            if let Some(r) = rui.as_mut().filter(|r| r.scrub) {
+                                r.scrub = false;
                                 return;
                             }
                         }
@@ -3087,6 +3141,17 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                     }
                     WindowEvent::CursorMoved { position, .. } => {
                         let p = (position.x, position.y);
+                        if let Some(r) = rui.as_mut() {
+                            r.wake();
+                            if r.scrub {
+                                if let Some(pb) = opts.playback.as_ref() {
+                                    let span = pb.replay.captured();
+                                    play_t = (r.seek_at(p.0 as f32 / config.width as f32) * span).clamp(0.0, (span - 0.01).max(0.0));
+                                }
+                                last_pos = Some(p);
+                                return;
+                            }
+                        }
                         if cluster.moved((p.0 as f32) / config.width as f32, (p.1 as f32) / config.height as f32) {
                             last_pos = Some(p);
                             return;
@@ -3107,6 +3172,11 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             MouseScrollDelta::LineDelta(_, y) => y,
                             MouseScrollDelta::PixelDelta(p) => p.y as f32 / 60.0,
                         };
+                        // over the replay's car list the wheel scrolls it
+                        let cur = last_pos.map(|p| ((p.0 as f32) / config.width as f32, (p.1 as f32) / config.height as f32));
+                        if rui.as_mut().map_or(false, |r| r.wheel(cur, y, drivers.len())) {
+                            return;
+                        }
                         // in free-look the wheel sets how fast you fly
                         match fly.as_mut() {
                             Some(f) => {
@@ -4347,40 +4417,19 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         hud.begin(config.width, config.height);
                         // EVOVIEW_NO_HUD=1: clean frames (captures, GIFs)
                         if let Some(pb) = opts.playback.as_ref().filter(|_| std::env::var_os("EVOVIEW_NO_HUD").is_none()) {
-                            let span = pb.replay.captured().max(0.001);
-                            let dim = [1.0, 1.0, 1.0, 0.18];
-                            // Where the cursor is, in the HUD's own 0..1 space.
                             let cur = last_pos.map(|p| {
                                 ((p.0 as f32) / config.width as f32,
                                  (p.1 as f32) / config.height as f32)
                             });
-                            // Timeline across the bottom. The clickable strip
-                            // is taller than the drawn bar - a 6-thousandth of
-                            // the screen is not something anyone can hit.
-                            hud.rect(0.04, 0.955, 0.92, 0.006, dim);
-                            hud.rect(0.04, 0.955, 0.92 * (play_t / span), 0.006,
-                                     [0.95, 0.95, 0.95, 0.9]);
-                            hud.hotspot(0.04, 0.945, 0.92, 0.026,
-                                        crate::hud::Action::Seek(0.0));
-                            // Transport row, centred above the timeline.
-                            let bw = 0.026f32;
-                            let bh = bw * aspect;
-                            for (i, a) in [
-                                crate::hud::Action::Restart,
-                                crate::hud::Action::Slower,
-                                crate::hud::Action::PlayPause,
-                                crate::hud::Action::Faster,
-                                crate::hud::Action::PrevCar,
-                                crate::hud::Action::NextCar,
-                                crate::hud::Action::Camera,
-                            ].iter().enumerate() {
-                                let x = 0.40 + i as f32 * (bw + 0.008);
-                                let y = 0.955 - bh - 0.012;
-                                let hot = cur.map_or(false, |(cx, cy)| {
-                                    cx >= x && cx <= x + bw && cy >= y && cy <= y + bh
-                                });
-                                let on = matches!(a, crate::hud::Action::PlayPause) && playing;
-                                hud.button(x, y, bw, bh, *a, hot, on);
+                            // EVOVIEW_HUD_CURSOR=x,y (0..1): a pretend cursor, to
+                            // capture hover states in bench shots
+                            let cur = cur.or_else(|| std::env::var("EVOVIEW_HUD_CURSOR").ok().and_then(|v| {
+                                let (x, y) = v.split_once(',')?;
+                                Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+                            }));
+                            if let Some(r) = rui.as_mut() {
+                                r.draw(&mut hud, &mut rcluster, &pb.replay, &drivers, watched, play_t, playing,
+                                       play_speed, follow.name(), cur, aspect, dt);
                             }
                             if let Some((ci, model)) = drivers.get(watched).cloned() {
                                 // Swap the engine bank when the watched car
@@ -4393,17 +4442,6 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                         follow == crate::camera::Follow::Onboard);
                                 }
                                 if let Some(t) = pb.replay.telemetry(ci, play_t) {
-                                    let r = pb.slots.iter()
-                                        .find(|s| s.cars.contains(&ci))
-                                        .map(|s| s.radius).unwrap_or(0.34);
-                                    // Speed in km/h from the reference wheel.
-                                    // rpm bar, turning red near the limiter.
-                                    let f = (t.rpm / 8200.0).clamp(0.0, 1.0);
-                                    let c = if f > 0.92 { [1.0, 0.25, 0.2, 0.9] }
-                                            else { [0.4, 0.85, 1.0, 0.9] };
-                                    hud.bar(0.04, 0.790, 0.26, 0.016, f, c);
-                                    // Speed on the left, gear to its right.
-                                    let _ = r;
                                     // Feed the engine note. Quieter from
                                     // outside the car than from the cockpit,
                                     // and silent while paused.
@@ -4418,23 +4456,6 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                         let lim = if t.rpm > 7600.0 { 1.0 } else { 0.0 };
                                         e.update(kmh, t.gear, lim, gain);
                                     }
-                                    let mph = (pb.replay.speed(ci, play_t) * 2.236_936) as u32;
-                                    hud.number(mph, 0.20, 0.818, 0.030, 0.062, 0.008,
-                                               [1.0, 1.0, 1.0, 0.95]);
-                                    hud.number(t.gear as u32, 0.30, 0.818, 0.034, 0.062,
-                                               0.009, [1.0, 0.85, 0.25, 0.95]);
-                                    // Steering, drawn from the centre out.
-                                    let s = (t.steer_deg / 190.0).clamp(-1.0, 1.0);
-                                    let mid: f32 = 0.17;
-                                    hud.rect(0.04, 0.894, 0.26, 0.010, dim);
-                                    hud.rect(mid.min(mid + 0.13 * s), 0.894,
-                                             (0.13 * s).abs(), 0.010,
-                                             [1.0, 1.0, 1.0, 0.85]);
-                                    // Pedals: throttle green, brake red.
-                                    hud.bar(0.04, 0.914, 0.26, 0.012, t.throttle,
-                                            [0.3, 0.9, 0.35, 0.9]);
-                                    hud.bar(0.04, 0.932, 0.26, 0.012, t.brake,
-                                            [0.95, 0.3, 0.25, 0.9]);
                                 }
                             }
                         }
@@ -4455,6 +4476,8 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     handbrake: 0.0,
                                     stalled: false,
                                     on_limiter: false,
+                                    engine: true,
+                                    aux: false,
                                 }
                             } else { crate::cluster::Reading {
                                 kmh: td.speed_kmh(),
@@ -4467,6 +4490,8 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 handbrake: rig.map_or(pedals.3, |rc| rc.hb.max(pedals.3)),
                                 stalled: rig.map_or(false, |rc| !rc.running),
                                 on_limiter: rig.map_or(false, |rc| rc.limiter_hit),
+                                engine: true,
+                                aux: true,
                             } };
                             cluster.draw(&mut hud, &r, aspect);
                             // online: the server's chat, bottom left - each line for 20 s,

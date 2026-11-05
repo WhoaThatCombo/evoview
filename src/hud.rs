@@ -1,12 +1,7 @@
-//! A 2D overlay: speed, rpm, gear, pedals and a timeline.
-//!
-//! evoview has no text renderer and does not want one. Everything here is
-//! axis-aligned coloured rectangles, and digits are drawn as seven segments -
-//! so there is no font, no atlas, no glyph packing and no text shaping, and
-//! the whole overlay is one vertex buffer and one three-line shader.
-//!
-//! ponytail: seven-segment means digits only. If this ever needs words, that
-//! is the point to add a real bitmap font, not sooner.
+//! A 2D overlay: rectangles, rounded panels, triangles and text (Segoe UI
+//! glyphs rasterised into one atlas, a 5x7 pixel font when it is missing),
+//! in one vertex buffer and one small shader. Clickable regions are
+//! registered while drawing (`hotspot`), so they cannot disagree with it.
 
 use wgpu::util::DeviceExt;
 
@@ -20,6 +15,13 @@ pub enum Action {
     Camera,
     PrevCar,
     NextCar,
+    /// 5 s back / on
+    Back,
+    Fwd,
+    /// the replay's car list on / off
+    ToggleList,
+    /// watch this entry of the car list
+    Watch(usize),
     /// Somewhere on the timeline, as a fraction of the replay.
     Seek(f32),
 }
@@ -473,48 +475,6 @@ fn fs(i: VsOut) -> @location(0) vec4<f32> {
             self.verts
                 .extend_from_slice(&[x * 2.0 - 1.0, 1.0 - y * 2.0, c[0], c[1], c[2], c[3], -1.0, 0.0]);
         }
-    }
-
-    /// A clickable button with an icon drawn inside it.
-    ///
-    /// `hot` highlights it (the cursor is over it), `on` marks it active.
-    /// ⚠ `bw`/`bh` are both screen FRACTIONS, and the screen is wider than it
-    /// is tall, so equal values do not make a square. The caller scales height
-    /// by the aspect ratio.
-    pub fn button(&mut self, x: f32, y: f32, bw: f32, bh: f32, a: Action,
-                  hot: bool, on: bool) {
-        let bg = if hot { 0.34 } else { 0.18 };
-        self.rect(x, y, bw, bh, [1.0, 1.0, 1.0, bg]);
-        let fg = if on { [1.0, 0.85, 0.25, 0.95] } else { [1.0, 1.0, 1.0, 0.9] };
-        // Icons are laid out in the middle 56% of the button.
-        let (ix, iy, w, h) = (x + bw * 0.22, y + bh * 0.22, bw * 0.56, bh * 0.56);
-        let bar = w * 0.26;
-        match a {
-            Action::PlayPause if on => {
-                // Pause: two bars, shown while playing.
-                self.rect(ix, iy, bar, h, fg);
-                self.rect(ix + w - bar, iy, bar, h, fg);
-            }
-            Action::PlayPause => {
-                self.tri([(ix, iy), (ix + w, iy + h * 0.5), (ix, iy + h)], fg);
-            }
-            Action::Slower | Action::PrevCar => {
-                self.tri([(ix + w, iy), (ix, iy + h * 0.5), (ix + w, iy + h)], fg);
-            }
-            Action::Faster | Action::NextCar => {
-                self.tri([(ix, iy), (ix + w, iy + h * 0.5), (ix, iy + h)], fg);
-            }
-            Action::Restart => {
-                self.rect(ix, iy, bar, h, fg);
-                self.tri([(ix + w, iy), (ix + bar, iy + h * 0.5), (ix + w, iy + h)], fg);
-            }
-            Action::Camera => {
-                self.rect(ix, iy + h * 0.22, w, h * 0.56, fg);
-                self.rect(ix + w * 0.3, iy, w * 0.3, h * 0.22, fg);
-            }
-            Action::Seek(_) => {}
-        }
-        self.hits.push((x, y, bw, bh, a));
     }
 
     /// Register a clickable strip without drawing anything - the timeline
