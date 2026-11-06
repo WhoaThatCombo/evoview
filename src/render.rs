@@ -379,6 +379,9 @@ pub static INTERIOR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 /// false: the camera is outside a driven / replayed car and they refresh at
 /// 10 Hz (fxgpu.rs update).
 pub static DASH_LIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// Our car's screens are not on screen at all (another car is watched):
+/// their pages are not refreshed (fxgpu.rs).
+pub static DASH_HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 fn grade_uniform(outdoor: bool) -> [f32; 4] {
@@ -1913,7 +1916,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     let mut fxst = crate::fxstate::FxState::from_env();
     let wet_pinned = crate::envc::var_os("EVOVIEW_WET").is_some();
     fxst.blink_phase = crate::envc::var("EVOVIEW_BLINK").ok().map(|v| v.trim() == "1");
-    crate::perf::vram_note("fxgpu");
+    crate::perf::vram_note("scene upload + pipelines");
     let mut fxg = crate::fxgpu::FxGpu::new(&device, &queue, &car, &materials, scene_format, samples, &uniform_buf);
     // the car itself is dropped below (RAM); the effect data stays
     let car_fx: Option<Box<crate::fxdata::CarFx>> = car.fx.clone();
@@ -1945,7 +1948,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
         bench
     });
     // Track geometry gets its own pipeline; None for a car on its own.
-    crate::perf::vram_note("pre track");
+    crate::perf::vram_note("car fx");
     let track = crate::track::TrackRender::new(
         &device, &queue, &car, scene_format, samples, &shadow_view, &shadow_samp, &materials.lut_view, &materials,
         &clouds);
@@ -4117,6 +4120,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 h.road_up = td.road_up();
                                 h.step(dt, drawn, td.ffb_inputs().1.to_degrees(), m);
                             }
+                            DASH_HIDDEN.store(false, std::sync::atomic::Ordering::Relaxed);
                             DASH_LIVE.store(follow != crate::camera::Follow::Free
                                 && car_cams.get(cam_sel).map_or(false, |c| c.mode == 1 || c.mode == 4),
                                 std::sync::atomic::Ordering::Relaxed);
@@ -4131,9 +4135,10 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 let other = view_ai.and_then(|k| opts.race.as_ref().and_then(|r| r.ai.get(k)).filter(|a| a.td.pos.y > -1000.0).map(|a| a.td.pose()));
                                 if let Some(p) = other {
                                     // our own cabin is not on screen: no cockpit
-                                    // exposure, and our dash refreshes at 10 Hz
+                                    // exposure, and our dash is not refreshed
                                     INTERIOR.store(false, std::sync::atomic::Ordering::Relaxed);
                                     DASH_LIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+                                    DASH_HIDDEN.store(true, std::sync::atomic::Ordering::Relaxed);
                                     let (vp, e) = follow.view_proj(
                                         aspect, p.pos + p.up * 0.45, p.forward, p.up, p.right,
                                         last_frame.elapsed().as_secs_f32());
@@ -4250,6 +4255,18 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         }
                         carcull.flush(&device, &queue, &mut meshes, motion.as_mut(), view_proj, eye,
                                       crate::sky::key_dir(), car_detail_m);
+                        // EVOVIEW_VIEW_LOG=1: the watched car as drawn, once a second
+                        if let (Some(k), Some(r)) = (view_ai, opts.race.as_ref()) {
+                            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                            if crate::envc::var_os("EVOVIEW_VIEW_LOG").is_some()
+                                && N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 60 == 0 {
+                                if let Some(a) = r.ai.get(k) {
+                                    let counts: Vec<u32> = slot_gpu.get(a.slot).map_or(Vec::new(), |(b, _)| b.iter().take(6).map(|&g| meshes[g].instance_count).collect());
+                                    println!("view: ai {k} slot {} inst {} at {:.0},{:.0},{:.0} eye {:.1} m, body instances {:?}",
+                                             a.slot, a.inst, a.td.pos.x, a.td.pos.y, a.td.pos.z, a.td.pos.distance(eye), counts);
+                                }
+                            }
+                        }
                         // the replay rigs of the cars that can show, posed into
                         // their bone blocks and uploaded in one write
                         if let (Some(pb), false) = (opts.playback.as_ref(), pose_jobs.is_empty()) {

@@ -37,11 +37,11 @@ pub fn time<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
     let t = Instant::now();
     let r = f();
     add(name, t.elapsed().as_secs_f64());
-    vram_note(name);
     r
 }
 
-/// EVOVIEW_VRAM_LOG=1: this process's dedicated VRAM after a step.
+/// EVOVIEW_VRAM_LOG=1: this process's dedicated VRAM after a step (a PDH
+/// query over every process: ~ms, startup checkpoints only).
 pub fn vram_note(what: &str) {
     if crate::envc::var_os("EVOVIEW_VRAM_LOG").is_some() {
         if let Some(v) = vram_bytes() {

@@ -275,6 +275,8 @@ pub struct FxGpu {
     white_bg: wgpu::BindGroup,
     dash: Vec<DashPage>,
     dash_t: f32,
+    /// the page refreshed last from outside the car (one a frame)
+    dash_next: usize,
     /// a white full-target quad (vs_dash's vertices) and its unblended
     /// pipeline, for the mip levels
     dash_quad: wgpu::Buffer,
@@ -647,7 +649,7 @@ impl FxGpu {
             samples, glow_pipe_part, glow: None, steps: Vec::new(), bloom_bgl, bloom_down, bloom_blur, bloom_comp,
             bloom_samp: lin, out_format, part_add, part_alpha, soft_add, soft_alpha, half_add, half_alpha, part_comp, half: None, pdepth_bgl, no_scene, part_cam, late_buf, late_cam, part_defs, quad, inst,
             batches: Vec::new(), sim: Sim::default(), dash_pipe, dash_bgl, dash_samp, white_bg,
-            dash, dash_t: 1e9, dash_mip_pipe,
+            dash, dash_t: 1e9, dash_next: 0, dash_mip_pipe,
             dash_quad: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("dash mip quad"),
                 contents: bytemuck::cast_slice(&[
@@ -679,16 +681,42 @@ impl FxGpu {
             let _t = crate::bench::cpu("fx particles");
             self.upload_particles(queue, fx, eye);
         }
-        // Seen from outside the car the screens are a few pixels: refreshed
-        // at 10 Hz there (checking a page for changes formats its whole
-        // draw list, ~0.5 ms a frame). In the cockpit, every frame.
+        // In the cockpit every page, every frame (an unchanged page is
+        // skipped). Seen from outside the screens are a few pixels: each page
+        // at 10 Hz, ONE page a frame - all at once, a car's 5-8 pages (each
+        // ~1 ms: its draw list formatted, drawn, mipped) all changed by then
+        // and made a 7 ms hitch every sixth frame. Not at all while another
+        // car is watched (DASH_HIDDEN: ours is not on screen).
+        use std::sync::atomic::Ordering::Relaxed;
         self.dash_t += dt;
-        if !crate::render::DASH_LIVE.load(std::sync::atomic::Ordering::Relaxed) && self.dash_t < 0.1 {
+        if crate::render::DASH_HIDDEN.load(Relaxed) {
             return;
         }
+        let only = if crate::render::DASH_LIVE.load(Relaxed) {
+            None
+        } else {
+            let n = self.dash.len().max(1);
+            if self.dash_t < 0.1 / n as f32 {
+                return;
+            }
+            self.dash_next = (self.dash_next + 1) % n;
+            Some(self.dash_next)
+        };
         self.dash_t = 0.0;
         let _t = crate::bench::cpu("fx dash");
-        self.render_dash(device, queue, enc, fx, st, false);
+        let t0 = std::time::Instant::now();
+        self.render_dash(device, queue, enc, fx, st, false, only);
+        // EVOVIEW_DASH_LOG=1: refreshes and their cost, every 100
+        if crate::envc::var_os("EVOVIEW_DASH_LOG").is_some() {
+            use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
+            static N: AtomicU32 = AtomicU32::new(0);
+            static US: AtomicU64 = AtomicU64::new(0);
+            US.fetch_add(t0.elapsed().as_micros() as u64, Relaxed);
+            if N.fetch_add(1, Relaxed) % 100 == 99 {
+                println!("dash: 100 refreshes, {:.2} ms each, live {}", US.swap(0, Relaxed) as f64 / 1e5,
+                         crate::render::DASH_LIVE.load(Relaxed));
+            }
+        }
     }
 
     /// Headless sequence frame: step the particles by `dt`, redraw the dash.
@@ -698,7 +726,7 @@ impl FxGpu {
         let Some(fx) = fx else { return };
         self.sim.step(fx, st, dt);
         self.upload_particles(queue, fx, eye);
-        self.render_dash(device, queue, enc, fx, st, true);
+        self.render_dash(device, queue, enc, fx, st, true, None);
     }
 
     /// Headless: simulate particles up to the shot and draw the dash once.
@@ -711,7 +739,7 @@ impl FxGpu {
             self.sim.warm(fx, st, warm);
         }
         self.upload_particles(queue, fx, eye);
-        self.render_dash(device, queue, enc, fx, st, true);
+        self.render_dash(device, queue, enc, fx, st, true, None);
     }
 
     fn upload_particles(&mut self, queue: &wgpu::Queue, fx: &crate::fxdata::CarFx, eye: [f32; 3]) {
@@ -1100,7 +1128,7 @@ impl FxGpu {
     }
 
     fn render_dash(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder,
-                   fx: &crate::fxdata::CarFx, st: &FxState, force: bool) {
+                   fx: &crate::fxdata::CarFx, st: &FxState, force: bool, only: Option<usize>) {
         let blink = st.blink_phase.unwrap_or(st.time.rem_euclid(1.0) < 0.5);
         let shift = fx.led_sys.as_ref().and_then(|l| l.group(crate::fxdata::LED_RPM, 0).iter()
             .map(|i| i.threshold).filter(|t| *t > 0.0).reduce(f32::max)).unwrap_or(0.0);
@@ -1112,6 +1140,9 @@ impl FxGpu {
             }
         }
         for (k, page) in targets {
+            if only.map_or(false, |o| o != k) {
+                continue;
+            }
             let body = crate::dash::body_state(st, &page.default_page, blink, shift, limiter);
             let list = page.draw_list(st, &body);
             // the whole list: a bar that only changes width (rpm, throttle)

@@ -248,7 +248,12 @@ pub fn plan(base_bytes: u64, opp: &mut [TextureEntry], blob: &mut [u8], opp_mesh
 pub fn late_drop(tex: &mut [TextureEntry], blob: &mut [u8], mesh: u64) {
     let mut k = OPP_TEX_DROP.load(Relaxed);
     if on() {
-        if let (Some((free, _)), Some(ours)) = (free_total(), crate::perf::vram_bytes()) {
+        let t = std::time::Instant::now();
+        let probe = (free_total(), crate::perf::vram_bytes());
+        if crate::envc::var_os("EVOVIEW_VRAM_LOG").is_some() {
+            println!("vram: late joiner check {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+        }
+        if let (Some((free, _)), Some(ours)) = probe {
             // the margin held back at load is for exactly this; keep a
             // smaller one at run time
             let room = free - ours as f64 - 0.25 * margin();
