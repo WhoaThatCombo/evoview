@@ -112,6 +112,7 @@ mod fxstate;
 mod fxdata;
 mod dash;
 mod fxgpu;
+mod vram;
 mod particles;
 mod check;
 mod check_anim;
@@ -1248,6 +1249,16 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
         }
         *load::SESSION_CONTAINERS.write().unwrap() = cs;
     }
+    // the output size the VRAM plan counts on (vram.rs)
+    let px = if flag("--bench").is_some() {
+        flag("--size").and_then(|s| {
+            let (a, b) = s.split_once('x')?;
+            Some(a.parse::<u64>().ok()? * b.parse::<u64>().ok()?)
+        }).unwrap_or(1280 * 720)
+    } else {
+        vram::screen_px()
+    };
+    vram::TARGET_PX.store(px, std::sync::atomic::Ordering::Relaxed);
     let (mut scene, mut car_vfs, ai_vfs, ai_place) = match replayscene::Scene::build_race(pkg, base, track, car_id, &ai_models, &ai_own) {
         Ok(s) => s,
         Err(e) => {

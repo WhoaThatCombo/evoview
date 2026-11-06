@@ -306,6 +306,9 @@ impl Bench {
             self.readback = Some((buf, w, h, padded, bgra));
         }
         self.frame += 1;
+        if matches!(self.frame, 1 | 2 | 10 | 100) {
+            crate::perf::vram_note(&format!("frame {}", self.frame));
+        }
         GPU.with(|g| {
             let mut g = g.borrow_mut();
             let Some(g) = g.as_mut() else { return };

@@ -1913,6 +1913,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     let mut fxst = crate::fxstate::FxState::from_env();
     let wet_pinned = crate::envc::var_os("EVOVIEW_WET").is_some();
     fxst.blink_phase = crate::envc::var("EVOVIEW_BLINK").ok().map(|v| v.trim() == "1");
+    crate::perf::vram_note("fxgpu");
     let mut fxg = crate::fxgpu::FxGpu::new(&device, &queue, &car, &materials, scene_format, samples, &uniform_buf);
     // the car itself is dropped below (RAM); the effect data stays
     let car_fx: Option<Box<crate::fxdata::CarFx>> = car.fx.clone();
@@ -1944,6 +1945,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
         bench
     });
     // Track geometry gets its own pipeline; None for a car on its own.
+    crate::perf::vram_note("pre track");
     let track = crate::track::TrackRender::new(
         &device, &queue, &car, scene_format, samples, &shadow_view, &shadow_samp, &materials.lut_view, &materials,
         &clouds);
@@ -2022,6 +2024,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     // resolve pass writes the screen. Backslash toggles it.
     // falling rain after TAA (rainfall.rs), and the camera's last position
     // for its velocity
+    crate::perf::vram_note("track render");
     let mut rainfall = opts.start_fly.then(|| crate::rainfall::Rainfall::new(&device, scene_format));
     let mut rain_eye: Option<Vec3> = None;
     let mut taa = opts.start_fly.then(|| crate::taa::Taa::new(&device, scene_format, config.width,
@@ -2031,6 +2034,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
             t.on = true;
         }
     }
+    crate::perf::vram_note("taa");
     let mut ssr = crate::ssr::active().then(|| crate::ssr::Ssr::new(&device, scene_format, rw, rh));
     // DLSS (dlss.rs) in TAA's place, when its device opened and NGX starts
     let mut dlss = match (dlss_device, taa.as_mut()) {
@@ -2100,6 +2104,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
             p.motion_blur = 0.0;
         }
     }
+    crate::perf::vram_note("ssr");
     let mut hud = crate::hud::Hud::new(&device, config.format);
     // the driving cluster (cluster.rs) and the pedals it shows
     let mut cluster = crate::cluster::Cluster::load();
@@ -2433,6 +2438,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
         })
         .unwrap_or_default();
     // the replay overlay (replayhud.rs) and its copy of the driving cluster
+    crate::perf::vram_note("hud");
     let mut rui = opts.playback.as_ref().map(|pb| crate::replayhud::ReplayUi::new(&pb.replay, &drivers));
     let mut rcluster = crate::cluster::Cluster::fixed();
     // Slots address meshes by SOURCE index; build_scene drops some meshes, so
@@ -2564,6 +2570,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
         .then(|| crate::cull::DrawOrder::build(&car, &meshes));
     // Everything on the GPU is built; the CPU copy of the scene (its blob is
     // every mesh and texture byte, ~2 GB on a big track) would otherwise sit
+    crate::perf::vram_note("setup");
     // in memory for the whole session, because event_loop.run never returns.
     // The seated driver (driver.rs): B hides it by collapsing its instance
     // matrix to zero, which every pass already handles with no branch.
@@ -4123,6 +4130,10 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 // player) instead
                                 let other = view_ai.and_then(|k| opts.race.as_ref().and_then(|r| r.ai.get(k)).filter(|a| a.td.pos.y > -1000.0).map(|a| a.td.pose()));
                                 if let Some(p) = other {
+                                    // our own cabin is not on screen: no cockpit
+                                    // exposure, and our dash refreshes at 10 Hz
+                                    INTERIOR.store(false, std::sync::atomic::Ordering::Relaxed);
+                                    DASH_LIVE.store(false, std::sync::atomic::Ordering::Relaxed);
                                     let (vp, e) = follow.view_proj(
                                         aspect, p.pos + p.up * 0.45, p.forward, p.up, p.right,
                                         last_frame.elapsed().as_secs_f32());

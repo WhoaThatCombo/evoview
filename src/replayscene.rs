@@ -778,6 +778,7 @@ impl Scene {
             None => crate::envc::remove_var(k),
         };
         let t_ai = std::time::Instant::now();
+        let (ai_tex_base, ai_mesh_base) = (textures.len(), meshes.len());
         // the opponents' textures EVOVIEW_AI_TEX_SKIP mips down: 1 (a quarter
         // of the memory), 2 online (a whole server of liveries)
         let ai_skip = crate::envc::var("EVOVIEW_AI_TEX_SKIP").ok().and_then(|v| v.parse::<u32>().ok())
@@ -884,6 +885,13 @@ impl Scene {
         if !ai.is_empty() {
             println!("AI cars: {} model(s), {} look(s), loaded in {:.1}s", models.len(), slots.len() - 1, t_ai.elapsed().as_secs_f32());
         }
+        // the other cars' textures further down when the session would not
+        // fit in the VRAM free (vram.rs)
+        {
+            let base = crate::vram::tex_bytes(&textures[..ai_tex_base], 0) + crate::vram::mesh_bytes(&meshes[..track_meshes]);
+            let opp_mesh = crate::vram::mesh_bytes(&meshes[ai_mesh_base..]);
+            crate::vram::plan(base, &mut textures[ai_tex_base..], &mut blob, opp_mesh);
+        }
         let mut car = Car::from_parts(meshes, textures, materials, blob);
         car.tex_src = tex_src;
         car.track_env = track_env;
@@ -930,6 +938,7 @@ pub fn load_net_car(pkg: &Path, base: Option<&Path>, model: &str, own: Option<&[
         meshes[i].bone_wgt = None;
     }
     let slot = measure_slot(&mut meshes, range, &l.car, model, 1);
+    crate::vram::late_drop(&mut textures, &mut blob, crate::vram::mesh_bytes(&meshes));
     let mut car = Car::from_parts(meshes, textures, materials, blob);
     car.tex_src = tex_src;
     Ok((car, slot))
