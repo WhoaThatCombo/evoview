@@ -1672,6 +1672,8 @@ pub struct TrackRender {
     rear_buf: wgpu::Buffer,
     rear_bg: wgpu::BindGroup,
     last_frame: Shared<Option<FrameUniform>>,
+    /// which scene meshes have batches of each phase (`phase_meshes`)
+    phase_meshes: std::sync::RwLock<std::sync::Arc<PhaseMeshes>>,
     /// the dry line (rain::dry_map), and whether it has been written yet
     dry_tex: wgpu::Texture,
     dry_on: Shared<bool>,
@@ -1680,6 +1682,29 @@ pub struct TrackRender {
 }
 
 pub const EXTRA_FLOATS: usize = 6;
+
+/// The scene meshes that have a batch of each phase (opaque, cutout,
+/// alpha) drawn by the track pipelines, in scene order. Every view of every
+/// frame walked ALL the scene's meshes three times - the cars' too, and each
+/// mesh for the two phases it has nothing in (~15 walks a frame with the
+/// shadow maps: 0.67 ms per 2,000 meshes, drawn or not).
+/// EVOVIEW_TRACK_LISTS=0: every mesh in every list, as before.
+#[derive(Default)]
+struct PhaseMeshes {
+    /// the mesh list these were made for: its length and address, and the
+    /// vertex buffers of the first and the last track mesh (a list rebuilt
+    /// or shifted since does not match)
+    key: (usize, usize, [(usize, usize); 2]),
+    phase: [Vec<u32>; 3],
+}
+
+fn phase_index(phase: Blend) -> usize {
+    match phase {
+        Blend::Opaque => 0,
+        Blend::Cutout => 1,
+        _ => 2,
+    }
+}
 
 /// Grass carpet: one tuft mesh with every one of its instances on the CPU,
 /// bucketed into cells; only the cells near the camera are uploaded. Each
@@ -3192,6 +3217,7 @@ impl TrackRender {
             rear_buf,
             rear_bg,
             last_frame: Shared::new(None),
+            phase_meshes: Default::default(),
             dry_tex,
             dry_on: Shared::new(false),
             mip_bias: crate::taa::mip_bias(),
@@ -3333,7 +3359,10 @@ impl TrackRender {
     ) {
         let mut set = false;
         let mut geo: *const wgpu::Buffer = std::ptr::null();
-        for (gi, m) in meshes.iter().enumerate() {
+        let lists = self.phase_meshes(meshes);
+        for &gi in &lists.phase[phase_index(Blend::Cutout)] {
+            let gi = gi as usize;
+            let m = &meshes[gi];
             let Some(extra) = m.extra.as_ref() else { continue };
             if !m.draws.iter().any(|d| self.blend(d.2) == Some(Blend::Cutout)) {
                 continue;
@@ -3511,6 +3540,40 @@ impl TrackRender {
         }
     }
 
+    /// The meshes of `meshes` with batches of each phase (see `PhaseMeshes`).
+    fn phase_meshes(&self, meshes: &[crate::render::GpuMesh]) -> std::sync::Arc<PhaseMeshes> {
+        let at = |gi: usize| meshes.get(gi).map_or(0, |m| std::sync::Arc::as_ptr(&m.vertices) as usize);
+        {
+            let l = self.phase_meshes.read().unwrap_or_else(|e| e.into_inner());
+            if l.key.0 == meshes.len() && l.key.1 == meshes.as_ptr() as usize && !meshes.is_empty()
+                && l.key.2.iter().all(|&(gi, p)| at(gi) == p) {
+                return l.clone();
+            }
+        }
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let on = *ON.get_or_init(|| crate::envc::var("EVOVIEW_TRACK_LISTS").map_or(true, |v| v != "0"));
+        let mut phase: [Vec<u32>; 3] = Default::default();
+        let (mut first, mut last) = (None, None);
+        for (gi, m) in meshes.iter().enumerate() {
+            if m.extra.is_none() && on {
+                continue;
+            }
+            if m.extra.is_some() {
+                first.get_or_insert(gi);
+                last = Some(gi);
+            }
+            for (k, ph) in [Blend::Opaque, Blend::Cutout, Blend::Alpha].into_iter().enumerate() {
+                if !on || m.draws.iter().any(|d| self.blend(d.2) == Some(ph)) {
+                    phase[k].push(gi as u32);
+                }
+            }
+        }
+        let ends = [first.unwrap_or(0), last.unwrap_or(0)].map(|gi| (gi, at(gi)));
+        let l = std::sync::Arc::new(PhaseMeshes { key: (meshes.len(), meshes.as_ptr() as usize, ends), phase });
+        *self.phase_meshes.write().unwrap_or_else(|e| e.into_inner()) = l.clone();
+        l
+    }
+
     /// Every batch of this mesh is drawn by the track pipeline.
     pub fn owns_mesh(&self, m: &crate::render::GpuMesh) -> bool {
         m.extra.is_some() && m.draws.iter().all(|d| self.owns(d.2))
@@ -3555,7 +3618,10 @@ impl TrackRender {
         // (counted here and added once: several threads record views at once)
         let (mut n_draws, mut n_tris) = (0u64, 0u64);
         let mut geo: *const wgpu::Buffer = std::ptr::null();
-        for (gi, m) in meshes.iter().enumerate() {
+        let lists = self.phase_meshes(meshes);
+        for &gi in &lists.phase[phase_index(phase)] {
+            let gi = gi as usize;
+            let m = &meshes[gi];
             let Some(extra) = m.extra.as_ref() else { continue };
             let n = count(gi, m.instance_count);
             if n == 0 {
