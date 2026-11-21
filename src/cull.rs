@@ -14,6 +14,8 @@
 use crate::asset::Car;
 use crate::render::GpuMesh;
 use glam::{Mat4, Vec3, Vec4};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Objects whose projected radius is below this many pixels are dropped.
 /// Half a pixel: at that size a mesh covers at most a sample or two and
@@ -24,8 +26,21 @@ struct Entry {
     gpu: usize,
     /// world-space bounding spheres, one per instance (xyz centre, w radius)
     spheres: Vec<Vec4>,
-    /// the packed instance rows (16 matrix floats + 4 facing), same order
-    rows: Vec<[f32; 20]>,
+    /// The instance rows (16 matrix floats + facing, bone base, wind
+    /// height bounds), same order, as the placements' matrices - ONE list
+    /// (the same Arc) for every LOD level of a prop standing at the same
+    /// places, not 80 B per row per level (2.64 M rows for the
+    /// Nordschleife's 527 k placements) - and this mesh's floats 16..20: one
+    /// for all rows, or one per row (an animated prop's variant per instance).
+    place: Arc<Vec<[f32; 16]>>,
+    tail: Vec<[f32; 4]>,
+    /// Shadow caster rows past `place`: placements of levels that send their
+    /// casters here (shadow_to) where this mesh itself does not stand.
+    extra: Vec<[f32; 16]>,
+    extra_tail: Vec<[f32; 4]>,
+    /// This level's instance -> its caster's row in the shadow_to mesh, when
+    /// that does not stand at the same places (None: the same index).
+    cast_map: Option<Vec<u32>>,
     /// visible instances last written, to skip identical uploads
     last: Vec<u32>,
     /// The shadow pass sees a different set (the light's box, not the
@@ -63,6 +78,66 @@ struct Entry {
     order: Vec<u32>,
     /// mesh name (EVOVIEW_LOD_LOG)
     name: String,
+}
+
+impl Entry {
+    /// Rows a shadow caster buffer of this mesh can hold: its own and the
+    /// casters' `extra`.
+    fn cast_len(&self) -> usize {
+        // spheres: one per placement, in the Entry itself (place.len() is
+        // behind the Arc - a cache miss per mesh per view)
+        self.spheres.len() + self.extra.len()
+    }
+
+    /// Append rows `ks` (`push_row`; the common case - one tail, no extras -
+    /// without the per-row branches).
+    fn push_rows(&self, ks: &[u32], out: &mut Vec<f32>) {
+        out.reserve(ks.len() * 20);
+        if self.tail.len() == 1 && self.extra.is_empty() {
+            let t = self.tail[0];
+            for &k in ks {
+                out.extend_from_slice(&self.place[k as usize]);
+                out.extend_from_slice(&t);
+            }
+        } else {
+            for &k in ks {
+                self.push_row(k as usize, out);
+            }
+        }
+    }
+
+    /// Append row `k` (past `place`: an `extra` row).
+    fn push_row(&self, k: usize, out: &mut Vec<f32>) {
+        let n = self.place.len();
+        if k < n {
+            out.extend_from_slice(&self.place[k]);
+            out.extend_from_slice(&self.tail[if self.tail.len() > 1 { k } else { 0 }]);
+        } else {
+            out.extend_from_slice(&self.extra[k - n]);
+            out.extend_from_slice(&self.extra_tail[k - n]);
+        }
+    }
+}
+
+/// A matrix's bits (placement identity; NaN-safe, unlike f32 ==).
+fn bits(m: &[f32; 16]) -> [u32; 16] {
+    m.map(f32::to_bits)
+}
+
+/// The rows' floats 16..20 for mesh `src` at `n` rows: facing, then what
+/// track::skin_rows / wind_rows write (as render.rs does for its buffer).
+fn tails(car: &Car, src: usize, facing: f32, animated: bool, n: usize) -> Vec<[f32; 4]> {
+    let mut flat = vec![0.0f32; n * 20];
+    for r in flat.chunks_exact_mut(20) {
+        r[16] = facing;
+    }
+    if animated || car.track_env.is_some() {
+        crate::track::skin_rows(car, src, &mut flat);
+        if car.track_env.is_some() {
+            crate::track::wind_rows(car, src, &mut flat);
+        }
+    }
+    flat.chunks_exact(20).map(|r| [r[16], r[17], r[18], r[19]]).collect()
 }
 
 /// A coarse world grid over the instances' bounding spheres, so a view
@@ -210,6 +285,41 @@ enum Tiny {
     Dist(f32),
     /// radius x focal < MIN_PIXELS x view depth (update): focal
     Proj(f32),
+}
+
+/// Each level whose shadow caster (shadow_to) stands at other places: its
+/// `cast_map`, and the caster's `extra` rows for places it lacks.
+fn map_casters(entries: &mut [Entry]) {
+    let mut index: HashMap<usize, HashMap<[u32; 16], u32>> = HashMap::new();
+    for ei in 0..entries.len() {
+        let Some(Some(t)) = entries[ei].shadow_to else { continue };
+        if t == ei || Arc::ptr_eq(&entries[ei].place, &entries[t].place) {
+            continue;
+        }
+        let idx = index.entry(t).or_insert_with(|| {
+            let mut h = HashMap::new();
+            for (k, m) in entries[t].place.iter().enumerate() {
+                h.entry(bits(m)).or_insert(k as u32);
+            }
+            h
+        });
+        let src = entries[ei].place.clone();
+        let mut map = Vec::with_capacity(src.len());
+        for m in src.iter() {
+            let k = *idx.entry(bits(m)).or_insert_with(|| {
+                let tg = &mut entries[t];
+                tg.extra.push(*m);
+                (tg.cast_len() - 1) as u32
+            });
+            map.push(k);
+        }
+        entries[ei].cast_map = Some(map);
+    }
+    let n = entries.iter().filter(|e| e.cast_map.is_some()).count();
+    if n > 0 {
+        println!("cull: {n} level(s) cast through a caster standing elsewhere; {} caster row(s) added",
+                 entries.iter().map(|e| e.extra.len()).sum::<usize>());
+    }
 }
 
 /// The grid over the entries with at least GRID_MIN instances, and their
@@ -391,6 +501,8 @@ pub struct Culler {
     log_frame: u32,
     /// the lodDistanceScale the bands were last built with
     scale: f32,
+    /// rows the device's largest buffer holds
+    max_rows: Option<usize>,
 }
 
 /// Local bounding sphere of a mesh's positions: AABB centre, max distance.
@@ -417,6 +529,8 @@ impl Culler {
     /// `skip` marks GPU meshes that must never be culled (replay cars).
     pub fn build(car: &Car, meshes: &[GpuMesh], skip: &[usize]) -> Self {
         let mut entries = Vec::new();
+        // placement lists already built, by (length, sampled hash)
+        let mut shared: HashMap<(usize, u64), Vec<Arc<Vec<[f32; 16]>>>> = HashMap::new();
         for (gi, m) in meshes.iter().enumerate() {
             if skip.contains(&gi) {
                 continue;
@@ -441,7 +555,6 @@ impl Culler {
                 src.xforms.clone()
             };
             let mut spheres = Vec::with_capacity(xfs.len());
-            let mut rows = Vec::with_capacity(xfs.len());
             for xf in &xfs {
                 let mm = Mat4::from_cols_array(xf);
                 let wc = mm.transform_point3(c);
@@ -449,23 +562,34 @@ impl Culler {
                     .max(mm.y_axis.truncate().length())
                     .max(mm.z_axis.truncate().length());
                 spheres.push(wc.extend(r * s));
-                let mut row = [0.0f32; 20];
-                row[..16].copy_from_slice(xf);
-                row[16] = facing;
-                rows.push(row);
             }
-            if animated || car.track_env.is_some() {
-                let mut flat: Vec<f32> = rows.iter().flatten().copied().collect();
-                crate::track::skin_rows(car, m.src, &mut flat);
-                if car.track_env.is_some() {
-                    crate::track::wind_rows(car, m.src, &mut flat);
-                }
-                for (row, f) in rows.iter_mut().zip(flat.chunks_exact(20)) {
-                    row.copy_from_slice(f);
-                }
+            let mut tail = tails(car, m.src, facing, animated, xfs.len());
+            if tail.windows(2).all(|w| w[0] == w[1]) {
+                tail.truncate(1);
             }
+            // the LOD levels of a prop share one placement list
+            let key = {
+                let mut h: u64 = 0xcbf29ce484222325;
+                for xf in xfs.iter().step_by((xfs.len() / 64).max(1)) {
+                    for b in bits(xf) {
+                        h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+                    }
+                }
+                (xfs.len(), h)
+            };
+            let same = shared.entry(key).or_default();
+            let flat_bits = |x: &[[f32; 16]]| -> Vec<u32> { x.iter().flat_map(bits).collect() };
+            let place = match same.iter().find(|a| a.len() == xfs.len() && flat_bits(a) == flat_bits(&xfs)) {
+                Some(a) => a.clone(),
+                None => {
+                    let a = Arc::new(xfs);
+                    same.push(a.clone());
+                    a
+                }
+            };
             entries.push(Entry {
-                gpu: gi, spheres, rows, last: Vec::new(), shadow_buf: Default::default(), shadow_count: [0; 6], shadow_last: Default::default(),
+                gpu: gi, spheres, place, tail, extra: Vec::new(), extra_tail: Vec::new(), cast_map: None,
+                last: Vec::new(), shadow_buf: Default::default(), shadow_count: [0; 6], shadow_last: Default::default(),
                 lod: None,
                 band: None,
                 raw_lod: src.lod,
@@ -500,6 +624,17 @@ impl Culler {
                 Some(Some(t)) => by_src.get(&t).map(|&k| Some(k)),
             };
         }
+        // a level whose shadow caster does not stand where it does: its
+        // casters go to that mesh's rows by placement, the missing ones
+        // added after its own (indexing the caster's rows with the level's
+        // own instance numbers drew the wrong places - or ran off the end)
+        map_casters(&mut entries);
+        for e in entries.iter_mut().filter(|e| !e.extra.is_empty()) {
+            let src = meshes[e.gpu].src;
+            let animated = crate::track::is_animated(car, src);
+            let all = tails(car, src, e.tail[0][0], animated, e.cast_len());
+            e.extra_tail = all[e.place.len()..].to_vec();
+        }
         Culler {
             entries,
             grid,
@@ -514,6 +649,7 @@ impl Culler {
             log_eye: None,
             log_frame: 0,
             scale: 0.0,
+            max_rows: None,
         }.with_scale(lod_scale(None))
     }
 
@@ -641,6 +777,14 @@ impl Culler {
             }
             let to = if redirect { e.shadow_to.unwrap_or(Some(ei)) } else { Some(ei) };
             if let Some(t) = to {
+                // to the caster's rows: the same placements, its numbering
+                if let Some(map) = e.cast_map.as_ref().filter(|_| t != ei) {
+                    for k in self.vis.iter_mut() {
+                        *k = map[*k as usize];
+                    }
+                    self.vis.sort_unstable();
+                    self.vis.dedup();
+                }
                 if self.cast[t].is_empty() {
                     std::mem::swap(&mut self.cast[t], &mut self.vis);
                 } else {
@@ -650,27 +794,34 @@ impl Culler {
                 }
             }
         }
+        // a view's buffer holds what it draws (+50 %), not a row for every
+        // placement: six of those per mesh were ~150 MB on the Nordschleife,
+        // and past 3.36 M placements one was over the 256 MiB buffer limit
+        let max_rows = *self.max_rows.get_or_insert_with(|| (device.limits().max_buffer_size / 80) as usize);
         for (e, vis) in self.entries.iter_mut().zip(self.cast.iter()) {
-            let n = vis.len() as u32;
-            e.shadow_count[c] = n;
+            let mut n = vis.len();
             // a single placement with LOD bands gets its own buffer too:
             // the mesh's own one carries the MAIN view's dither-out amount
-            if n > 0 && (e.rows.len() > 1 || e.band.is_some()) && e.shadow_last[c] != *vis {
-                e.shadow_last[c].clone_from(vis);
-                self.scratch.clear();
-                for &k in vis {
-                    self.scratch.extend_from_slice(&e.rows[k as usize]);
+            if n > 0 && (e.cast_len() > 1 || e.band.is_some()) {
+                n = n.min(max_rows);
+                if e.shadow_last[c] != *vis {
+                    e.shadow_last[c].clone_from(vis);
+                    self.scratch.clear();
+                    e.push_rows(&vis[..n], &mut self.scratch);
+                    let need = (n * 80) as u64;
+                    if e.shadow_buf[c].as_ref().map_or(true, |b| b.size() < need) {
+                        let cap = (n + n / 2).max(256).min(e.cast_len()).min(max_rows).max(n);
+                        e.shadow_buf[c] = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("shadow-inst"),
+                            size: (cap * 80) as u64,
+                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        }));
+                    }
+                    queue.write_buffer(e.shadow_buf[c].as_ref().unwrap(), 0, bytemuck::cast_slice(&self.scratch));
                 }
-                let buf = e.shadow_buf[c].get_or_insert_with(|| {
-                    device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("shadow-inst"),
-                        size: (e.rows.len() * 80) as u64,
-                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    })
-                });
-                queue.write_buffer(buf, 0, bytemuck::cast_slice(&self.scratch));
             }
+            e.shadow_count[c] = n as u32;
         }
     }
 
@@ -681,7 +832,7 @@ impl Culler {
         let e = &self.entries[self.entry_of.get(i).copied().flatten()?];
         // (a banded single placement: its own fade-0 copy, not the main
         // buffer - mirrors / probe / rear view drew it main-view dithered)
-        Some((e.shadow_buf[c].as_ref().filter(|_| e.rows.len() > 1 || e.band.is_some()), e.shadow_count[c]))
+        Some((e.shadow_buf[c].as_ref().filter(|_| e.cast_len() > 1 || e.band.is_some()), e.shadow_count[c]))
     }
 
     /// Cull against `view_proj` (wgpu clip space, z in 0..1) for a viewport
@@ -765,14 +916,13 @@ impl Culler {
             }
             // A single un-instanced mesh only needs its count; its one row
             // (identity) is already in the buffer - unless it fades.
-            if e.rows.len() > 1 || e.band.is_some() {
+            if e.spheres.len() > 1 || e.band.is_some() {
                 self.scratch.clear();
-                for (&k, &f) in self.vis.iter().zip(&self.fade) {
-                    let at = self.scratch.len();
-                    self.scratch.extend_from_slice(&e.rows[k as usize]);
+                e.push_rows(&self.vis, &mut self.scratch);
+                for (row, &f) in self.scratch.chunks_exact_mut(20).zip(&self.fade) {
                     // the matrix's unused [0][3]: the shader reads it as the
                     // instance's dither-out amount (track.wgsl lod_dither)
-                    self.scratch[at + 3] = f;
+                    row[3] = f;
                 }
                 queue.write_buffer(&meshes[e.gpu].instances, 0, bytemuck::cast_slice(&self.scratch));
             }
@@ -944,7 +1094,8 @@ mod grid_tests {
     pub(super) fn test_entry(spheres: Vec<Vec4>, lod: Option<[f32; 2]>) -> Entry {
         let n = spheres.len();
         Entry {
-            gpu: 0, spheres, rows: vec![[0.0; 20]; n], last: Vec::new(), shadow_buf: Default::default(),
+            gpu: 0, spheres, place: Arc::new(vec![[0.0; 16]; n]), tail: vec![[0.0; 4]], extra: Vec::new(),
+            extra_tail: Vec::new(), cast_map: None, last: Vec::new(), shadow_buf: Default::default(),
             shadow_count: [0; 6], shadow_last: Default::default(), lod, raw_lod: None, raw_fade: [0.0; 4],
             shadow_to: None, shadow_src: None, band: None, last_fade: Vec::new(), runs: Vec::new(),
             run_r: Vec::new(), order: Vec::new(), name: String::new(),
@@ -993,6 +1144,32 @@ mod grid_tests {
             let d2 = s.truncate().distance_squared(eye);
             d2 >= a && d2 < b
         })
+    }
+
+    /// A level whose shadow caster stands elsewhere sends its casters to
+    /// the caster's rows BY PLACEMENT; places the caster lacks are added.
+    #[test]
+    fn shadow_casters_map_by_placement() {
+        let m = |x: f32| { let mut a = Mat4::IDENTITY.to_cols_array(); a[12] = x; a };
+        let mut a = test_entry(vec![Vec4::ONE; 3], None);
+        a.place = Arc::new(vec![m(1.0), m(2.0), m(3.0)]);
+        a.shadow_to = Some(Some(1));
+        let mut b = test_entry(vec![Vec4::ONE; 2], None);
+        b.place = Arc::new(vec![m(2.0), m(4.0)]);
+        // a level at the same places as its caster keeps its numbering
+        let mut c = test_entry(vec![Vec4::ONE; 2], None);
+        c.place = b.place.clone();
+        c.shadow_to = Some(Some(1));
+        let mut es = vec![a, b, c];
+        map_casters(&mut es);
+        assert_eq!(es[0].cast_map.as_deref(), Some(&[2, 0, 3][..]));
+        assert_eq!(es[1].extra, vec![m(1.0), m(3.0)]);
+        assert_eq!(es[1].cast_len(), 4);
+        assert!(es[2].cast_map.is_none());
+        es[1].extra_tail = vec![[0.0; 4]; 2];
+        let mut row = Vec::new();
+        es[1].push_row(3, &mut row);
+        assert_eq!(row[12], 3.0);
     }
 
     /// The occupied-cell walk keeps every instance the per-instance test
