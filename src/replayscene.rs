@@ -254,6 +254,7 @@ fn merge_shared(
     blob: &mut Vec<u8>,
     src: &Car,
     tag: &str,
+    geo: &mut std::collections::HashMap<(String, usize, u64), [u64; 2]>,
 ) -> std::ops::Range<usize> {
     tex_src.resize(textures.len(), String::new());
     // at most the whole source blob plus alignment padding
@@ -300,9 +301,22 @@ fn merge_shared(
         let mut m = m.clone();
         m.bone_idx = None;
         m.bone_wgt = None;
-        for r in [&mut m.positions, &mut m.normals, &mut m.uvs, &mut m.tangents, &mut m.indices, &mut m.colors, &mut m.uv1] {
+        // Another look of the same model has the same geometry: its bytes
+        // are already in the blob (keyed by mesh name, stream and length,
+        // and compared before reuse). A copy per look was ~110 MB of load
+        // RAM each, uploaded once anyway (render.rs shares geometry).
+        for (fi, r) in [&mut m.positions, &mut m.normals, &mut m.uvs, &mut m.tangents, &mut m.indices, &mut m.colors, &mut m.uv1]
+            .into_iter().enumerate() {
             if let Some(v) = r.as_mut() {
-                *v = copy(blob, *v);
+                let bytes = src.slice(Some(*v));
+                let key = (m.name.clone(), fi, bytes.len() as u64);
+                match geo.get(&key) {
+                    Some(&[off, len]) if blob.get(off as usize..(off + len) as usize) == Some(bytes) => *v = [off, len],
+                    _ => {
+                        *v = copy(blob, *v);
+                        geo.insert(key, *v);
+                    }
+                }
             }
         }
         for b in &mut m.batches {
@@ -316,6 +330,17 @@ fn merge_shared(
 /// Room for `n` more bytes in the scene blob. ⚠ Not plain `extend`: its
 /// doubling turned a 3 GB track blob plus one car into a 6 GB allocation
 /// (and a copy). 25 % headroom keeps the reallocations few without that.
+/// EVOVIEW_RAM_LOG=1: the process's memory and the scene blob at a load step.
+pub(crate) fn ram_log(what: &str, blob: Option<&Vec<u8>>) {
+    if crate::envc::var_os("EVOVIEW_RAM_LOG").is_none() {
+        return;
+    }
+    let (peak, commit, ws) = crate::perf::ram();
+    let mb = |b: u64| b as f64 / 1048576.0;
+    let (bl, bc) = blob.map_or((0, 0), |b| (b.len() as u64, b.capacity() as u64));
+    println!("RAM {what}: ws {:.0} peak {:.0} commit {:.0} MB; blob {:.0} / cap {:.0} MB", mb(ws), mb(peak), mb(commit), mb(bl), mb(bc));
+}
+
 fn grow(blob: &mut Vec<u8>, n: usize) {
     if blob.capacity() - blob.len() < n {
         blob.reserve_exact(n.max(blob.len() / 4));
@@ -806,6 +831,7 @@ impl Scene {
         // merged and measured: its blob is a dead copy from here on (only
         // fx / rain / skeleton are taken from `loaded` at the end)
         drop(loaded.car.take_blob());
+        ram_log("track + player car", Some(&blob));
         let mut slots = vec![s];
         let player_look = crate::load::pick_visual_preset(&mut vfs).map(|k| crate::livery::stem_of(&k));
         let max_looks = crate::envc::var("EVOVIEW_AI_LIVERIES").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(6);
@@ -841,6 +867,8 @@ impl Scene {
             }
         }
         for (mi, m) in models.iter().enumerate() {
+            // this model's geometry already in the blob (merge_shared)
+            let mut geo = std::collections::HashMap::new();
             let cars: Vec<usize> = (0..ai.len()).filter(|&i| &ai[i] == *m).collect();
             // ⚠ one opponent model that cannot be opened (a stub or
             // unreleased car id on a server) must not end the session: those
@@ -928,7 +956,7 @@ impl Scene {
                 let mine: Vec<usize> = cars.iter().zip(&looks).filter(|(_, x)| *x == look).map(|(&c, _)| c).collect();
                 let tag = format!("a{}", si - 1);
                 let range = if crate::envc::var("EVOVIEW_AI_SHARE_TEX").map_or(true, |v| v != "0") {
-                    merge_shared(&mut meshes, &mut textures, &mut tex_src, &mut materials, &mut blob, &l.car, &tag)
+                    merge_shared(&mut meshes, &mut textures, &mut tex_src, &mut materials, &mut blob, &l.car, &tag, &mut geo)
                 } else {
                     let r = merge(&mut meshes, &mut textures, &mut tex_src, &mut materials, &mut blob, &l.car, Some(&tag));
                     for i in r.clone() {
@@ -938,6 +966,7 @@ impl Scene {
                     r
                 };
                 slots.push(measure_slot(&mut meshes, range, &l.car, m, mine.len()));
+                ram_log(&format!("look {} {m}", si - 1), Some(&blob));
                 for (inst, &c) in mine.iter().enumerate() {
                     place[c] = (mi, si, inst);
                 }
@@ -963,6 +992,7 @@ impl Scene {
             let opp_mesh = crate::vram::mesh_bytes(&meshes[ai_mesh_base..]);
             crate::vram::plan(base, &mut textures[ai_tex_base..], &mut blob, opp_mesh);
         }
+        ram_log("opponents planned", Some(&blob));
         let mut car = Car::from_parts(meshes, textures, materials, blob);
         car.tex_src = tex_src;
         car.track_env = track_env;
