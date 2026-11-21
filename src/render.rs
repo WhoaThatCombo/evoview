@@ -650,6 +650,7 @@ pub fn ground_quad(device: &wgpu::Device, lo: Vec3, hi: Vec3) -> GpuMesh {
         draws: vec![],
         src: usize::MAX,
         extra: None,
+        split: None,
         radius: 0.0,
     }
 }
@@ -681,12 +682,47 @@ pub struct GpuMesh {
     /// buffer, whose indices point at the mesh's own vertices in the shared
     /// vertex buffers. Bind them whole, as for a mesh with buffers of its own.
     pub extra: Option<std::sync::Arc<wgpu::Buffer>>,
+    /// Track meshes, with `track_split`: the vertex as the track pipelines
+    /// take it, in two streams - (position, normal, uv, tangent: 12 floats;
+    /// bone indices and weights: 8 floats). Most track geometry has no
+    /// bones: its second stream is one shared buffer of zeros, and the 32
+    /// bytes a vertex they took (of 104) are not uploaded at all.
+    ///
+    /// ⚠ A mesh ONLY the track pipelines draw (every batch a track material,
+    /// none emissive) has no interleaved copy: its `vertices` IS the first
+    /// stream here. Anything that binds `vertices` as the 20-float vertex
+    /// must stay away from meshes the track owns (`TrackRender::owns_mesh`),
+    /// as the car passes do.
+    pub split: Option<(std::sync::Arc<wgpu::Buffer>, std::sync::Arc<wgpu::Buffer>)>,
     /// The farthest vertex from the mesh origin (m, unskinned): carcull.rs
     /// bounds each moving car's instance with it. 0 where unused.
     pub radius: f32,
 }
 
 pub const FLOATS_PER_VERTEX: usize = 20; // pos3 nrm3 uv2 tan4 boneidx4 bonewgt4
+/// The same vertex as two streams (`GpuMesh::split`): its first 12 floats,
+/// and the bones' 8.
+pub const SPLIT_FLOATS: usize = 12;
+pub const BONE_FLOATS: usize = FLOATS_PER_VERTEX - SPLIT_FLOATS;
+
+/// Whether track meshes keep their bones as a stream of their own
+/// (`GpuMesh::split`), which the track pipelines are then built for.
+/// EVOVIEW_TRACK_SPLIT=0: the interleaved vertex everywhere, as before.
+pub fn track_split() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::envc::var("EVOVIEW_TRACK_SPLIT").map_or(true, |v| v != "0")
+        && crate::envc::var("EVOVIEW_OLD_TRACK").is_err())
+}
+
+/// The vertex buffer layouts of a pipeline drawing track meshes with the
+/// car vertex shader's inputs (the shadow maps): interleaved, or split.
+pub const VERTEX_FULL: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+    0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4];
+pub const VERTEX_SPLIT: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+    0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4];
+pub const VERTEX_BONES: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![4 => Float32x4, 5 => Float32x4];
+pub const VERTEX_INSTANCE: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+    6 => Float32x4, 7 => Float32x4, 8 => Float32x4, 9 => Float32x4, 10 => Float32x4];
 
 /// Track geometry gathered into shared buffers while a scene is built.
 ///
@@ -700,18 +736,30 @@ pub const FLOATS_PER_VERTEX: usize = 20; // pos3 nrm3 uv2 tan4 boneidx4 bonewgt4
 /// buffers hold exactly what the per-mesh ones held.
 /// EVOVIEW_GEOM_ARENA=0: buffers per mesh, as before.
 struct GeomArena {
+    /// 20 floats a vertex, or 12 with the bones split off (`split`)
     verts: Vec<f32>,
+    /// split, skinned meshes: the bones' 8 floats a vertex. Empty in a split
+    /// arena: no mesh in it has bones (one shared buffer of zeros serves)
+    bones: Vec<f32>,
     extra: Vec<f32>,
     idx: Vec<u32>,
     /// the meshes (positions in the scene's list) waiting for these buffers
     members: Vec<usize>,
+    split: bool,
 }
 
 const ARENA_BYTES: usize = 64 << 20;
+/// Vertices in a chunk of split meshes (the shared zero bones are this many).
+const ARENA_SPLIT_VERTS: usize = 1 << 19;
 
 impl GeomArena {
     /// Upload what has been gathered and hand the buffers to its meshes.
-    fn flush(&mut self, device: &wgpu::Device, meshes: &mut [GpuMesh]) {
+    fn new(split: bool) -> Self {
+        GeomArena { verts: Vec::new(), bones: Vec::new(), extra: Vec::new(), idx: Vec::new(), members: Vec::new(), split }
+    }
+
+    /// `zeros`: the bones of a split arena whose meshes have none.
+    fn flush(&mut self, device: &wgpu::Device, meshes: &mut [GpuMesh], zeros: Option<&std::sync::Arc<wgpu::Buffer>>) {
         if self.members.is_empty() {
             return;
         }
@@ -720,12 +768,25 @@ impl GeomArena {
         let v = buf("track vertices", bytemuck::cast_slice(&self.verts), wgpu::BufferUsages::VERTEX);
         let e = buf("track vertices (colour, uv1)", bytemuck::cast_slice(&self.extra), wgpu::BufferUsages::VERTEX);
         let i = buf("track indices", bytemuck::cast_slice(&self.idx), wgpu::BufferUsages::INDEX);
+        let bones = match (self.split, self.bones.is_empty(), zeros) {
+            (false, ..) => None,
+            (true, true, Some(z)) => Some(z.clone()),
+            (true, ..) => {
+                // (no zeros handed in: every vertex its own, all zero)
+                if self.bones.is_empty() {
+                    self.bones.resize(self.verts.len() / SPLIT_FLOATS * BONE_FLOATS, 0.0);
+                }
+                Some(buf("track vertices (bones)", bytemuck::cast_slice(&self.bones), wgpu::BufferUsages::VERTEX))
+            }
+        };
         for &k in &self.members {
             meshes[k].vertices = v.clone();
             meshes[k].indices = i.clone();
             meshes[k].extra = Some(e.clone());
+            meshes[k].split = bones.as_ref().map(|b| (v.clone(), b.clone()));
         }
         self.verts.clear();
+        self.bones.clear();
         self.extra.clear();
         self.idx.clear();
         self.members.clear();
@@ -816,7 +877,19 @@ pub fn build_scene(
     let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
     let mut tris = 0u32;
     let arena_on = crate::envc::var("EVOVIEW_GEOM_ARENA").map_or(true, |v| v != "0");
-    let mut arena = GeomArena { verts: Vec::new(), extra: Vec::new(), idx: Vec::new(), members: Vec::new() };
+    let mut arena = GeomArena::new(false);
+    // Split vertex streams (GpuMesh::split) for the meshes only the track
+    // pipelines draw: every batch one of the track's materials (the scene's
+    // first ones: track.rs owned_material_count) and none emissive (the glow
+    // pass draws those with the car vertex layout).
+    let split_on = track_split() && mats.is_some();
+    let n_track = if split_on { crate::track::owned_material_count(car) } else { 0 };
+    let emissive = |mi: usize| mats.map_or(false, |x| x.light_srcs.get(mi).and_then(|s| s.as_ref())
+        .map_or(false, |s| s.class != crate::lights::Class::None));
+    // (meshes without bones, and with)
+    let mut arena_static = GeomArena::new(true);
+    let mut arena_skinned = GeomArena::new(true);
+    let mut zero_bones: Option<std::sync::Arc<wgpu::Buffer>> = None;
     // (stands in for an arena mesh's buffers until its chunk is uploaded)
     let mut arena_stub: Option<std::sync::Arc<wgpu::Buffer>> = None;
 
@@ -905,6 +978,9 @@ pub fn build_scene(
         // for the track pipeline.
         let mut extra = None;
         let mut in_arena = false;
+        let mut split = None;
+        // (its `vertices` is the first split stream: see GpuMesh::split)
+        let mut split_only = false;
         if m.colors.is_some() || m.uv1.is_some() {
             let col: Vec<f32> = car.floats(m.colors);
             let uv1: Vec<f32> = car.floats(m.uv1);
@@ -921,10 +997,67 @@ pub fn build_scene(
                     e[o + 5] = uv1[i * 2 + 1];
                 }
             }
-            if arena_on && verts.len() * 4 <= ARENA_BYTES && idx.len() * 4 <= ARENA_BYTES {
+            let vbuf_of = |label: &str, f: &[f32]| std::sync::Arc::new(device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor { label: Some(label), contents: bytemuck::cast_slice(f), usage: wgpu::BufferUsages::VERTEX }));
+            let stub_of = |stub: &mut Option<std::sync::Arc<wgpu::Buffer>>| stub.get_or_insert_with(|| std::sync::Arc::new(
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("track geometry (pending)"),
+                    size: 16,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::INDEX,
+                    mapped_at_creation: false,
+                }))).clone();
+            // the two streams of the split layout
+            let (mut v12, mut b8) = (Vec::new(), Vec::new());
+            if split_on && n_track > 0 {
+                v12.reserve(n * SPLIT_FLOATS);
+                b8.reserve(n * BONE_FLOATS);
+                for v in verts.chunks_exact(FLOATS_PER_VERTEX) {
+                    v12.extend_from_slice(&v[..SPLIT_FLOATS]);
+                    b8.extend_from_slice(&v[SPLIT_FLOATS..]);
+                }
+            }
+            let pure = !v12.is_empty() && draws.iter().all(|d| d.2 < n_track && !emissive(d.2));
+            if pure && arena_on && n <= ARENA_SPLIT_VERTS && idx.len() * 4 <= ARENA_BYTES {
+                let skinned = b8.iter().any(|&x| x != 0.0);
+                let a = if skinned { &mut arena_skinned } else { &mut arena_static };
+                // (a chunk that this mesh would overfill is uploaded first)
+                if a.verts.len() / SPLIT_FLOATS + n > ARENA_SPLIT_VERTS || (a.idx.len() + idx.len()) * 4 > ARENA_BYTES {
+                    a.flush(device, &mut meshes, zero_bones.as_ref());
+                }
+                if !skinned && zero_bones.is_none() {
+                    // (a new buffer reads as zeros)
+                    zero_bones = Some(std::sync::Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("track vertices (no bones)"),
+                        size: (ARENA_SPLIT_VERTS * BONE_FLOATS * 4) as u64,
+                        usage: wgpu::BufferUsages::VERTEX,
+                        mapped_at_creation: false,
+                    })));
+                }
+                let base = (a.verts.len() / SPLIT_FLOATS) as u32;
+                let first = a.idx.len() as u32;
+                a.verts.extend_from_slice(&v12);
+                if skinned {
+                    a.bones.extend_from_slice(&b8);
+                }
+                a.extra.extend_from_slice(&e);
+                a.idx.extend(idx.iter().map(|&i| i + base));
+                for d in draws.iter_mut() {
+                    d.0 += first;
+                }
+                a.members.push(meshes.len());
+                extra = Some(stub_of(&mut arena_stub));
+                in_arena = true;
+            } else if !v12.is_empty() {
+                // Buffers of its own: too big for a chunk, or drawn by the
+                // car pipelines as well (a batch of another material, or an
+                // emissive one) - then the interleaved vertex stays too.
+                split = Some((vbuf_of(&m.name, &v12), vbuf_of("track vertices (bones)", &b8)));
+                split_only = pure;
+                extra = Some(vbuf_of(&format!("{}-extra", m.name), &e));
+            } else if arena_on && verts.len() * 4 <= ARENA_BYTES && idx.len() * 4 <= ARENA_BYTES {
                 // (a chunk that this mesh would overfill is uploaded first)
                 if (arena.verts.len() + verts.len()) * 4 > ARENA_BYTES || (arena.idx.len() + idx.len()) * 4 > ARENA_BYTES {
-                    arena.flush(device, &mut meshes);
+                    arena.flush(device, &mut meshes, None);
                 }
                 let base = (arena.verts.len() / FLOATS_PER_VERTEX) as u32;
                 let first = arena.idx.len() as u32;
@@ -935,20 +1068,10 @@ pub fn build_scene(
                     d.0 += first;
                 }
                 arena.members.push(meshes.len());
-                let stub = arena_stub.get_or_insert_with(|| std::sync::Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("track geometry (pending)"),
-                    size: 16,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::INDEX,
-                    mapped_at_creation: false,
-                })));
-                extra = Some(stub.clone());
+                extra = Some(stub_of(&mut arena_stub));
                 in_arena = true;
             } else {
-                extra = Some(std::sync::Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(&format!("{}-extra", m.name)),
-                    contents: bytemuck::cast_slice(&e),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })));
+                extra = Some(vbuf_of(&format!("{}-extra", m.name), &e));
             }
         }
         let mut inst_data = pack_instances(&m.xforms, m.facing);
@@ -967,6 +1090,12 @@ pub fn build_scene(
         let (vbuf, ibuf) = if in_arena {
             let stub = extra.clone().expect("an arena mesh has its stub");
             (stub.clone(), stub)
+        } else if let Some((v, _)) = split.as_ref().filter(|_| split_only) {
+            (v.clone(), std::sync::Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&m.name),
+                contents: bytemuck::cast_slice(&idx),
+                usage: wgpu::BufferUsages::INDEX,
+            })))
         } else if extra.is_none() && crate::envc::var("EVOVIEW_SHARE_GEOMETRY").map_or(true, |v| v != "0") {
             car_geometry(device, &m.name, &verts, &idx)
         } else {
@@ -1003,11 +1132,14 @@ pub fn build_scene(
             index_count: idx.len() as u32,
             src: src_i,
             extra,
+            split,
             radius: verts.chunks_exact(FLOATS_PER_VERTEX)
                 .map(|v| v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).fold(0.0f32, f32::max).sqrt(),
         });
     }
-    arena.flush(device, &mut meshes);
+    arena.flush(device, &mut meshes, None);
+    arena_static.flush(device, &mut meshes, zero_bones.as_ref());
+    arena_skinned.flush(device, &mut meshes, None);
     // A machine-readable line so a sweep over every car can tell a real
     // failure from an ugly render. Batches that fell back are the honest
     // signal that a material did not bind.
@@ -1513,29 +1645,24 @@ pub fn build_pipeline(
     // Depth-only, single-sampled, front faces culled. Culling the FRONT rather
     // than the back pushes the stored depth to the far side of a solid, which
     // is the cheapest way to keep near-flat ground from shadowing itself.
-    let shadow_with = |label: &str, cull: Option<wgpu::Face>| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    // (track meshes with their bones as a stream of their own: GpuMesh::split)
+    let shadow_full = [
+        wgpu::VertexBufferLayout { array_stride: (FLOATS_PER_VERTEX * 4) as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &VERTEX_FULL },
+        wgpu::VertexBufferLayout { array_stride: 80, step_mode: wgpu::VertexStepMode::Instance, attributes: &VERTEX_INSTANCE },
+    ];
+    let shadow_split = [
+        wgpu::VertexBufferLayout { array_stride: (SPLIT_FLOATS * 4) as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &VERTEX_SPLIT },
+        wgpu::VertexBufferLayout { array_stride: 80, step_mode: wgpu::VertexStepMode::Instance, attributes: &VERTEX_INSTANCE },
+        wgpu::VertexBufferLayout { array_stride: (BONE_FLOATS * 4) as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &VERTEX_BONES },
+    ];
+    let shadow_with = |label: &str, cull: Option<wgpu::Face>, split: bool| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,
             entry_point: "vs_main",
             compilation_options: Default::default(),
-            buffers: &[
-                wgpu::VertexBufferLayout {
-                    array_stride: (FLOATS_PER_VERTEX * 4) as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4,
-                        4 => Float32x4, 5 => Float32x4],
-                },
-                wgpu::VertexBufferLayout {
-                    array_stride: 80,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![
-                        6 => Float32x4, 7 => Float32x4, 8 => Float32x4, 9 => Float32x4,
-                        10 => Float32x4],
-                },
-            ],
+            buffers: if split { &shadow_split } else { &shadow_full },
         },
         fragment: None,
         primitive: wgpu::PrimitiveState {
@@ -1561,11 +1688,12 @@ pub fn build_pipeline(
     // EVOVIEW_SHADOW_CULL=front: the old front-face culling, for A/B.
     let track_cull = crate::envc::var("EVOVIEW_SHADOW_CULL").map_or(false, |v| v == "front")
         .then_some(wgpu::Face::Front);
-    let shadow_pipeline = shadow_with("shadow", track_cull);
+    let shadow_pipeline = shadow_with("shadow", track_cull, false);
+    let shadow_split = shadow_with("shadow (split vertex)", track_cull, true);
     // ⚠ Cars cast two-sided: with the front faces culled only the underbody
     // was left, ~15 cm off the road - inside the bias - so cars cast nothing.
-    let shadow_car = shadow_with("shadow (cars)", None);
-    Pipelines { pipeline, blended, glass_tint, glass_add, shadow: shadow_pipeline, shadow_car, bind_group,
+    let shadow_car = shadow_with("shadow (cars)", None, false);
+    Pipelines { pipeline, blended, glass_tint, glass_add, shadow: shadow_pipeline, shadow_car, shadow_split, bind_group,
                 light_bind_group, light_buf_far, light_bind_group_far, light_x, bone_bg, glow }
 }
 
@@ -1579,6 +1707,9 @@ pub struct Pipelines {
     pub glass_add: wgpu::RenderPipeline,
     pub shadow: wgpu::RenderPipeline,
     pub shadow_car: wgpu::RenderPipeline,
+    /// `shadow` for meshes with split vertex streams (GpuMesh::split):
+    /// slot 0 the vertex's first 12 floats, 1 the instances, 2 the bones
+    pub shadow_split: wgpu::RenderPipeline,
     pub bind_group: wgpu::BindGroup,
     pub light_bind_group: wgpu::BindGroup,
     /// the far shadow cascade's light camera
@@ -5174,7 +5305,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 sp.set_bind_group(2, bone_bg, &[]);
                                 let (mut n_mesh, mut n_draw) = (0u64, 0u64);
                                 let mut group_set = false;
-                                let mut pipe_track: Option<bool> = Some(true);
+                                let mut pipe_track: Option<u8> = Some(1);
                                 let mut geo_bound: *const wgpu::Buffer = std::ptr::null();
                                 let mut inst_bound: *const wgpu::Buffer = std::ptr::null();
                                 for (mi_mesh, m) in meshes.iter().enumerate() {
@@ -5212,17 +5343,24 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                         continue;
                                     }
                                     // track geometry carries its extra stream; cars do not
-                                    if pipe_track != Some(m.extra.is_some()) {
-                                        sp.set_pipeline(if m.extra.is_some() { &pipes_all.shadow } else { &pipes_all.shadow_car });
-                                        pipe_track = Some(m.extra.is_some());
+                                    // (2: with its bones as a stream of their own)
+                                    let kind = if m.split.is_some() { 2u8 } else { m.extra.is_some() as u8 };
+                                    if pipe_track != Some(kind) {
+                                        sp.set_pipeline([&pipes_all.shadow_car, &pipes_all.shadow, &pipes_all.shadow_split][kind as usize]);
+                                        pipe_track = Some(kind);
+                                        geo_bound = std::ptr::null();
                                     }
                                     // (track meshes share their buffers with their
                                     // neighbours, and the moving cars their rows)
-                                    if !std::ptr::eq(geo_bound, std::sync::Arc::as_ptr(&m.vertices)) {
-                                        sp.set_vertex_buffer(0, m.vertices.slice(..));
+                                    let geo = m.split.as_ref().map_or(&m.vertices, |s| &s.0);
+                                    if !std::ptr::eq(geo_bound, std::sync::Arc::as_ptr(geo)) {
+                                        sp.set_vertex_buffer(0, geo.slice(..));
+                                        if let Some((_, bones)) = m.split.as_ref() {
+                                            sp.set_vertex_buffer(2, bones.slice(..));
+                                        }
                                         sp.set_index_buffer(m.indices.slice(..),
                                                             wgpu::IndexFormat::Uint32);
-                                        geo_bound = std::sync::Arc::as_ptr(&m.vertices);
+                                        geo_bound = std::sync::Arc::as_ptr(geo);
                                     }
                                     if !std::ptr::eq(inst_bound, inst_buf) {
                                         sp.set_vertex_buffer(1, inst_buf.slice(..));

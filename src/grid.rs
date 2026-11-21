@@ -163,6 +163,7 @@ pub fn build(
             index_count: idx.len() as u32,
             src: usize::MAX,
             extra: None,
+            split: None,
             radius: 0.0,
         });
     }

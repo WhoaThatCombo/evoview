@@ -1712,6 +1712,9 @@ fn phase_index(phase: Blend) -> usize {
 /// ones the cheap cards, and each level keeps only its `density` fraction
 /// (MeshLodData f25) - the way the game thins its carpet with distance.
 struct CarpetLevel {
+    /// split streams (render.rs track_split): 12 floats a vertex, and
+    /// `bones` all zero
+    bones: Option<wgpu::Buffer>,
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     extra: wgpu::Buffer,
@@ -1759,7 +1762,8 @@ impl CarpetLevel {
         if n == 0 || idx.is_empty() || pos.len() < n * 3 {
             return None;
         }
-        let fpv = crate::render::FLOATS_PER_VERTEX;
+        let split = crate::render::track_split();
+        let fpv = if split { crate::render::SPLIT_FLOATS } else { crate::render::FLOATS_PER_VERTEX };
         let mut v = vec![0f32; n * fpv];
         let mut e = vec![0f32; n * EXTRA_FLOATS];
         for i in 0..n {
@@ -1779,6 +1783,13 @@ impl CarpetLevel {
         let [near, density] = m.lod.unwrap_or([0.0, 1.0]);
         let dlt = m.lod_fade[0];
         Some(CarpetLevel {
+            // (a new buffer reads as zeros)
+            bones: split.then(|| device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("carpet bones"),
+                size: (n * crate::render::BONE_FLOATS * 4) as u64,
+                usage: wgpu::BufferUsages::VERTEX,
+                mapped_at_creation: false,
+            })),
             vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(&m.name), contents: bytemuck::cast_slice(&v), usage: wgpu::BufferUsages::VERTEX,
             }),
@@ -2707,7 +2718,36 @@ impl TrackRender {
             bind_group_layouts: &[&frame_bgl, &mat_bgl],
             push_constant_ranges: &[],
         });
-        let vfloats = crate::render::FLOATS_PER_VERTEX as u64 * 4;
+        // The vertex streams of every track pipeline: the mesh's vertex,
+        // its instances, its colour + uv1 - and, with split streams
+        // (render.rs GpuMesh::split), the bones as a fourth, the first
+        // then the vertex's 12 floats without them.
+        const EXTRA_ATTRS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![11 => Float32x4, 12 => Float32x2];
+        let split = crate::render::track_split();
+        let mut track_buffers = vec![
+            if split {
+                wgpu::VertexBufferLayout {
+                    array_stride: (crate::render::SPLIT_FLOATS * 4) as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &crate::render::VERTEX_SPLIT,
+                }
+            } else {
+                wgpu::VertexBufferLayout {
+                    array_stride: (crate::render::FLOATS_PER_VERTEX * 4) as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &crate::render::VERTEX_FULL,
+                }
+            },
+            wgpu::VertexBufferLayout { array_stride: 80, step_mode: wgpu::VertexStepMode::Instance, attributes: &crate::render::VERTEX_INSTANCE },
+            wgpu::VertexBufferLayout { array_stride: (EXTRA_FLOATS * 4) as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &EXTRA_ATTRS },
+        ];
+        if split {
+            track_buffers.push(wgpu::VertexBufferLayout {
+                array_stride: (crate::render::BONE_FLOATS * 4) as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &crate::render::VERTEX_BONES,
+            });
+        }
         // `ssr`: the main pass's SSR targets (ssr.rs) after the colour, Some(true)
         // where the material writes them; None for the other views' passes
         let make = |label: &str, blend: Option<wgpu::BlendState>, depth_write: bool, a2c: bool, ssr: Option<bool>| {
@@ -2732,27 +2772,7 @@ impl TrackRender {
                     module: &shader,
                     entry_point: "vs_main",
                     compilation_options: Default::default(),
-                    buffers: &[
-                        wgpu::VertexBufferLayout {
-                            array_stride: vfloats,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &wgpu::vertex_attr_array![
-                                0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4,
-                                4 => Float32x4, 5 => Float32x4],
-                        },
-                        wgpu::VertexBufferLayout {
-                            array_stride: 80,
-                            step_mode: wgpu::VertexStepMode::Instance,
-                            attributes: &wgpu::vertex_attr_array![
-                                6 => Float32x4, 7 => Float32x4, 8 => Float32x4, 9 => Float32x4,
-                                10 => Float32x4],
-                        },
-                        wgpu::VertexBufferLayout {
-                            array_stride: (EXTRA_FLOATS * 4) as u64,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &wgpu::vertex_attr_array![11 => Float32x4, 12 => Float32x2],
-                        },
-                    ],
+                    buffers: &track_buffers,
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
@@ -2789,27 +2809,7 @@ impl TrackRender {
                 module: &shader,
                 entry_point: "vs_main",
                 compilation_options: Default::default(),
-                buffers: &[
-                    wgpu::VertexBufferLayout {
-                        array_stride: vfloats,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![
-                            0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4,
-                                4 => Float32x4, 5 => Float32x4],
-                    },
-                    wgpu::VertexBufferLayout {
-                        array_stride: 80,
-                        step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &wgpu::vertex_attr_array![
-                            6 => Float32x4, 7 => Float32x4, 8 => Float32x4, 9 => Float32x4,
-                            10 => Float32x4],
-                    },
-                    wgpu::VertexBufferLayout {
-                        array_stride: (EXTRA_FLOATS * 4) as u64,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![11 => Float32x4, 12 => Float32x2],
-                    },
-                ],
+                buffers: &track_buffers,
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -2870,27 +2870,7 @@ impl TrackRender {
                     module: &shader,
                     entry_point: "vs_motion",
                     compilation_options: Default::default(),
-                    buffers: &[
-                        wgpu::VertexBufferLayout {
-                            array_stride: vfloats,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &wgpu::vertex_attr_array![
-                                0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4,
-                                4 => Float32x4, 5 => Float32x4],
-                        },
-                        wgpu::VertexBufferLayout {
-                            array_stride: 80,
-                            step_mode: wgpu::VertexStepMode::Instance,
-                            attributes: &wgpu::vertex_attr_array![
-                                6 => Float32x4, 7 => Float32x4, 8 => Float32x4, 9 => Float32x4,
-                                10 => Float32x4],
-                        },
-                        wgpu::VertexBufferLayout {
-                            array_stride: (EXTRA_FLOATS * 4) as u64,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &wgpu::vertex_attr_array![11 => Float32x4, 12 => Float32x2],
-                        },
-                    ],
+                    buffers: &track_buffers,
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
@@ -3314,6 +3294,9 @@ impl TrackRender {
             let mut last_group = usize::MAX;
             for (gi, m) in meshes.iter().enumerate() {
                 let Some(extra) = m.extra.as_ref() else { continue };
+                if m.split.is_some() != crate::render::track_split() {
+                    continue;
+                }
                 let anim = self.anim_src.contains(&m.src);
                 let n = count(gi, m.instance_count);
                 if n == 0 {
@@ -3326,7 +3309,13 @@ impl TrackRender {
                         continue;
                     }
                     if !bound {
-                        pass.set_vertex_buffer(0, m.vertices.slice(..));
+                        match m.split.as_ref() {
+                            Some((v, bones)) => {
+                                pass.set_vertex_buffer(0, v.slice(..));
+                                pass.set_vertex_buffer(3, bones.slice(..));
+                            }
+                            None => pass.set_vertex_buffer(0, m.vertices.slice(..)),
+                        }
                         pass.set_vertex_buffer(1, m.instances.slice(..));
                         pass.set_vertex_buffer(2, extra.slice(..));
                         pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -3364,6 +3353,9 @@ impl TrackRender {
             let gi = gi as usize;
             let m = &meshes[gi];
             let Some(extra) = m.extra.as_ref() else { continue };
+            if m.split.is_some() != crate::render::track_split() {
+                continue;
+            }
             if !m.draws.iter().any(|d| self.blend(d.2) == Some(Blend::Cutout)) {
                 continue;
             }
@@ -3377,7 +3369,13 @@ impl TrackRender {
                 set = true;
             }
             if !std::ptr::eq(geo, std::sync::Arc::as_ptr(&m.vertices)) {
-                pass.set_vertex_buffer(0, m.vertices.slice(..));
+                match m.split.as_ref() {
+                    Some((v, bones)) => {
+                        pass.set_vertex_buffer(0, v.slice(..));
+                        pass.set_vertex_buffer(3, bones.slice(..));
+                    }
+                    None => pass.set_vertex_buffer(0, m.vertices.slice(..)),
+                }
                 pass.set_vertex_buffer(2, extra.slice(..));
                 pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
                 geo = std::sync::Arc::as_ptr(&m.vertices);
@@ -3619,10 +3617,15 @@ impl TrackRender {
         let (mut n_draws, mut n_tris) = (0u64, 0u64);
         let mut geo: *const wgpu::Buffer = std::ptr::null();
         let lists = self.phase_meshes(meshes);
+        let split = crate::render::track_split();
         for &gi in &lists.phase[phase_index(phase)] {
             let gi = gi as usize;
             let m = &meshes[gi];
             let Some(extra) = m.extra.as_ref() else { continue };
+            // (the pipelines take the mesh's vertex one way or the other)
+            if m.split.is_some() != split {
+                continue;
+            }
             let n = count(gi, m.instance_count);
             if n == 0 {
                 continue;
@@ -3642,7 +3645,13 @@ impl TrackRender {
                     // (meshes share their geometry buffers with their
                     // neighbours in the scene: render.rs GeomArena)
                     if !std::ptr::eq(geo, std::sync::Arc::as_ptr(&m.vertices)) {
-                        pass.set_vertex_buffer(0, m.vertices.slice(..));
+                        match m.split.as_ref() {
+                            Some((v, bones)) => {
+                                pass.set_vertex_buffer(0, v.slice(..));
+                                pass.set_vertex_buffer(3, bones.slice(..));
+                            }
+                            None => pass.set_vertex_buffer(0, m.vertices.slice(..)),
+                        }
                         pass.set_vertex_buffer(2, extra.slice(..));
                         pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
                         geo = std::sync::Arc::as_ptr(&m.vertices);
@@ -3677,6 +3686,9 @@ impl TrackRender {
                 }
                 if !bound {
                     pass.set_vertex_buffer(0, l.vertices.slice(..));
+                    if let Some(b) = l.bones.as_ref() {
+                        pass.set_vertex_buffer(3, b.slice(..));
+                    }
                     pass.set_vertex_buffer(1, l.instances.slice(..));
                     pass.set_vertex_buffer(2, l.extra.slice(..));
                     pass.set_index_buffer(l.indices.slice(..), wgpu::IndexFormat::Uint32);

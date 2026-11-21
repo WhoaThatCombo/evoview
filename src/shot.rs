@@ -314,7 +314,19 @@ impl Still {
             pass.set_bind_group(0, if layer == 0 { &pipes.light_bind_group } else { &pipes.light_bind_group_far }, &[]);
             pass.set_bind_group(2, bone_bg, &[]);
             for m in meshes {
-                pass.set_vertex_buffer(0, m.vertices.slice(..));
+                // (a track mesh with its bones as a stream of their own:
+                // render.rs GpuMesh::split)
+                match m.split.as_ref() {
+                    Some((v, bones)) => {
+                        pass.set_pipeline(&pipes.shadow_split);
+                        pass.set_vertex_buffer(0, v.slice(..));
+                        pass.set_vertex_buffer(2, bones.slice(..));
+                    }
+                    None => {
+                        pass.set_pipeline(&pipes.shadow);
+                        pass.set_vertex_buffer(0, m.vertices.slice(..));
+                    }
+                }
                 pass.set_vertex_buffer(1, m.instances.slice(..));
                 pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
                 for &(start, count, mi) in &m.draws {
