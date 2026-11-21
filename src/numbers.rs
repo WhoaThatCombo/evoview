@@ -301,14 +301,21 @@ pub fn add(
     };
     // the source geometry, read once: (mesh index, positions, normals,
     // tangents, bone idx, bone wgt, indices, batches)
+    // ⚠ copied out with chunks_exact, never bytemuck::cast_slice: that
+    // panics on a blob range whose length is not a multiple of 4 or whose
+    // start is unaligned (asset.rs Car::floats); a bogus range reads as empty
+    let bytes = |blob: &Vec<u8>, r: Option<[u64; 2]>| -> Vec<[u8; 4]> {
+        r.and_then(|[o, n]| blob.get(o as usize..o.checked_add(n)? as usize))
+            .map_or(Vec::new(), |b| b.chunks_exact(4).map(|c| c.try_into().unwrap()).collect())
+    };
     let f32s = |blob: &Vec<u8>, r: Option<[u64; 2]>| -> Vec<f32> {
-        r.map(|[o, n]| bytemuck::cast_slice::<u8, f32>(&blob[o as usize..(o + n) as usize]).to_vec()).unwrap_or_default()
+        bytes(blob, r).into_iter().map(f32::from_le_bytes).collect()
     };
     let src: Vec<(String, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<u32>, Vec<Batch>)> = meshes.iter()
         .filter(|m| m.xforms.is_empty())
         .map(|m| (m.name.clone(), f32s(blob, m.positions), f32s(blob, m.normals), f32s(blob, m.tangents),
                   f32s(blob, m.bone_idx), f32s(blob, m.bone_wgt),
-                  m.indices.map(|[o, n]| bytemuck::cast_slice::<u8, u32>(&blob[o as usize..(o + n) as usize]).to_vec()).unwrap_or_default(),
+                  bytes(blob, m.indices).into_iter().map(u32::from_le_bytes).collect(),
                   m.batches.clone()))
         .collect();
     let mut tex_cache: HashMap<String, Option<usize>> = HashMap::new();
@@ -319,7 +326,7 @@ pub fn add(
         let r = (|| {
             let found = vfs.find(path, None)?;
             let hdr = vfs.read(&found);
-            let mips = vfs.read(&found.replace(".texture", ".texturemips"));
+            let mips = vfs.read(&crate::load::mips_key(&found));
             let t = crate::load::read_texture_pub(&hdr, &mips)?;
             let data = add_b(blob, &t.data);
             textures.push(TextureEntry {
@@ -373,8 +380,14 @@ pub fn add(
                 if !paintable(name, &b.material) {
                     continue;
                 }
-                let end = ((b.start + b.count) as usize).min(ind.len());
-                for tri in ind[b.start as usize..end].chunks_exact(3) {
+                // widened and clamped: a mod mesh's batch past its index
+                    // buffer (or a u32 start + count wrap) panicked the load
+                let st = (b.start as usize).min(ind.len());
+                let end = (b.start as usize).saturating_add(b.count as usize).min(ind.len());
+                for tri in ind[st..end.max(st)].chunks_exact(3) {
+                    if tri.iter().any(|&i| i as usize * 3 + 2 >= p.len()) {
+                        continue; // an index past the vertices
+                    }
                     let at = |i: u32| Vec3::new(p[i as usize * 3], p[i as usize * 3 + 1], p[i as usize * 3 + 2]);
                     let (a, bb, c) = (at(tri[0]), at(tri[1]), at(tri[2]));
                     let la = [to_dec.transform_point3(a), to_dec.transform_point3(bb), to_dec.transform_point3(c)];

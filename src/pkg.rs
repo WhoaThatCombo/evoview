@@ -69,6 +69,11 @@ fn dexor(buf: &mut [u8], phase: usize) {
     }
 }
 
+/// An entry lies wholly inside the data region (before the table).
+fn entry_fits(offset: u64, size: u32, table_start: u64) -> bool {
+    offset.checked_add(size as u64).map_or(false, |end| end <= table_start)
+}
+
 impl Package {
     pub fn open(path: &Path) -> Result<Self, String> {
         Self::open_filtered(path, &[])
@@ -115,7 +120,18 @@ impl Package {
         let mut dec = [0u8; BUCKET];
         let mut rel = 0usize;
         loop {
-            let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+            // ⚠ fill the whole chunk: one `read` may return a count that is
+            // not a multiple of 256, and the tail bucket was skipped and
+            // every later one parsed misaligned
+            let mut n = 0;
+            while n < buf.len() {
+                match file.read(&mut buf[n..]) {
+                    Ok(0) => break,
+                    Ok(k) => n += k,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
             if n == 0 {
                 break;
             }
@@ -149,12 +165,19 @@ impl Package {
                     continue;               // directory entry
                 }
                 if !prefixes.is_empty()
+                    // bytes: `p[..n]` panicked off a char boundary of a
+                    // non-ASCII path
                     && !prefixes.iter().any(|q| p.len() >= q.len()
-                        && p[..q.len()].eq_ignore_ascii_case(q))
+                        && p.as_bytes()[..q.len()].eq_ignore_ascii_case(q.as_bytes()))
                 {
                     continue;               // not a shared asset - skip before allocating
                 }
                 let offset = u64::from_le_bytes(dec[248..256].try_into().unwrap());
+                // ⚠ only entries inside the data region: a corrupt or hostile
+                // one had `read` zero-allocate up to 4 GB before failing
+                if !entry_fits(offset, size, table_start) {
+                    continue;
+                }
                 let low = p.to_lowercase();
                 let plain = low.ends_with(".texturemips");
                 by_path.insert(low, Entry { offset, size, plain });
@@ -232,5 +255,18 @@ impl Package {
         out.sort();
         out.dedup();
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::entry_fits;
+
+    #[test]
+    fn entries_must_fit_the_data_region() {
+        assert!(entry_fits(0, 100, 100));
+        assert!(!entry_fits(1, 100, 100));
+        assert!(!entry_fits(u64::MAX, 2, u64::MAX));
+        assert!(!entry_fits(u64::MAX - 1, u32::MAX, 1 << 40));
     }
 }

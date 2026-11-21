@@ -1727,7 +1727,7 @@ impl CarpetLevel {
             if uv1.len() >= n * 2 { e[q + 4..q + 6].copy_from_slice(&uv1[i * 2..i * 2 + 2]); }
         }
         let draws = m.batches.iter()
-            .filter(|b| b.count > 0 && (b.start + b.count) as usize <= idx.len())
+            .filter(|b| b.count > 0 && b.start as usize + b.count as usize <= idx.len()) // widened: u32 sum wraps
             .map(|b| (b.start, b.count, lookup(&b.material)))
             .collect();
         let [near, density] = m.lod.unwrap_or([0.0, 1.0]);
@@ -1820,7 +1820,9 @@ impl CarpetSet {
         static STEP: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
         let step = *STEP.get_or_init(|| env_f32("EVOVIEW_CARPET_STEP", 1.0));
         if let Some(l) = self.last_eye.get() {
-            if l.distance(eye) < step && self.last_scale.get() == s {
+            // the scale within 2 %: a TV camera eases its FOV every frame,
+            // and an exact compare re-walked the whole carpet each frame
+            if l.distance(eye) < step && (self.last_scale.get() - s).abs() <= 0.02 * s {
                 return;
             }
         }

@@ -39,9 +39,22 @@ pub static TARGET_PX: AtomicU64 = AtomicU64::new(0);
 pub fn screen_px() -> u64 {
     extern "system" {
         fn GetSystemMetrics(i: i32) -> i32;
+        fn EnumDisplaySettingsW(device: *const u16, mode: u32, dm: *mut u32) -> i32;
     }
-    // SAFETY: plain Win32 query (SM_CXSCREEN, SM_CYSCREEN)
-    let (w, h) = unsafe { (GetSystemMetrics(0), GetSystemMetrics(1)) };
+    // ⚠ This runs before winit makes the process DPI-aware: GetSystemMetrics
+    // then gives the scaled size (4K at 150 % read 2560x1440, the plan ~390 MB
+    // short). The display mode is physical pixels. DEVMODEW: 220 bytes,
+    // dmSize (u16) at 68, dmPelsWidth / dmPelsHeight (u32) at 172 / 176.
+    let mut dm = [0u32; 55];
+    dm[17] = 220; // dmSize, the low half of the u32 at byte 68
+    // SAFETY: a zeroed, 4-aligned DEVMODEW of the size it declares;
+    // ENUM_CURRENT_SETTINGS = -1, the primary display
+    let (w, h) = if unsafe { EnumDisplaySettingsW(std::ptr::null(), u32::MAX, dm.as_mut_ptr()) } != 0 && dm[43] > 0 && dm[44] > 0 {
+        (dm[43] as i32, dm[44] as i32)
+    } else {
+        // SAFETY: plain Win32 query (SM_CXSCREEN, SM_CYSCREEN)
+        unsafe { (GetSystemMetrics(0), GetSystemMetrics(1)) }
+    };
     (w.max(0) as u64 * h.max(0) as u64).max(1280 * 720)
 }
 #[cfg(not(windows))]

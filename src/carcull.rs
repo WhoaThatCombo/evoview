@@ -80,7 +80,16 @@ struct Mesh {
     /// frame it was set on
     bound: Vec4,
     bound_frame: u64,
+    /// per car: the LOD it was drawn with (HYST_UNSET: none yet) and whether
+    /// its detail rule kept it, for the hysteresis
+    last_li: Vec<u8>,
+    last_keep: Vec<bool>,
 }
+
+/// LOD / cabin switches need this far past their distance (5 % either
+/// way): a car holding station at a switch distance flipped every frame.
+const HYST: f32 = 0.05;
+const HYST_UNSET: u8 = u8::MAX;
 
 /// One LOD's rows being gathered in `flush`.
 #[derive(Default)]
@@ -101,6 +110,9 @@ pub struct CarCull {
     /// the last flush's view test: frustum planes and shadow offset
     planes: [Vec4; 6],
     shadow: Vec3,
+    /// the next flush pairs no previous rows (a replay seek / loop: every
+    /// car jumped, and last frame's rows would be screen-long motion)
+    cut: bool,
     /// rows drawn / put in the last flush, and how many went to a coarse LOD
     pub drawn: usize,
     pub total: usize,
@@ -117,6 +129,7 @@ impl Default for CarCull {
             levels: Vec::new(),
             planes: [Vec4::ZERO; 6],
             shadow: Vec3::ZERO,
+            cut: false,
             drawn: 0,
             total: 0,
             coarse: 0,
@@ -152,6 +165,8 @@ impl CarCull {
                 lods: Vec::new(),
                 bound: Vec4::ZERO,
                 bound_frame: 0,
+                last_li: Vec::new(),
+                last_keep: Vec::new(),
             });
         }
         &mut self.meshes[gi]
@@ -204,6 +219,18 @@ impl CarCull {
         sphere_in(&p[..4], m.bound.truncate(), m.bound.w)
     }
 
+    /// Every car teleported (a replay seek or loop): the next flush gives
+    /// motion.rs each car's current row as its previous one.
+    pub fn cut(&mut self) {
+        self.cut = true;
+    }
+
+    /// Whether mesh `gi` is a car mesh this culls (given rows, or a coarse
+    /// LOD): in drive mode, the opponents' meshes and not the player's.
+    pub fn manages(&self, gi: usize) -> bool {
+        self.meshes.get(gi).map_or(false, |m| m.prev_frame > 0 || m.bound_frame > 0 || !m.lods.is_empty())
+    }
+
     /// Whether a car at `c` (bounding radius `r`) passes this frame's view
     /// test (`flush` sets it up): what decides if its rig needs posing.
     pub fn visible(&self, c: Vec3, r: f32) -> bool {
@@ -235,6 +262,7 @@ impl CarCull {
         self.drawn = 0;
         self.total = 0;
         self.coarse = 0;
+        let cut = std::mem::take(&mut self.cut);
         for gi in 0..self.meshes.len().min(meshes.len()) {
             if !self.meshes[gi].put {
                 // a car mesh not given rows this frame (an AI look parked
@@ -253,7 +281,9 @@ impl CarCull {
             let m = &mut self.meshes[gi];
             m.put = false;
             let n = m.cur.len() / ROW;
-            let prev_ok = m.prev_frame + 1 == frame && m.prev.len() == m.cur.len();
+            m.last_li.resize(n, HYST_UNSET);
+            m.last_keep.resize(n, true);
+            let prev_ok = !cut && m.prev_frame + 1 == frame && m.prev.len() == m.cur.len();
             let nl = m.lods.len() + 1;
             if self.levels.len() < nl {
                 self.levels.resize_with(nl, Level::default);
@@ -276,11 +306,14 @@ impl CarCull {
                 let scale = x.x_axis.truncate().length().max(x.y_axis.truncate().length()).max(x.z_axis.truncate().length());
                 let r = radius * scale.max(1.0);
                 let d = c.distance(eye);
+                // kept: it must go 5 % past the distance to be dropped
+                let hk = if m.last_keep[k] { 1.0 + HYST } else { 1.0 - HYST };
                 let keep = match m.detail {
                     Detail::No => true,
-                    Detail::Near => d < detail_m,
-                    Detail::Seen => d < detail_m * zoom,
+                    Detail::Near => d < detail_m * hk,
+                    Detail::Seen => d < detail_m * zoom * hk,
                 };
+                m.last_keep[k] = keep;
                 if !keep {
                     continue;
                 }
@@ -291,10 +324,24 @@ impl CarCull {
                 }
                 // the coarsest LOD whose switch distance it is past
                 let de = d / zoom;
-                let li = if lod_scale > 0.0 { m.lods.iter().take_while(|l| de >= l.0 * lod_scale).count() } else { 0 };
+                // (a switch toward the level it was on is 5 % easier)
+                let was = m.last_li[k];
+                let li = if lod_scale > 0.0 {
+                    m.lods.iter().enumerate().take_while(|(j, l)| {
+                        let h = if was == HYST_UNSET { 1.0 } else if (*j as u8) < was { 1.0 - HYST } else { 1.0 + HYST };
+                        de >= l.0 * lod_scale * h
+                    }).count()
+                } else { 0 };
+                m.last_li[k] = li as u8;
                 let l = &mut self.levels[li];
                 l.rows.extend_from_slice(row);
-                l.prev.extend_from_slice(if prev_ok { &m.prev[k * ROW..(k + 1) * ROW] } else { row });
+                // ⚠ a car not there last frame (zero row: a stream starting,
+                // a driver un-hidden, a car leaving its parking spot) moved
+                // from the origin as far as motion.rs could tell: its own row
+                let pr = if prev_ok { &m.prev[k * ROW..(k + 1) * ROW] } else { row };
+                let gone = pr[15] == 0.0 && pr[..4].iter().all(|&v| v == 0.0);
+                let parked = (Vec3::new(pr[12], pr[13], pr[14]) - c).length_squared() > 50.0 * 50.0;
+                l.prev.extend_from_slice(if gone || parked { row } else { pr });
                 l.lo = l.lo.min(c);
                 l.hi = l.hi.max(c);
                 l.r = l.r.max(r);

@@ -205,8 +205,13 @@ impl Mirrors {
                     let bwgt: Vec<f32> = car.floats(src.bone_wgt);
                     let p = |i: u32| Vec3::new(pos[i as usize * 3], pos[i as usize * 3 + 1], pos[i as usize * 3 + 2]);
                     let t = |i: u32| if uvs.len() > i as usize * 2 + 1 { Vec2::new(uvs[i as usize * 2], uvs[i as usize * 2 + 1]) } else { Vec2::ZERO };
-                    let end = ((b.start + b.count) as usize).min(idx.len());
-                    for tri in idx[b.start as usize..end].chunks_exact(3) {
+                    // widened and clamped (a mod mesh's bad batch / index panicked)
+                    let st = (b.start as usize).min(idx.len());
+                    let end = (b.start as usize).saturating_add(b.count as usize).min(idx.len());
+                    for tri in idx[st..end.max(st)].chunks_exact(3) {
+                        if tri.iter().any(|&i| i as usize * 3 + 2 >= pos.len()) {
+                            continue;
+                        }
                         let (p0, p1, p2) = (p(tri[0]), p(tri[1]), p(tri[2]));
                         let (t0, t1, t2) = (t(tri[0]), t(tri[1]), t(tri[2]));
                         let (e1, e2) = (p1 - p0, p2 - p0);
@@ -397,11 +402,12 @@ impl Mirrors {
     /// The glass mirror to redraw this frame (one a frame, in turn), or None
     /// when the car only has a rear-view camera.
     pub fn due(&mut self) -> Option<usize> {
-        let glass: Vec<usize> = (0..self.list.len()).filter(|&i| !self.list[i].def.camera).collect();
-        if glass.is_empty() {
+        // (no Vec a call: counted, then the nth)
+        let n = self.list.iter().filter(|m| !m.def.camera).count();
+        if n == 0 {
             return None;
         }
-        let i = glass[self.next % glass.len()];
+        let i = (0..self.list.len()).filter(|&i| !self.list[i].def.camera).nth(self.next % n)?;
         self.next = self.next.wrapping_add(1);
         Some(i)
     }

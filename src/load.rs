@@ -446,6 +446,30 @@ pub fn read_mesh_lods(d: &[u8]) -> Vec<(f32, Lod)> {
     crate::perf::time("mesh decode", || read_mesh_lods_inner(d, usize::MAX))
 }
 
+/// A mesh LOD made safe to use once, here, rather than at every consumer
+/// (numbers.rs, mirrors.rs, rain.rs, the uploads): vertex streams cut to
+/// whole 4-byte elements (bytemuck casts them), batches past the index
+/// buffer dropped, and triangles with an index past the vertices made
+/// degenerate (0, 0, 0) - invisible, and the batch ranges stay valid. Only
+/// malformed (mod) meshes change.
+fn sanitise_lod(lod: &mut Lod) {
+    for v in [&mut lod.positions, &mut lod.normals, &mut lod.uvs, &mut lod.tangents,
+              &mut lod.bone_wgt, &mut lod.bone_idx, &mut lod.colors, &mut lod.uv1] {
+        let n = v.len() / 4 * 4;
+        v.truncate(n);
+    }
+    let len = lod.indices.len() as u64;
+    lod.batches.retain(|b| b.start as u64 + b.count as u64 <= len);
+    let verts = lod.positions.len() / 12;
+    if verts > 0 {
+        for t in lod.indices.chunks_mut(3) {
+            if t.iter().any(|&i| i as usize >= verts) {
+                t.fill(0);
+            }
+        }
+    }
+}
+
 fn read_mesh_lods_inner(d: &[u8], max: usize) -> Vec<(f32, Lod)> {
     let mut out: Vec<(f32, Lod)> = Vec::new();
     fields(d, 0, d.len(), |fnum, v| {
@@ -564,6 +588,7 @@ fn read_mesh_lods_inner(d: &[u8], max: usize) -> Vec<(f32, Lod)> {
                 _ => {}
             }
         });
+        sanitise_lod(&mut lod);
         // resolve parents by name once every bone is known
         let by_name: HashMap<&str, usize> = lod
             .bones
@@ -664,6 +689,44 @@ pub fn track_mip_skip(w: u32, h: u32) -> u32 {
 /// 4K track maps decided so far for the track being loaded (track_mip_skip).
 pub static TRACK_4K_SEEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// A texture header's dimensions are sane: a hostile or corrupt one (w = h =
+/// 2^32-1, 2^32 mips) looped for billions of iterations, wrapped the page
+/// maths to 0 so the size guard passed, and then asked for ~10^18 bytes.
+/// 16384 is the largest texture a GPU takes; 15 levels is its full chain.
+fn sane_dims(w: u64, h: u64, mips: u64) -> bool {
+    (1..=16384).contains(&w) && (1..=16384).contains(&h) && mips <= 15
+}
+
+/// `skip_mips` made concrete for this texture: AUTO_MIP decided once from
+/// its header. ⚠ Once: track_mip_skip spends the 4K budget as it decides,
+/// and read_mips + read_texture_lod each deciding spent two units a map
+/// (EVOVIEW_TEX_4K_BUDGET 64 was effectively 32).
+fn concrete_skip(hdr: &[u8], skip_mips: u32) -> u32 {
+    if skip_mips != AUTO_MIP {
+        return skip_mips;
+    }
+    let (mut w, mut h) = (0u64, 0u64);
+    fields(hdr, 0, hdr.len(), |f, v| {
+        if let Val::Varint(n) = v {
+            match f {
+                1 => w = n,
+                2 => h = n,
+                _ => {}
+            }
+        }
+    });
+    track_mip_skip(w.min(u32::MAX as u64) as u32, h.min(u32::MAX as u64) as u32)
+}
+
+/// The `.texturemips` beside a `.texture` key. ⚠ The extension only:
+/// `replace` rewrote every ".texture" in the path.
+pub(crate) fn mips_key(key: &str) -> String {
+    match key.strip_suffix(".texture") {
+        Some(stem) => format!("{stem}.texturemips"),
+        None => key.replace(".texture", ".texturemips"),
+    }
+}
+
 /// `skip_mips` drops the largest levels (1 = start at half-res).
 fn read_texture_lod(hdr: &[u8], raw: &[u8], skip_mips: u32) -> Option<Tex> {
     crate::perf::time("texture decode", || read_texture_lod_inner(hdr, raw, skip_mips))
@@ -687,6 +750,9 @@ fn mips_skip_bytes(hdr: &[u8], len: usize, skip_mips: u32) -> usize {
         }
     });
     let Some((kind, _, tw, th)) = format_of(fmt) else { return 0 };
+    if !sane_dims(w, h, mips) {
+        return 0;
+    }
     let want = if skip_mips == AUTO_MIP { track_mip_skip(w as u32, h as u32) } else { skip_mips };
     let skip = if w >= 8 && h >= 8 && matches!(kind, "bc1" | "bc4" | "bc7" | "bc6h" | "bc3") {
         want.min(mips.saturating_sub(1) as u32)
@@ -718,6 +784,9 @@ fn read_texture_lod_inner(hdr: &[u8], raw: &[u8], skip_mips: u32) -> Option<Tex>
         }
     });
     let (kind, bpp, tw, th) = format_of(fmt)?;
+    if !sane_dims(w, h, mips) {
+        return None;
+    }
     let block: u32 = if matches!(kind, "bc1" | "bc4" | "bc7" | "bc6h" | "bc3") { 4 } else { 1 };
 
     // `AUTO_MIP` means "decide from this texture's own size" - the caller does
@@ -878,7 +947,7 @@ pub fn read_cubemap(hdr: &[u8], raw: &[u8]) -> Option<Cube> {
         (6, Val::Varint(n)) => faces = n,
         _ => {}
     });
-    if faces != 6 || w == 0 || w != h {
+    if faces != 6 || w != h || !sane_dims(w, h, mips) {
         return None;
     }
     let (kind, bpp, _tw, _th) = format_of(fmt)?;
@@ -940,7 +1009,7 @@ pub fn brdf_lut(vfs: &mut Vfs) -> Option<(u32, Vec<u8>)> {
             }
         }
     });
-    if w == 0 || w != h {
+    if w != h || !sane_dims(w, h, 1) {
         return None;
     }
     let raw = vfs.read("content/ibl/specularbrdf.texturemips");
@@ -1241,7 +1310,9 @@ fn resolve_material(vfs: &mut Vfs, m: Mat, depth: u32) -> Mat {
     }
     for (k, v) in &m.slots {
         // an editor placeholder never overrides a real parent texture
-        let placeholder = v.to_lowercase().contains("editor\textures") || v.to_lowercase().contains("editor/textures");
+        // ⚠ raw string: "editor\textures" is editor<TAB>extures, so the
+        // backslash spelling (the usual one) never matched
+        let placeholder = v.to_lowercase().contains(r"editor\textures") || v.to_lowercase().contains("editor/textures");
         if (res_ok(k) && !placeholder) || !out.slots.contains_key(k) {
             out.slots.insert(k.clone(), v.clone());
         }
@@ -1717,21 +1788,15 @@ impl Vfs {
             Some(Src::File(p)) => std::fs::read(p).unwrap_or_default(),
             Some(Src::Bytes(b)) => b.to_vec(),
             Some(Src::Pkg(e, owner)) => {
+                // the owner archive only: ⚠ retrying the same offset/size in
+                // every OTHER archive (a failed read) returned unrelated bytes
+                // of the right length - offsets only mean something in their
+                // own archive (see Src::Pkg)
                 let e = *e;
-                let mut got = match owner {
+                match owner {
                     0 => self.pkg.as_ref().map(|p| p.read(e)).unwrap_or_default(),
                     k => self.extra.get(k - 1).map(|p| p.read(e)).unwrap_or_default(),
-                };
-                if got.len() != e.size as usize {
-                    for x in self.extra.iter() {
-                        let t = x.read(e);
-                        if t.len() == e.size as usize {
-                            got = t;
-                            break;
-                        }
-                    }
                 }
-                got
             }
             None => Vec::new(),
         }
@@ -1811,8 +1876,9 @@ impl Vfs {
             Some(t) => Some(t),
             None => {
                 let hdr = self.read(key);
-                let mips = self.read_mips(&hdr, &key.replace(".texture", ".texturemips"), skip_mips);
-                read_texture_lod(&hdr, &mips, skip_mips)
+                let s = concrete_skip(&hdr, skip_mips);
+                let mips = self.read_mips(&hdr, &mips_key(key), s);
+                read_texture_lod(&hdr, &mips, s)
             }
         };
         if let (Some(k), Some(t)) = (self.keep.as_mut(), t.as_ref()) {
@@ -1839,6 +1905,18 @@ impl Vfs {
                     }
                 }
             }
+        }
+    }
+
+    /// Undo `keep_textures`: free every kept texture, file and listing
+    /// (build_race, once an opponent model's looks are all loaded).
+    pub fn drop_kept(&mut self) {
+        self.keep = None;
+        self.kept_files = HashMap::new();
+        self.decoded = HashMap::new();
+        self.resident.clear();
+        if let Ok(mut l) = self.listed.lock() {
+            *l = HashMap::new();
         }
     }
 
@@ -1871,6 +1949,19 @@ impl Vfs {
             .map_or(4, |n| n.get() / 2)
             .clamp(1, 6)
             .min(keys.len());
+        // AUTO_MIP: every map's skip decided here, in sorted-key order, from
+        // its header - in the workers the 4K budget went to whichever
+        // textures were scheduled first, different every run
+        let auto: Vec<(Vec<u8>, u32)> = if skip_mips == AUTO_MIP {
+            keys.iter().map(|k| {
+                let hdr = self.read_inner(k);
+                let s = concrete_skip(&hdr, AUTO_MIP);
+                (hdr, s)
+            }).collect()
+        } else {
+            Vec::new()
+        };
+        let auto = &auto;
         let next = std::sync::atomic::AtomicUsize::new(0);
         let me: &Vfs = self;
         let results: Vec<(String, Tex)> = std::thread::scope(|sc| {
@@ -1881,9 +1972,12 @@ impl Vfs {
                         loop {
                             let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let Some(k) = keys.get(i) else { break };
-                            let hdr = me.read_inner(k);
-                            let mips = me.read_mips(&hdr, &k.replace(".texture", ".texturemips"), skip_mips);
-                            if let Some(t) = read_texture_lod(&hdr, &mips, skip_mips) {
+                            let (hdr, s) = match auto.get(i) {
+                                Some((h, s)) => (h.clone(), *s),
+                                None => (me.read_inner(k), skip_mips),
+                            };
+                            let mips = me.read_mips(&hdr, &mips_key(k), s);
+                            if let Some(t) = read_texture_lod(&hdr, &mips, s) {
                                 out.push(((*k).clone(), t));
                             }
                         }
@@ -2230,6 +2324,8 @@ pub fn load_track_dir_opts(
     if !dir.is_dir() {
         return Err(format!("{} is not a directory", dir.display()));
     }
+    // a fresh 4K budget per track, as the package path resets it
+    TRACK_4K_SEEN.store(0, std::sync::atomic::Ordering::Relaxed);
     let mut vfs = Vfs::folder(dir, &[]);
     if let Some(b) = base {
         if let Ok(pkg) = crate::pkg::Package::open(b) {
@@ -4311,7 +4407,7 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
     if let Some(pp) = env.pigment_path.clone() {
         if let Some(found) = vfs.find(&pp, None) {
             let hdr = vfs.read(&found);
-            let mips = vfs.read(&found.replace(".texture", ".texturemips"));
+            let mips = vfs.read(&mips_key(&found));
             if let Some(t) = read_texture_lod(&hdr, &mips, 0) {
                 let data = add(&mut blob, &t.data);
                 textures.push(TextureEntry {
@@ -4330,7 +4426,7 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
     // and rain, laid over the world by clouds.rs.
     if let Some(found) = vfs.find("content/weather/weather_map6.texture", None) {
         let hdr = vfs.read(&found);
-        let mips = vfs.read(&found.replace(".texture", ".texturemips"));
+        let mips = vfs.read(&mips_key(&found));
         if let Some(t) = read_texture_lod(&hdr, &mips, 0) {
             let data = add(&mut blob, &t.data);
             textures.push(TextureEntry {
@@ -4348,7 +4444,7 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
     // by the track sky as a high deck over the volumetric clouds.
     if let Some(found) = vfs.find("content/weather/clouds/cirrus_layer.texture", None) {
         let hdr = vfs.read(&found);
-        let mips = vfs.read(&found.replace(".texture", ".texturemips"));
+        let mips = vfs.read(&mips_key(&found));
         if let Some(t) = read_texture_lod(&hdr, &mips, 0) {
             let data = add(&mut blob, &t.data);
             textures.push(TextureEntry {
@@ -5264,7 +5360,7 @@ pub fn load(vfs: &mut Vfs) -> Result<Loaded, String> {
     for (i, n) in ["rain_drop_mask", "rain_drop_alpha", "rain_drop_nm"].iter().enumerate() {
         let Some(found) = vfs.find(&format!("content/cars/common_assets/rain/{n}.texture"), None) else { continue };
         let hdr = vfs.read(&found);
-        let mips = vfs.read(&found.replace(".texture", ".texturemips"));
+        let mips = vfs.read(&mips_key(&found));
         let Some(t) = read_texture(&hdr, &mips) else { continue };
         // ⚠ the mask and alpha are format 27: single-channel BC4, which reads
         // as BC1 noise (the contact-shadow trap, contact.rs)
@@ -5277,7 +5373,7 @@ pub fn load(vfs: &mut Vfs) -> Result<Loaded, String> {
     let mut streak_tex = |n: &str| -> Option<Tex> {
         let found = vfs.find(&format!("content/cars/common_assets/rain/{n}.texture"), None)?;
         let hdr = vfs.read(&found);
-        let mips = vfs.read(&found.replace(".texture", ".texturemips"));
+        let mips = vfs.read(&mips_key(&found));
         read_texture(&hdr, &mips)
     };
     let flows = ["vertical", "diagonal", "horizontal"];
@@ -5532,7 +5628,12 @@ pub(crate) fn netcar_visual(vfs: &mut Vfs, fs: &[u8]) -> Option<Vec<u8>> {
             _ => {}
         });
     });
+    // a player's design names a visual preset; anything else (a mesh, a
+    // texture - any file in the car) is not read as one
     let key = vfs.find(&design, None)?;
+    if !key.to_ascii_lowercase().ends_with(".visualcarpreset") {
+        return None;
+    }
     let base = vfs.read(&key);
     let mut out = Vec::with_capacity(base.len() + fs.len());
     // the preset's fields but its field-8 entries, verbatim
@@ -5546,7 +5647,8 @@ pub(crate) fn netcar_visual(vfs: &mut Vfs, fs: &[u8]) -> Option<Vec<u8>> {
         let end = match wt {
             0 => match read_varint(&base, i) { Some((_, n)) => n, None => break },
             1 => i + 8,
-            2 => match read_varint(&base, i) { Some((l, n)) => n + l as usize, None => break },
+            // checked: a huge length must not wrap past the `end > len` test
+            2 => match read_varint(&base, i).and_then(|(l, n)| n.checked_add(usize::try_from(l).ok()?)) { Some(e) => e, None => break },
             5 => i + 4,
             _ => break,
         };
@@ -5595,7 +5697,9 @@ fn raw_fields(d: &[u8]) -> Vec<(u32, u64, (usize, usize), (usize, usize))> {
         let (ps, end) = match wt {
             0 => match read_varint(d, i) { Some((_, n)) => (i, n), None => break },
             1 => (i, i + 8),
-            2 => match read_varint(d, i) { Some((l, n)) => (n, n + l as usize), None => break },
+            // checked: a wrapped `n + l` (network bytes) would pass `end > len`
+            // and hand custom_paints a reversed range
+            2 => match read_varint(d, i).and_then(|(l, n)| Some((n, n.checked_add(usize::try_from(l).ok()?)?))) { Some(r) => r, None => break },
             5 => (i, i + 4),
             _ => break,
         };
@@ -6717,10 +6821,12 @@ fn add_contact_decals(
     // Lowest tyre vertex = the ground.
     let mut ground = f32::MAX;
     for m in meshes.iter().filter(|m| m.name.starts_with("tyre_")) {
-        if let Some([o, n]) = m.positions {
-            let p: &[f32] = bytemuck::cast_slice(&blob[o as usize..(o + n) as usize]);
-            for v in p.chunks_exact(3) {
-                ground = ground.min(v[1]);
+        // chunks_exact, not bytemuck::cast_slice (panics on a range not a
+        // multiple of 4 or unaligned - asset.rs Car::floats); a bogus range
+        // reads as nothing
+        if let Some(b) = m.positions.and_then(|[o, n]| blob.get(o as usize..o.checked_add(n)? as usize)) {
+            for v in b.chunks_exact(12) {
+                ground = ground.min(f32::from_le_bytes(v[4..8].try_into().unwrap()));
             }
         }
     }
@@ -6738,7 +6844,7 @@ fn add_contact_decals(
             return;
         };
         let hdr = vfs.read(&found);
-        let mips = vfs.read(&found.replace(".texture", ".texturemips"));
+        let mips = vfs.read(&mips_key(&found));
         let Some(t) = read_texture(&hdr, &mips) else { return };
         // ⚠ Format 27 is 4 bpp and was read as BC1, but the shadow masks are
         // single-channel BC4: decoded as BC1 they come out as purple noise.
@@ -7249,7 +7355,7 @@ pub fn tex_audit(pkg_path: &Path) {
             }
         };
         let hdr = read(key);
-        let mk = key.replace(".texture", ".texturemips");
+        let mk = mips_key(&key);
         let mut raw = read(&mk);
         // a package's missing payload may sit in the game's loose override
         // root (Vfs::over_loose), as mods with their own textures ship it

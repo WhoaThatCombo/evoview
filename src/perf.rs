@@ -123,6 +123,7 @@ pub fn vram_bytes() -> Option<u64> {
 /// Dedicated VRAM the busiest GPU has in use by EVERY process
 /// (`\GPU Adapter Memory(*)\Dedicated Usage`): with `vram_bytes`, what the
 /// rest of the desktop (browsers, overlays, wallpaper) holds.
+#[allow(dead_code)]
 pub fn vram_adapter_used() -> Option<u64> {
     pdh_counter("\\GPU Adapter Memory(*)\\Dedicated Usage").and_then(|v| v.iter().map(|(_, b)| *b).max())
 }
@@ -133,8 +134,20 @@ pub fn vram_adapter_used() -> Option<u64> {
 /// used elsewhere), and going past what is physically free pages every pass
 /// over PCIe: a 50-player lobby went from 14 to 340 ms a frame at +70 MB.
 pub fn vram_free_for_us() -> Option<(u64, u64)> {
-    let total = vram_total()?;
-    let others = vram_adapter_used()?.saturating_sub(vram_bytes().unwrap_or(0));
+    let (total, luid) = largest_adapter()?;
+    // all three numbers off the one adapter (its LUID is in the counters'
+    // instance names): the busiest adapter's use, minus our use on every
+    // adapter, against the largest one's size mixed three GPUs on a
+    // dual-GPU laptop. Counters without the LUID: as before.
+    let on = |n: &String| n.to_ascii_lowercase().contains(&luid);
+    let adapter = pdh_counter("\\GPU Adapter Memory(*)\\Dedicated Usage")?;
+    let ours_all = pdh_counter("\\GPU Process Memory(*)\\Dedicated Usage").unwrap_or_default();
+    let prefix = format!("pid_{}_", std::process::id());
+    let ours = |f: &dyn Fn(&String) -> bool| ours_all.iter().filter(|(n, _)| n.starts_with(&prefix) && f(n)).map(|(_, b)| b).sum::<u64>();
+    let others = match adapter.iter().filter(|(n, _)| on(n)).map(|(_, b)| *b).max() {
+        Some(used) => used.saturating_sub(ours(&on)),
+        None => adapter.iter().map(|(_, b)| *b).max()?.saturating_sub(ours(&|_| true)),
+    };
     Some((total.saturating_sub(others), total))
 }
 
@@ -147,16 +160,19 @@ fn pdh_counter(path: &str) -> Option<Vec<(String, u64)>> {
         status: u32,
         value: i64, // union; PDH_FMT_LARGE reads the i64 arm
     }
-    #[link(name = "pdh")]
-    extern "system" {
-        fn PdhOpenQueryW(src: *const u16, user: usize, q: *mut isize) -> u32;
-        fn PdhAddEnglishCounterW(q: isize, path: *const u16, user: usize, c: *mut isize) -> u32;
-        fn PdhCollectQueryData(q: isize) -> u32;
-        fn PdhGetFormattedCounterArrayW(
-            c: isize, fmt: u32, size: *mut u32, count: *mut u32, items: *mut Item,
-        ) -> u32;
-        fn PdhCloseQuery(q: isize) -> u32;
-    }
+    static PDH: std::sync::OnceLock<Option<libloading::Library>> = std::sync::OnceLock::new();
+    let lib = system32(&PDH, "pdh.dll")?;
+    // SAFETY: the documented PDH signatures
+    #[allow(non_snake_case)]
+    let (PdhOpenQueryW, PdhAddEnglishCounterW, PdhCollectQueryData, PdhGetFormattedCounterArrayW, PdhCloseQuery) = unsafe {
+        (
+            *lib.get::<unsafe extern "system" fn(*const u16, usize, *mut isize) -> u32>(b"PdhOpenQueryW").ok()?,
+            *lib.get::<unsafe extern "system" fn(isize, *const u16, usize, *mut isize) -> u32>(b"PdhAddEnglishCounterW").ok()?,
+            *lib.get::<unsafe extern "system" fn(isize) -> u32>(b"PdhCollectQueryData").ok()?,
+            *lib.get::<unsafe extern "system" fn(isize, u32, *mut u32, *mut u32, *mut Item) -> u32>(b"PdhGetFormattedCounterArrayW").ok()?,
+            *lib.get::<unsafe extern "system" fn(isize) -> u32>(b"PdhCloseQuery").ok()?,
+        )
+    };
     const PDH_FMT_LARGE: u32 = 0x400;
     const PDH_MORE_DATA: u32 = 0x8000_07D2;
     let path: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
@@ -188,6 +204,11 @@ fn pdh_counter(path: &str) -> Option<Vec<(String, u64)>> {
                         while *it.name.add(n) != 0 {
                             n += 1;
                         }
+                        // PDH_CSTATUS_VALID_DATA 0 / NEW_DATA 1; anything
+                        // else is no reading
+                        if it.status > 1 {
+                            continue;
+                        }
                         let name = String::from_utf16_lossy(std::slice::from_raw_parts(it.name, n));
                         v.push((name, it.value.max(0) as u64));
                     }
@@ -204,9 +225,28 @@ fn pdh_counter(_: &str) -> Option<Vec<(String, u64)>> {
     None
 }
 
-/// The largest GPU's dedicated memory (DXGI adapter descriptions).
+/// ⚠ pdh.dll / dxgi.dll were static imports, resolved from the exe's folder
+/// first (neither is a KnownDLL): a stray ReShade-style dxgi.dll there was
+/// loaded into every run. System32 only, on first use.
 #[cfg(windows)]
+fn system32(cell: &'static std::sync::OnceLock<Option<libloading::Library>>, name: &str) -> Option<&'static libloading::Library> {
+    const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x800;
+    cell.get_or_init(|| {
+        // SAFETY: a system DLL with no special init requirements
+        unsafe { libloading::os::windows::Library::load_with_flags(name, LOAD_LIBRARY_SEARCH_SYSTEM32) }.ok().map(Into::into)
+    }).as_ref()
+}
+
+/// The largest GPU's dedicated memory (DXGI adapter descriptions).
+#[allow(dead_code)]
 pub fn vram_total() -> Option<u64> {
+    largest_adapter().map(|a| a.0)
+}
+
+/// The largest GPU: its dedicated memory, and its LUID as the GPU counters
+/// name it (`luid_0x<high>_0x<low>`, lower case).
+#[cfg(windows)]
+fn largest_adapter() -> Option<(u64, String)> {
     #[repr(C)]
     struct Guid(u32, u16, u16, [u8; 8]);
     #[repr(C)]
@@ -222,10 +262,13 @@ pub fn vram_total() -> Option<u64> {
         luid: u64,
         flags: u32,
     }
-    #[link(name = "dxgi")]
-    extern "system" {
-        fn CreateDXGIFactory1(riid: *const Guid, out: *mut *mut std::ffi::c_void) -> i32;
-    }
+    static DXGI: std::sync::OnceLock<Option<libloading::Library>> = std::sync::OnceLock::new();
+    let lib = system32(&DXGI, "dxgi.dll")?;
+    // SAFETY: the documented signature
+    #[allow(non_snake_case)]
+    let CreateDXGIFactory1 = unsafe {
+        *lib.get::<unsafe extern "system" fn(*const Guid, *mut *mut std::ffi::c_void) -> i32>(b"CreateDXGIFactory1").ok()?
+    };
     type EnumAdapters1 = unsafe extern "system" fn(*mut std::ffi::c_void, u32, *mut *mut std::ffi::c_void) -> i32;
     type GetDesc1 = unsafe extern "system" fn(*mut std::ffi::c_void, *mut Desc1) -> i32;
     type Release = unsafe extern "system" fn(*mut std::ffi::c_void) -> u32;
@@ -240,7 +283,7 @@ pub fn vram_total() -> Option<u64> {
             return None;
         }
         let vt = |o: *mut std::ffi::c_void, i: usize| *(*(o as *const *const usize)).add(i);
-        let mut best = 0u64;
+        let mut best = (0u64, String::new());
         for i in 0.. {
             let mut a = std::ptr::null_mut();
             let e: EnumAdapters1 = std::mem::transmute(vt(f, 12));
@@ -249,18 +292,18 @@ pub fn vram_total() -> Option<u64> {
             }
             let mut d: Desc1 = std::mem::zeroed();
             let g: GetDesc1 = std::mem::transmute(vt(a, 10));
-            if g(a, &mut d) == 0 {
-                best = best.max(d.dedicated_video as u64);
+            if g(a, &mut d) == 0 && d.dedicated_video as u64 > best.0 {
+                best = (d.dedicated_video as u64, format!("luid_0x{:08x}_0x{:08x}", (d.luid >> 32) as u32, d.luid as u32));
             }
             let r: Release = std::mem::transmute(vt(a, 2));
             r(a);
         }
         let r: Release = std::mem::transmute(vt(f, 2));
         r(f);
-        (best > 0).then_some(best)
+        (best.0 > 0).then_some(best)
     }
 }
 #[cfg(not(windows))]
-pub fn vram_total() -> Option<u64> {
+fn largest_adapter() -> Option<(u64, String)> {
     None
 }

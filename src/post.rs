@@ -634,9 +634,8 @@ impl Post {
             dof_views = (view(mip(d.fg_blur)), view(mip(d.bg_blur)));
             let range = 20.0 - d.aperture * 0.9375;
             let range = if range.abs() < 1e-3 { 1e-3 } else { range };
-            let inv = vp.inverse();
-            let a = inv * glam::Vec4::new(0.0, 0.0, 0.5, 1.0);
-            let fwd = (a.truncate() / a.w - self.eye).normalize_or_zero();
+            // the view's forward from its w row (render.rs view_forward)
+            let fwd = crate::render::view_forward(vp);
             let c = d.center.unwrap_or([0.5, 0.5]);
             u.dof = [d.focus.unwrap_or(0.0), range, d.fg_dist, d.bg_dist];
             u.dof2 = [d.coc_samples.clamp(1, 32) as f32, d.coc_depth_radius, c[0], c[1]];
@@ -710,11 +709,17 @@ impl Post {
     pub fn after_submit(&self) {
         if self.ae && self.pending.load(Ordering::Acquire) && !self.mapped.load(Ordering::Acquire) {
             let mapped = self.mapped.clone();
+            let pending = self.pending.clone();
             // map_async may be requested only once per pending copy
             if !REQUESTED.load(Ordering::Acquire) {
                 self.readback.slice(..).map_async(wgpu::MapMode::Read, move |r| {
                     if r.is_ok() {
                         mapped.store(true, Ordering::Release);
+                    } else {
+                        // ⚠ a failed map: start over with a new copy. Left
+                        // pending + requested, exposure froze for good.
+                        REQUESTED.store(false, Ordering::Release);
+                        pending.store(false, Ordering::Release);
                     }
                 });
                 REQUESTED.store(true, Ordering::Release);

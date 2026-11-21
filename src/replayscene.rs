@@ -203,6 +203,7 @@ fn merge(
 ) -> std::ops::Range<usize> {
     let blob_off = blob.len() as u64;
     let tex_off = textures.len();
+    grow(blob, src.blob().len());
     blob.extend_from_slice(src.blob());
 
     tex_src.resize(tex_off, String::new());
@@ -255,17 +256,23 @@ fn merge_shared(
     tag: &str,
 ) -> std::ops::Range<usize> {
     tex_src.resize(textures.len(), String::new());
+    // at most the whole source blob plus alignment padding
+    grow(blob, src.blob().len() + 16 * (src.textures.len() + 8 * src.meshes.len()));
     let have: std::collections::HashMap<String, usize> = tex_src.iter().enumerate()
         .filter(|(_, k)| !k.is_empty() && !k.starts_with("merged:"))
         .map(|(i, k)| (k.clone(), i))
         .collect();
-    let mut copy = |blob: &mut Vec<u8>, r: [u64; 2]| -> u64 {
+    // the copy's range: ⚠ its own length, not the source's - a bogus
+    // source range copies nothing, and keeping its length read whatever
+    // came next in the blob
+    let copy = |blob: &mut Vec<u8>, r: [u64; 2]| -> [u64; 2] {
         while blob.len() % 16 != 0 {
             blob.push(0);
         }
         let off = blob.len() as u64;
-        blob.extend_from_slice(src.slice(Some(r)));
-        off
+        let b = src.slice(Some(r));
+        blob.extend_from_slice(b);
+        [off, b.len() as u64]
     };
     let mut map = Vec::with_capacity(src.textures.len());
     for (i, t) in src.textures.iter().enumerate() {
@@ -275,16 +282,16 @@ fn merge_shared(
             continue;
         }
         let mut t = t.clone();
-        t.data[0] = copy(blob, t.data);
+        t.data = copy(blob, t.data);
         textures.push(t);
         tex_src.push(key.cloned().unwrap_or_else(|| format!("merged:{tag}:{i}")));
         map.push(textures.len() - 1);
     }
     for m in &src.materials {
         let mut m = m.clone();
-        for v in m.slots.values_mut() {
-            *v = map.get(*v).copied().unwrap_or(*v);
-        }
+        // a slot naming no texture of this car is dropped: left unshifted
+        // it pointed at some other car's (or the track's) texture
+        m.slots.retain(|_, v| map.get(*v).map(|&j| *v = j).is_some());
         m.file = format!("{tag}__{}", base_of(&m.file));
         materials.push(m);
     }
@@ -295,7 +302,7 @@ fn merge_shared(
         m.bone_wgt = None;
         for r in [&mut m.positions, &mut m.normals, &mut m.uvs, &mut m.tangents, &mut m.indices, &mut m.colors, &mut m.uv1] {
             if let Some(v) = r.as_mut() {
-                v[0] = copy(blob, *v);
+                *v = copy(blob, *v);
             }
         }
         for b in &mut m.batches {
@@ -304,6 +311,15 @@ fn merge_shared(
         meshes.push(m);
     }
     start..meshes.len()
+}
+
+/// Room for `n` more bytes in the scene blob. ⚠ Not plain `extend`: its
+/// doubling turned a 3 GB track blob plus one car into a 6 GB allocation
+/// (and a copy). 25 % headroom keeps the reallocations few without that.
+fn grow(blob: &mut Vec<u8>, n: usize) {
+    if blob.capacity() - blob.len() < n {
+        blob.reserve_exact(n.max(blob.len() / 4));
+    }
 }
 
 fn base_of(p: &str) -> &str {
@@ -384,6 +400,9 @@ fn shift_fx_textures(mut fx: Box<crate::fxdata::CarFx>, base: usize) -> Box<crat
     for d in fx.emitter_defs.iter_mut() {
         d.material.color_tex = d.material.color_tex.map(|i| i + base);
         d.material.opacity_tex = d.material.opacity_tex.map(|i| i + base);
+        // ⚠ the normal map too (smoke lighting, spray refraction): unshifted
+        // it sampled a TRACK texture, and uploaded a linear copy of it
+        d.material.normal_tex = d.material.normal_tex.map(|i| i + base);
     }
     // ⚠ the dash pages' images index car textures too: unshifted, every
     // digital dash on a track drew one of the TRACK's textures (the M4 GT3's
@@ -450,9 +469,14 @@ impl Scene {
         let mut meshes = Vec::new();
         let mut textures = Vec::new();
         let mut materials = Vec::new();
-        let mut blob: Vec<u8> = Vec::new();
         let mut tex_src: Vec<String> = Vec::new();
+        // ⚠ the track's blob is MOVED in (merged at offset 0 with nothing to
+        // copy), not copied: the copy and the loaded track both lived to the
+        // end of the build, 2x a multi-GB blob at the load peak
+        let mut blob: Vec<u8> = Vec::new();
         merge(&mut meshes, &mut textures, &mut tex_src, &mut materials, &mut blob, &t.car, None);
+        let mut blob = t.car.take_blob();
+        drop(t);
         let track_meshes = meshes.len();
 
         // Group drivers by model so each model is loaded and uploaded once.
@@ -473,7 +497,9 @@ impl Scene {
                     wheels: Default::default(),
                     centres: [Vec3::ZERO; 4],
                     axles: [Vec3::X; 4],
-                    radius: 0.33,
+                    // measured below (0.33 if no tyre): starting at 0.33 and
+                    // only growing, small wheels never got their own radius
+                    radius: 0.0,
                     offset: Vec3::ZERO,
                     cars: vec![i],
                     skel: None,
@@ -520,14 +546,25 @@ impl Scene {
         let threads = crate::envc::var("EVOVIEW_LOAD_THREADS").ok().and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(2).clamp(1, 4).min(models.len().max(1));
         let next = std::sync::atomic::AtomicUsize::new(0);
+        // ⚠ back-pressure: the merge below drains the channel eagerly, so the
+        // channel bound alone let the other workers load EVERY later model
+        // while the wanted one was still loading - all held decoded at once.
+        // A worker starts model i only once i < merged + threads.
+        let gate = (std::sync::Mutex::new(0usize), std::sync::Condvar::new());
         let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Result<crate::load::Loaded, String>)>(threads);
         std::thread::scope(|sc| {
             for _ in 0..threads {
                 let tx = tx.clone();
-                let (models, load_one, next) = (&models, &load_one, &next);
+                let (models, load_one, next, gate) = (&models, &load_one, &next, &gate);
                 sc.spawn(move || loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some(m) = models.get(i) else { break };
+                    {
+                        let mut w = gate.0.lock().unwrap_or_else(|e| e.into_inner());
+                        while i >= *w + threads {
+                            w = gate.1.wait(w).unwrap_or_else(|e| e.into_inner());
+                        }
+                    }
                     if tx.send((i, load_one(m))).is_err() {
                         break;
                     }
@@ -541,6 +578,8 @@ impl Scene {
                 pending.insert(i, r);
                 while let Some(loaded) = pending.remove(&want) {
                     want += 1;
+                    *gate.0.lock().unwrap_or_else(|e| e.into_inner()) = want;
+                    gate.1.notify_all();
                     let Some((k, mut s)) = slots.next() else { break };
                     let loaded = match loaded {
                         Ok(l) => l,
@@ -598,8 +637,19 @@ impl Scene {
                     // corners, of where the replay puts the wheel minus where the mesh
                     // has it. Measured per model rather than hard-coded, because the
                     // gap between mesh origin and centre of mass differs per car.
+                    if s.radius <= 0.05 {
+                        s.radius = 0.33;
+                    }
                     {
-                        let p = rep.pose(s.cars[0], 0);
+                        // ⚠ the first frame the car is really there: one that
+                        // joined after the recording started sits at the
+                        // origin with a zero basis at frame 0, which made the
+                        // offset minus the mean wheel centre for the model
+                        let p = s.cars.iter()
+                            .flat_map(|&c| (0..rep.cars[c].n_matrix as usize).map(move |f| (c, f)))
+                            .map(|(c, f)| rep.pose(c, f))
+                            .find(|p| p.pos.length_squared() >= 1.0 && p.forward.length_squared() > 0.5)
+                            .unwrap_or_else(|| rep.pose(s.cars[0], 0));
                         let basis = car_basis(&p).transpose();
                         let mut d = Vec3::ZERO;
                         for k in 0..4 {
@@ -740,32 +790,22 @@ impl Scene {
         let mut meshes = Vec::new();
         let mut textures = Vec::new();
         let mut materials = Vec::new();
-        let mut blob: Vec<u8> = Vec::new();
         let mut tex_src: Vec<String> = Vec::new();
+        // the track's blob moved in, not copied (see Scene::build)
+        let mut blob: Vec<u8> = Vec::new();
         merge(&mut meshes, &mut textures, &mut tex_src, &mut materials, &mut blob, &t.car, None);
+        let mut blob = t.car.take_blob();
+        drop(t);
         let track_meshes = meshes.len();
-        // a mod car (Saved Games/ACE/mods/<model>.kspkg) on the base game,
-        // when the package does not carry it
-        let open = |model: &str| -> Result<crate::load::Vfs, String> {
-            match crate::load::package_vfs(pkg, model, base) {
-                Ok(v) => Ok(v),
-                Err(e) => {
-                    let m = crate::envc::var_os("USERPROFILE").map(|h| std::path::Path::new(&h).join("Saved Games").join("ACE").join("mods").join(format!("{model}.kspkg")));
-                    match m.filter(|m| m.exists()) {
-                        Some(m) => {
-                            println!("car {model}: the mod {}", m.display());
-                            crate::load::package_vfs(&m, model, Some(pkg))
-                        }
-                        None => Err(e),
-                    }
-                }
-            }
-        };
+        let open = |model: &str| open_car(pkg, model, base);
         let mut vfs = open(model)?;
-        let loaded = crate::load::load(&mut vfs).map_err(|e| format!("car {model}: {e}"))?;
+        let mut loaded = crate::load::load(&mut vfs).map_err(|e| format!("car {model}: {e}"))?;
         let car_tex_base = textures.len();
         let range = merge(&mut meshes, &mut textures, &mut tex_src, &mut materials, &mut blob, &loaded.car, Some("c0"));
         let s = measure_slot(&mut meshes, range, &loaded.car, model, 1);
+        // merged and measured: its blob is a dead copy from here on (only
+        // fx / rain / skeleton are taken from `loaded` at the end)
+        drop(loaded.car.take_blob());
         let mut slots = vec![s];
         let player_look = crate::load::pick_visual_preset(&mut vfs).map(|k| crate::livery::stem_of(&k));
         let max_looks = crate::envc::var("EVOVIEW_AI_LIVERIES").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(6);
@@ -785,6 +825,15 @@ impl Scene {
             .unwrap_or(if own.iter().any(|o| o.is_some()) { 2 } else { 1 });
         crate::load::CAR_TEX_SKIP.store(ai_skip, std::sync::atomic::Ordering::Relaxed);
         crate::load::set_car_lods(true);
+        // put the loader's globals back on every way out, an early `?` included
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                crate::load::CAR_TEX_SKIP.store(0, std::sync::atomic::Ordering::Relaxed);
+                crate::load::set_car_lods(false);
+            }
+        }
+        let _restore = Restore;
         let mut models: Vec<&String> = Vec::new();
         for m in ai {
             if !models.contains(&m) {
@@ -793,13 +842,22 @@ impl Scene {
         }
         for (mi, m) in models.iter().enumerate() {
             let cars: Vec<usize> = (0..ai.len()).filter(|&i| &ai[i] == *m).collect();
-            let mut v = open(m)?;
+            // ⚠ one opponent model that cannot be opened (a stub or
+            // unreleased car id on a server) must not end the session: those
+            // cars are drawn (and driven) as the player's model instead
+            let (mut v, m) = match open(m) {
+                Ok(v) => (v, m.as_str()),
+                Err(e) => {
+                    eprintln!("  AI car {m}: {e}; using {model} instead");
+                    (open(model)?, model)
+                }
+            };
             let list = crate::livery::list(&mut v);
             let looks: Vec<Option<crate::livery::Look>> = if max_looks == 0 {
                 vec![None; cars.len()]
             } else {
                 let paints = crate::load::body_paints(&mut v);
-                let mine = if *m == model { player_look.as_deref() } else { None };
+                let mine = if m == model { player_look.as_deref() } else { None };
                 // each livery's own paints (env-selected, as the loader reads them)
                 let own: Vec<(String, Vec<String>)> = list.iter().map(|l| {
                     crate::envc::set_var("EVOVIEW_VISUAL", &l.stem);
@@ -856,6 +914,15 @@ impl Scene {
                 let r = crate::load::load(&mut v);
                 restore("EVOVIEW_VISUAL", &saved.0);
                 restore("EVOVIEW_PAINT", &saved.1);
+                // a look that fails: the model's default look, then the
+                // player's model - never the whole session
+                let r = r.or_else(|e| {
+                    eprintln!("  AI car {m}: {e}; trying its default look");
+                    crate::load::load(&mut v)
+                }).or_else(|e| {
+                    eprintln!("  AI car {m}: {e}; drawn as {model}");
+                    open(model).and_then(|mut pv| crate::load::load(&mut pv))
+                });
                 let l = r.map_err(|e| format!("AI car {m}: {e}"))?;
                 let si = slots.len();
                 let mine: Vec<usize> = cars.iter().zip(&looks).filter(|(_, x)| *x == look).map(|(&c, _)| c).collect();
@@ -878,10 +945,14 @@ impl Scene {
                          look.as_ref().map_or("(default)", |l| l.visual.as_str()),
                          look.as_ref().and_then(|l| l.paint.as_deref()).unwrap_or("-"), mine.len());
             }
+            // ⚠ the look caches (every decoded texture and file read) were
+            // only for this model's next look: kept, every model's stayed
+            // resident while all later models loaded and merged - only the
+            // physics is read from this vfs from here on
+            v.drop_kept();
             ai_vfs.push((m.to_string(), v));
         }
-        crate::load::CAR_TEX_SKIP.store(0, std::sync::atomic::Ordering::Relaxed);
-        crate::load::set_car_lods(false);
+        drop(_restore);
         if !ai.is_empty() {
             println!("AI cars: {} model(s), {} look(s), loaded in {:.1}s", models.len(), slots.len() - 1, t_ai.elapsed().as_secs_f32());
         }
@@ -906,12 +977,32 @@ impl Scene {
     }
 }
 
+/// A car's vfs: from the package, else a mod car (Saved Games/ACE/mods/
+/// <model>.kspkg) on the base game.
+fn open_car(pkg: &Path, model: &str, base: Option<&Path>) -> Result<crate::load::Vfs, String> {
+    match crate::load::package_vfs(pkg, model, base) {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            let m = crate::envc::var_os("USERPROFILE").map(|h| std::path::Path::new(&h).join("Saved Games").join("ACE").join("mods").join(format!("{model}.kspkg")));
+            match m.filter(|m| m.exists()) {
+                Some(m) => {
+                    println!("car {model}: the mod {}", m.display());
+                    crate::load::package_vfs(&m, model, Some(pkg))
+                }
+                None => Err(e),
+            }
+        }
+    }
+}
+
 /// Online (mp.rs): a late joiner's car - `model` in the look `own` (their
 /// CarFinalStateData), at the opponents' texture size - as a scene of its
 /// own (meshes, materials and textures tagged `tag`) and its slot, to be
 /// appended to the running one. Runs off the render thread.
 pub fn load_net_car(pkg: &Path, base: Option<&Path>, model: &str, own: Option<&[u8]>, tag: &str) -> Result<(Car, Slot), String> {
-    let mut v = crate::load::package_vfs(pkg, model, base).map_err(|e| format!("car {model}: {e}"))?;
+    // ⚠ with the mod fallback, as build_race opens cars: without it a player
+    // joining after us in a mod car stayed on a borrowed spare model
+    let mut v = open_car(pkg, model, base).map_err(|e| format!("car {model}: {e}"))?;
     let saved = crate::envc::var("EVOVIEW_VISUAL").ok();
     if let Some(fs) = own {
         if let Some(bytes) = crate::load::netcar_visual(&mut v, fs) {

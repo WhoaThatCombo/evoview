@@ -235,17 +235,22 @@ impl Car {
         &self.blob
     }
 
+    /// Take the blob out, leaving this car's ranges pointing at nothing.
+    /// Scene building moves the (multi-GB) track blob into the scene rather
+    /// than copying it and holding both until the build ends.
+    pub fn take_blob(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.blob)
+    }
+
     /// A slice of the data blob, or an empty slice if the range is bogus.
     pub fn slice(&self, r: Option<[u64; 2]>) -> &[u8] {
         match r {
-            Some([off, len]) => {
-                let (a, b) = (off as usize, (off + len) as usize);
-                if b <= self.blob.len() {
-                    &self.blob[a..b]
-                } else {
-                    &[]
-                }
-            }
+            // checked: a hostile manifest's off + len must not wrap to a
+            // reversed range (a > b) that slips past the length test
+            Some([off, len]) => match off.checked_add(len) {
+                Some(b) if b <= self.blob.len() as u64 => &self.blob[off as usize..b as usize],
+                _ => &[],
+            },
             None => &[],
         }
     }

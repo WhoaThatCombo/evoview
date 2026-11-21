@@ -49,12 +49,21 @@ const DIDOI_ASPECTPOSITION: u32 = 0x100;
 const DIDF_ABSAXIS: u32 = 1;
 const DIEFF_OBJECTOFFSETS: u32 = 0x2;
 const DIEFF_CARTESIAN: u32 = 0x10;
+const DIEP_DURATION: u32 = 0x1;
 const DIEP_AXES: u32 = 0x20;
 const DIEP_DIRECTION: u32 = 0x40;
 const DIEP_TYPESPECIFICPARAMS: u32 = 0x100;
 const DIEP_START: u32 = 0x2000_0000;
 const DIEB_NOTRIGGER: u32 = 0xFFFF_FFFF;
 const INFINITE: u32 = 0xFFFF_FFFF;
+/// The constant force's life, us, re-armed by every `send`: INFINITE kept
+/// the last frame's force on the motor for as long as the frame loop
+/// stalled (a window drag, a late joiner's upload, a hang) - with no car
+/// behind it.
+const FORCE_LIFE_US: u32 = 200_000;
+/// LoadLibraryExW: System32 only (a dinput8.dll beside the exe is the
+/// classic proxy-DLL name)
+const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x800;
 const DIPH_DEVICE: u32 = 0;
 const DIPROP_RANGE: usize = 4;
 const DIPROP_AUTOCENTER: usize = 9;
@@ -283,16 +292,31 @@ impl Mapping {
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
             let mut it = line.splitn(6, ' ');
             let (Some(role), Some(kind)) = (it.next(), it.next()) else { continue };
+            // a hand-edited line: `axis 9` / `button 200` panicked on the
+            // first read, rest == full made the input NaN, and one typo
+            // (`?`) dropped the whole mapping - now just that line goes
             let b = match kind {
                 "axis" => {
                     let (Some(a), Some(r), Some(f), Some(d)) = (it.next(), it.next(), it.next(), it.next()) else { continue };
                     let rest = it.next().map(|x| format!("{d} {x}")).unwrap_or_else(|| d.to_string());
-                    Bind::Axis { dev: rest, axis: a.parse().ok()?, rest: r.parse().ok()?, full: f.parse().ok()? }
+                    match (a.parse::<usize>(), r.parse::<i32>(), f.parse::<i32>()) {
+                        (Ok(axis), Ok(r), Ok(f)) if axis < 8 && r != f => Bind::Axis { dev: rest, axis, rest: r, full: f },
+                        _ => {
+                            eprintln!("wheel.cfg: skipped `{line}`");
+                            continue;
+                        }
+                    }
                 }
                 "button" => {
                     let (Some(n), Some(d)) = (it.next(), it.next()) else { continue };
                     let rest: Vec<&str> = std::iter::once(d).chain(it).collect();
-                    Bind::Button { dev: rest.join(" "), button: n.parse().ok()? }
+                    match n.parse::<usize>() {
+                        Ok(button) if button < 128 => Bind::Button { dev: rest.join(" "), button },
+                        _ => {
+                            eprintln!("wheel.cfg: skipped `{line}`");
+                            continue;
+                        }
+                    }
                 }
                 _ => continue,
             };
@@ -328,6 +352,12 @@ struct Device {
     state: JoyState,
     force: *mut c_void,
     damper: *mut c_void,
+    /// the last GetDeviceState failed (unplugged): its inputs read as at
+    /// rest, not frozen where they were (full throttle stayed on)
+    stale: bool,
+    /// DIPROP_RANGE was refused: the axes come in 0..65535 and are moved
+    /// to -10000..10000 here
+    unranged: bool,
 }
 
 pub struct Wheel {
@@ -386,7 +416,8 @@ impl Wheel {
     /// window), null for a console tool (no FF).
     pub fn open(hwnd: *mut c_void) -> Result<Wheel, String> {
         unsafe {
-            let lib = libloading::Library::new("dinput8.dll").map_err(|e| e.to_string())?;
+            let lib: libloading::Library = libloading::os::windows::Library::load_with_flags("dinput8.dll", LOAD_LIBRARY_SEARCH_SYSTEM32)
+                .map_err(|e| e.to_string())?.into();
             let create: libloading::Symbol<unsafe extern "system" fn(*mut c_void, u32, *const Guid, *mut *mut c_void, *mut c_void) -> HRESULT> =
                 lib.get(b"DirectInput8Create").map_err(|e| e.to_string())?;
             let mut di = std::ptr::null_mut();
@@ -434,11 +465,16 @@ impl Wheel {
                     continue;
                 }
                 let range = PropRange { size: 24, header_size: 16, obj: 0, how: DIPH_DEVICE, min: -10000, max: 10000 };
-                com!(dev, 6, fn(usize, *const c_void), DIPROP_RANGE, &range as *const _ as *const c_void);
-                let mut d = Device { name, dev, state: JoyState::default(), force: std::ptr::null_mut(), damper: std::ptr::null_mut() };
+                let unranged = com!(dev, 6, fn(usize, *const c_void), DIPROP_RANGE, &range as *const _ as *const c_void) < 0;
+                if unranged {
+                    println!("wheel: {name}: axis range refused, rescaling 0..65535");
+                }
+                let mut d = Device { name, dev, state: JoyState::default(), force: std::ptr::null_mut(), damper: std::ptr::null_mut(), stale: false, unranged };
                 if is_ff {
                     let ac = PropDword { size: 20, header_size: 16, obj: 0, how: DIPH_DEVICE, data: 0 };
-                    com!(dev, 6, fn(usize, *const c_void), DIPROP_AUTOCENTER, &ac as *const _ as *const c_void);
+                    if com!(dev, 6, fn(usize, *const c_void), DIPROP_AUTOCENTER, &ac as *const _ as *const c_void) < 0 {
+                        println!("wheel: {}: autocenter could not be turned off", d.name);
+                    }
                 }
                 com!(dev, 7, fn());
                 if is_ff && Self::effects(&mut d).is_ok() {
@@ -471,7 +507,7 @@ impl Wheel {
         let eff = Effect {
             size: std::mem::size_of::<Effect>() as u32,
             flags: DIEFF_CARTESIAN | DIEFF_OBJECTOFFSETS,
-            duration: INFINITE,
+            duration: FORCE_LIFE_US,
             sample_period: 0,
             gain: 10000,
             trigger_button: DIEB_NOTRIGGER,
@@ -490,8 +526,11 @@ impl Wheel {
         }
         com!(d.force, 7, fn(u32, u32), 1, 0);
         let cond = Condition { offset: 0, pos_coef: 0, neg_coef: 0, pos_sat: 10000, neg_sat: 10000, dead_band: 0 };
-        let deff = Effect { type_size: std::mem::size_of::<Condition>() as u32, type_params: &cond as *const _ as *const c_void, ..eff };
-        com!(d.dev, 18, fn(*const Guid, *const Effect, *mut *mut c_void, *mut c_void), &GUID_DAMPER, &deff, &mut d.damper, std::ptr::null_mut());
+        // the damper only resists motion: it may stay on through a stall
+        let deff = Effect { duration: INFINITE, type_size: std::mem::size_of::<Condition>() as u32, type_params: &cond as *const _ as *const c_void, ..eff };
+        if com!(d.dev, 18, fn(*const Guid, *const Effect, *mut *mut c_void, *mut c_void), &GUID_DAMPER, &deff, &mut d.damper, std::ptr::null_mut()) < 0 {
+            d.damper = std::ptr::null_mut();
+        }
         Ok(())
     }
 
@@ -504,9 +543,21 @@ impl Wheel {
             self.prev_buttons[i] = d.state.buttons;
             unsafe {
                 com!(d.dev, 25, fn());
-                if com!(d.dev, 9, fn(u32, *mut JoyState), std::mem::size_of::<JoyState>() as u32, &mut d.state) < 0 {
+                let ok = com!(d.dev, 9, fn(u32, *mut JoyState), std::mem::size_of::<JoyState>() as u32, &mut d.state) >= 0;
+                if !ok {
                     com!(d.dev, 7, fn());
+                    d.state.buttons = [0; 128];
+                    // a replug unloads the effects: the damper must be
+                    // started again (later sends omitted DIEP_START)
+                    if self.ffb == Some(i) {
+                        self.damper_on = false;
+                    }
+                } else if d.unranged {
+                    for a in d.state.axes.iter_mut() {
+                        *a = ((*a as i64 - 32768) * 10000 / 32768).clamp(-10000, 10000) as i32;
+                    }
                 }
+                d.stale = !ok;
             }
         }
     }
@@ -518,6 +569,9 @@ impl Wheel {
     fn axis(&self, role: &str) -> Option<f32> {
         let Some(Bind::Axis { dev, axis, rest, full }) = self.map.get(role) else { return None };
         let d = &self.devs[self.find(dev)?];
+        if d.stale {
+            return None;
+        }
         let v = d.state.axes[*axis] as f32;
         Some(((v - *rest as f32) / (*full as f32 - *rest as f32)).clamp(0.0, 1.0))
     }
@@ -550,15 +604,23 @@ impl Wheel {
             Some(Bind::Axis { .. }) => -(self.axis("steer").unwrap_or(0.5) * 2.0 - 1.0),
             _ => {
                 let d = &self.devs[self.ffb.unwrap_or(0)];
-                -(d.state.axes[0] as f32 / 10000.0).clamp(-1.0, 1.0)
+                if d.stale { 0.0 } else { -(d.state.axes[0] as f32 / 10000.0).clamp(-1.0, 1.0) }
             }
         };
         let pedal_default = |w: &Wheel, axis: usize| {
             let d = &w.devs[w.ffb.unwrap_or(0)];
+            if d.stale {
+                return 0.0;
+            }
             ((1.0 - d.state.axes[axis] as f32 / 10000.0) * 0.5).clamp(0.0, 1.0)
         };
-        wi.throttle = self.axis("throttle").unwrap_or_else(|| pedal_default(self, 1));
-        wi.brake = self.axis("brake").unwrap_or_else(|| pedal_default(self, 5));
+        // a mapped pedal on a device that stopped answering reads released
+        let pedal = |w: &Wheel, role: &str, axis: usize| match w.map.get(role) {
+            Some(Bind::Axis { .. }) => w.axis(role).unwrap_or(0.0),
+            _ => pedal_default(w, axis),
+        };
+        wi.throttle = pedal(self, "throttle", 1);
+        wi.brake = pedal(self, "brake", 5);
         wi.clutch = self.axis("clutch");
         wi.handbrake = self.axis("handbrake").or_else(|| self.button("handbrake").map(|b| if b.0 { 1.0 } else { 0.0 }));
         wi.shift_up = self.button("shift_up").map_or(false, |b| b.1);
@@ -587,10 +649,22 @@ impl Wheel {
         Some(wi)
     }
 
+    /// Whether a device takes force feedback.
+    pub fn has_ffb(&self) -> bool {
+        self.ffb.is_some()
+    }
+
+    /// No force on the motor now (focus lost, the loop about to stall).
+    pub fn zero_force(&mut self) {
+        self.send(0.0, 0.0);
+    }
+
     /// Send one step's force (-1..1) and damper (0..1) to the FF device.
     pub fn send(&mut self, force: f32, damper: f32) {
         let Some(i) = self.ffb else { return };
         let d = &self.devs[i];
+        // stale input: no force from a car driven by frozen inputs
+        let force = if d.stale || !force.is_finite() { 0.0 } else { force };
         unsafe {
             let magnitude = (force * 10000.0).clamp(-10000.0, 10000.0) as i32;
             let axes = [0u32];
@@ -598,7 +672,7 @@ impl Wheel {
             let mut eff = Effect {
                 size: std::mem::size_of::<Effect>() as u32,
                 flags: DIEFF_CARTESIAN | DIEFF_OBJECTOFFSETS,
-                duration: INFINITE,
+                duration: FORCE_LIFE_US,
                 sample_period: 0,
                 gain: 10000,
                 trigger_button: DIEB_NOTRIGGER,
@@ -611,15 +685,20 @@ impl Wheel {
                 type_params: &magnitude as *const i32 as *const c_void,
                 start_delay: 0,
             };
-            com!(d.force, 6, fn(*const Effect, u32), &eff, DIEP_TYPESPECIFICPARAMS | DIEP_START);
+            // DIEP_START restarts the effect, so each send re-arms its life
+            com!(d.force, 6, fn(*const Effect, u32), &eff, DIEP_TYPESPECIFICPARAMS | DIEP_DURATION | DIEP_START);
             if !d.damper.is_null() {
                 let c = (damper.clamp(0.0, 1.0) * 10000.0) as i32;
                 let cond = Condition { offset: 0, pos_coef: c, neg_coef: c, pos_sat: 10000, neg_sat: 10000, dead_band: 0 };
                 eff.type_size = std::mem::size_of::<Condition>() as u32;
                 eff.type_params = &cond as *const _ as *const c_void;
                 let flags = if self.damper_on { DIEP_TYPESPECIFICPARAMS } else { DIEP_TYPESPECIFICPARAMS | DIEP_AXES | DIEP_DIRECTION | DIEP_START };
-                com!(d.damper, 6, fn(*const Effect, u32), &eff, flags);
-                self.damper_on = true;
+                eff.duration = INFINITE;
+                // only once it really started (a refused first call, before
+                // the exclusive acquire, never started it)
+                if com!(d.damper, 6, fn(*const Effect, u32), &eff, flags | DIEP_DURATION) >= 0 {
+                    self.damper_on = true;
+                }
             }
         }
     }

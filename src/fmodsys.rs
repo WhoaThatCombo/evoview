@@ -55,8 +55,22 @@ pub struct Fmod {
     desc: Option<Desc>,
     /// Banks stay loaded for the life of the process; the car bank is swapped.
     car_bank: Option<Bank>,
+    /// the master and strings banks are in
+    base_loaded: bool,
+    /// Studio_System_Release has run (`release`, or Drop)
+    released: std::sync::atomic::AtomicBool,
     pub event: String,
     pub params: Vec<String>,
+}
+
+impl Drop for Fmod {
+    /// ⚠ Release the studio system BEFORE the two libraries unload (the
+    /// fields drop after this): dropped without it - a failed bank load in
+    /// CarSound::new, or at exit - FMOD's mixer / studio threads kept
+    /// running in unmapped code.
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 macro_rules! sym {
@@ -102,6 +116,10 @@ impl Fmod {
     pub fn new_opts(dir: &Path, wav: Option<&Path>) -> Result<Fmod, String> {
         // Load the core by absolute path FIRST: fmodstudio.dll depends on it,
         // and this way the loader finds the copy we mean rather than searching.
+        // ⚠ A relative `--pkg content.kspkg` gave the dir "": the bare name
+        // `fmod.dll` was then searched for (exe folder, System32, ...).
+        let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+        let dir = &std::path::absolute(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let core = unsafe { Library::new(dir.join("fmod.dll")) }
             .map_err(|e| format!("fmod.dll: {e}"))?;
         let studio = unsafe { Library::new(dir.join("fmodstudio.dll")) }
@@ -113,6 +131,21 @@ impl Fmod {
                         unsafe extern "C" fn(Sys, c_int, c_uint, c_uint, *mut c_void) -> c_int);
         let mut system: Sys = std::ptr::null_mut();
         ck(unsafe { create(&mut system, FMOD_VERSION) }, "System_Create")?;
+        // owned from here: an error below releases the system (Drop) rather
+        // than leaking it with its threads running
+        let fm = Fmod {
+            _core: core,
+            studio,
+            system,
+            inst: None,
+            desc: None,
+            car_bank: None,
+            base_loaded: false,
+            released: std::sync::atomic::AtomicBool::new(false),
+            event: String::new(),
+            params: Vec::new(),
+        };
+        let (core, studio) = (&fm._core, &fm.studio);
         let wav_c = wav.and_then(|p| CString::new(p.to_string_lossy().as_ref()).ok());
         if wav_c.is_some() {
             let core_of = sym!(studio, b"FMOD_Studio_System_GetCoreSystem",
@@ -123,10 +156,12 @@ impl Fmod {
             // 5 = FMOD_OUTPUTTYPE_WAVWRITER_NRT
             ck(unsafe { set_out(cs, 5) }, "SetOutput")?;
         }
-        // 512 virtual channels; offline: synchronous studio updates (1) and
-        // the core mixing from update (FMOD_INIT_MIX_FROM_UPDATE 2)
+        // 512 virtual channels; offline: synchronous studio updates
+        // (FMOD_STUDIO_INIT_SYNCHRONOUS_UPDATE 4 - 1 is LIVEUPDATE, which
+        // opened the profiler's TCP port) and the core mixing from update
+        // (FMOD_INIT_MIX_FROM_UPDATE 2)
         let (sf, cf, extra) = match wav_c.as_ref() {
-            Some(c) => (1, 2, c.as_ptr() as *mut c_void),
+            Some(c) => (4, 2, c.as_ptr() as *mut c_void),
             None => (0, 0, std::ptr::null_mut()),
         };
         ck(unsafe { init(system, 512, sf, cf, extra) }, "System_Initialize")?;
@@ -154,16 +189,7 @@ impl Fmod {
             }
         }
 
-        Ok(Fmod {
-            _core: core,
-            studio,
-            system,
-            inst: None,
-            desc: None,
-            car_bank: None,
-            event: String::new(),
-            params: Vec::new(),
-        })
+        Ok(fm)
     }
 
     fn load_bank(&self, data: &[u8]) -> Result<Bank, String> {
@@ -220,9 +246,22 @@ impl Fmod {
     /// car bank provides.
     pub fn load_banks(&mut self, master: &[u8], strings: &[u8], car: &[u8])
                       -> Result<Vec<String>, String> {
-        if self.car_bank.is_none() {
+        if !self.base_loaded {
             self.load_bank(master)?;
             self.load_bank(strings)?;
+            self.base_loaded = true;
+        }
+        // the previous car's engine kept running, and loading a car again
+        // (A -> B -> A) failed as already loaded: its playing instance goes,
+        // then its bank
+        if let Some(old) = self.car_bank.take() {
+            if let Some(i) = self.inst.take() {
+                self.stop_release_now(i);
+            }
+            self.desc = None;
+            if let Ok(f) = unsafe { self.studio.get::<unsafe extern "C" fn(Bank) -> c_int>(b"FMOD_Studio_Bank_Unload") } {
+                unsafe { f(old) };
+            }
         }
         let b = self.load_bank(car)?;
         self.car_bank = Some(b);
@@ -276,6 +315,11 @@ impl Fmod {
         let mut i: Inst = std::ptr::null_mut();
         ck(unsafe { mk(d, &mut i) }, "CreateInstance")?;
         ck(unsafe { start(i) }, "EventInstance_Start")?;
+        // the instance this one replaces (an onboard <-> outside swap):
+        // left running, frozen at its last speed / gear / volume
+        if let Some(old) = self.inst.take() {
+            self.stop_release_now(old);
+        }
         self.params.clear();
         for name in candidates {
             if let Ok(cn) = CString::new(*name) {
@@ -309,10 +353,21 @@ impl Fmod {
     }
 
     /// Shut FMOD down (finalises a WAV writer's header). The Fmod must not
-    /// be used afterwards.
+    /// be used afterwards. Once only (Drop calls it too).
     pub fn release(&self) {
+        if self.released.swap(true, std::sync::atomic::Ordering::Relaxed) || self.system.is_null() {
+            return;
+        }
         if let Ok(f) = unsafe { self.studio.get::<unsafe extern "C" fn(Sys) -> c_int>(b"FMOD_Studio_System_Release") } {
             unsafe { f(self.system) };
+        }
+    }
+
+    /// Stop an instance at once and release it.
+    fn stop_release_now(&self, i: Inst) {
+        self.stop(i);
+        if let Ok(f) = unsafe { self.studio.get::<unsafe extern "C" fn(Inst) -> c_int>(b"FMOD_Studio_EventInstance_Release") } {
+            unsafe { f(i) };
         }
     }
 

@@ -87,6 +87,8 @@ struct Grid {
 
 /// Grid cell size in metres; meshes with fewer instances skip the grid.
 const CELL: f32 = 96.0;
+/// The most cells a grid gets (1 M: a 98 km square at CELL).
+const GRID_MAX: f32 = 1_048_576.0;
 const GRID_MIN: usize = 64;
 
 impl Grid {
@@ -99,10 +101,18 @@ impl Grid {
         if lo.x > hi.x || !lo.is_finite() || !hi.is_finite() {
             return None;
         }
-        let nx = (((hi.x - lo.x) / CELL).floor() as u32 + 1).min(4096);
-        let nz = (((hi.z - lo.z) / CELL).floor() as u32 + 1).min(4096);
+        // at most GRID_MAX cells, growing the cell for huge extents: one
+        // stray instance ~400 km out made 4096 x 4096 cells (~800 MB, walked
+        // four times a frame). In float: `as u32 + 1` overflowed past 4e11 m
+        let (ex, ez) = ((hi.x - lo.x).max(0.0), (hi.z - lo.z).max(0.0));
+        let mut cell = CELL;
+        while ((ex / cell).floor() + 1.0) * ((ez / cell).floor() + 1.0) > GRID_MAX {
+            cell *= 2.0;
+        }
+        let nx = ((ex / cell).floor() + 1.0).min(4096.0) as u32;
+        let nz = ((ez / cell).floor() + 1.0).min(4096.0) as u32;
         let empty = [Vec3::splat(f32::MAX), Vec3::splat(f32::MIN), Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)];
-        let mut g = Grid { origin: lo, cell: CELL, nx, boxes: vec![empty; (nx * nz) as usize],
+        let mut g = Grid { origin: lo, cell, nx, boxes: vec![empty; (nx * nz) as usize],
                            vis: Vec::new(), dist: Vec::new(), wmin: Vec::new() };
         for s in spheres.iter().flat_map(|s| s.iter()) {
             let c = g.cell_of(s.truncate());
@@ -462,8 +472,9 @@ impl Culler {
             e.lod = Some([a * a, if b.is_finite() { b * b } else { f32::INFINITY }]);
             let f = e.raw_fade;
             e.band = Band::new([a, b], [f[0], f[1], f[2] * s, f[3]]);
-            // force a re-upload of the dither amounts
-            e.last.clear();
+            // ⚠ no `e.last.clear()`: update's vis + fade compare already
+            // catches every real change, and clearing it re-uploaded every
+            // LOD'd instance buffer each frame under a zooming TV camera
         }
     }
 
@@ -573,7 +584,9 @@ impl Culler {
         for (e, vis) in self.entries.iter_mut().zip(self.cast.iter()) {
             let n = vis.len() as u32;
             e.shadow_count[c] = n;
-            if n > 0 && e.rows.len() > 1 && e.shadow_last[c] != *vis {
+            // a single placement with LOD bands gets its own buffer too:
+            // the mesh's own one carries the MAIN view's dither-out amount
+            if n > 0 && (e.rows.len() > 1 || e.band.is_some()) && e.shadow_last[c] != *vis {
                 e.shadow_last[c].clone_from(vis);
                 self.scratch.clear();
                 for &k in vis {
@@ -597,7 +610,9 @@ impl Culler {
     /// None buffer means the mesh's own (single identity row).
     pub fn shadow(&self, c: usize, i: usize) -> Option<(Option<&wgpu::Buffer>, u32)> {
         let e = &self.entries[self.entry_of.get(i).copied().flatten()?];
-        Some((e.shadow_buf[c].as_ref().filter(|_| e.rows.len() > 1), e.shadow_count[c]))
+        // (a banded single placement: its own fade-0 copy, not the main
+        // buffer - mirrors / probe / rear view drew it main-view dithered)
+        Some((e.shadow_buf[c].as_ref().filter(|_| e.rows.len() > 1 || e.band.is_some()), e.shadow_count[c]))
     }
 
     /// Cull against `view_proj` (wgpu clip space, z in 0..1) for a viewport
@@ -820,5 +835,28 @@ impl DrawOrder {
         }));
         self.keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
         self.keyed.iter().map(|&(_, g, k)| (g, k))
+    }
+}
+
+#[cfg(test)]
+mod grid_tests {
+    use super::*;
+
+    #[test]
+    fn a_stray_far_instance_does_not_blow_up_the_grid() {
+        let s = [Vec4::new(0.0, 0.0, 0.0, 1.0), Vec4::new(400_000.0, 0.0, 400_000.0, 1.0)];
+        let g = Grid::build(&[&s[..]]).unwrap();
+        assert!(g.boxes.len() as f32 <= GRID_MAX);
+        let far = [Vec4::new(-1e12, 0.0, -1e12, 1.0), Vec4::new(1e12, 0.0, 1e12, 1.0)];
+        let g = Grid::build(&[&far[..]]).unwrap();
+        assert!(g.nx >= 1 && !g.boxes.is_empty() && g.boxes.len() as f32 <= GRID_MAX);
+        let _ = g.cell_of(Vec3::ZERO);
+    }
+
+    #[test]
+    fn a_track_sized_grid_keeps_its_cell() {
+        let s = [Vec4::new(0.0, 0.0, 0.0, 1.0), Vec4::new(5000.0, 0.0, 3000.0, 1.0)];
+        let g = Grid::build(&[&s[..]]).unwrap();
+        assert_eq!(g.cell, CELL);
     }
 }

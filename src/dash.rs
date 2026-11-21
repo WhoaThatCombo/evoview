@@ -140,7 +140,10 @@ pub fn parse_html(src: &str) -> Node {
             if tag == "script" || tag == "style" {
                 // keep the raw content (AC1_FONTS lives in a script)
                 let close = format!("</{tag}");
-                let e = s[i..].to_lowercase().find(&close).map_or(s.len() - i, |e| e);
+                // ASCII lowercase: byte lengths unchanged, so the offset is
+                // valid in `s` (to_lowercase shifted it off a char boundary
+                // past U+0130 / U+212A / U+1E9E and the slice panicked)
+                let e = s[i..].to_ascii_lowercase().find(&close).map_or(s.len() - i, |e| e);
                 n.text = s[i..i + e].to_string();
                 i += e;
                 if let Some(g) = s[i..].find('>') {

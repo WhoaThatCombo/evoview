@@ -267,6 +267,8 @@ pub struct FxGpu {
     inst: wgpu::Buffer,
     /// (def, first instance, count) for this frame
     batches: Vec<(usize, u32, u32)>,
+    /// upload_particles' gathered instances, kept (not a new Vec a frame)
+    all: Vec<Instance>,
     pub sim: Sim,
     // dash
     dash_pipe: wgpu::RenderPipeline,
@@ -648,7 +650,7 @@ impl FxGpu {
         FxGpu {
             samples, glow_pipe_part, glow: None, steps: Vec::new(), bloom_bgl, bloom_down, bloom_blur, bloom_comp,
             bloom_samp: lin, out_format, part_add, part_alpha, soft_add, soft_alpha, half_add, half_alpha, part_comp, half: None, pdepth_bgl, no_scene, part_cam, late_buf, late_cam, part_defs, quad, inst,
-            batches: Vec::new(), sim: Sim::default(), dash_pipe, dash_bgl, dash_samp, white_bg,
+            batches: Vec::new(), all: Vec::new(), sim: Sim::default(), dash_pipe, dash_bgl, dash_samp, white_bg,
             dash, dash_t: 1e9, dash_next: 0, dash_mip_pipe,
             dash_quad: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("dash mip quad"),
@@ -744,7 +746,8 @@ impl FxGpu {
 
     fn upload_particles(&mut self, queue: &wgpu::Queue, fx: &crate::fxdata::CarFx, eye: [f32; 3]) {
         self.batches.clear();
-        let mut all: Vec<Instance> = Vec::new();
+        let mut all = std::mem::take(&mut self.all);
+        all.clear();
         for di in 0..fx.emitter_defs.len() {
             let v = self.sim.instances(fx, di, eye);
             if v.is_empty() {
@@ -761,6 +764,7 @@ impl FxGpu {
         if !all.is_empty() {
             queue.write_buffer(&self.inst, 0, bytemuck::cast_slice(&all));
         }
+        self.all = all;
     }
 
     pub fn particle_count(&self) -> usize {

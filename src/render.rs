@@ -172,15 +172,21 @@ pub fn hero_light_matrix(c: Vec3, r: f32) -> (glam::Mat4, f32) {
     (proj * view, 2.0 * half / hero_dim() as f32)
 }
 
+/// A perspective view's forward direction: clip w is forward . p + c, so
+/// it is row 3 of the matrix. ⚠ Not by unprojecting a point at 2x the near
+/// plane and subtracting the eye: that 6 cm vector carried ~1 mm of rounding
+/// at 10 km (up to ~1 degree), and the shadow cell it picks flickered.
+pub fn view_forward(view_proj: glam::Mat4) -> Vec3 {
+    view_proj.row(3).truncate().normalize_or_zero()
+}
+
 /// Where a track view's near shadow map goes: ahead of the eye along the
 /// view, on the level of the eye's ground, so the map covers what is seen.
 /// ⚠ It used to follow the ORBIT camera's target, which the free and drive
 /// cameras never move: the sharp map sat at the circuit's middle and every
 /// view got only the 1 m far cascade (no small casters, blurry short shade).
 pub fn view_focus(view_proj: glam::Mat4, eye: Vec3) -> Vec3 {
-    let inv = view_proj.inverse();
-    let a = inv * glam::Vec4::new(0.0, 0.0, 0.5, 1.0);
-    let f = (a.truncate() / a.w - eye).normalize_or_zero();
+    let f = view_forward(view_proj);
     let flat = Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
     // the map spans 400 m: centre it ~a third of the way out, so the ground
     // at the eye's feet is still inside
@@ -833,7 +839,7 @@ pub fn build_scene(
         let mut draws: Vec<(u32, u32, usize)> = m
             .batches
             .iter()
-            .filter(|b| b.count > 0 && (b.start + b.count) as usize <= idx.len())
+            .filter(|b| b.count > 0 && b.start as usize + b.count as usize <= idx.len()) // widened: u32 sum wraps
             .map(|b| {
                 let mi = mats.map(|x| x.lookup(&b.material)).unwrap_or(0);
                 (b.start, b.count, mi)
@@ -1618,7 +1624,8 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
         };
         match crate::wheel::Wheel::open(hwnd) {
             Ok(w) => {
-                println!("wheel: {} (force feedback on); devices {:?}", w.name, w.devices());
+                println!("wheel: {} (force feedback {}); devices {:?}", w.name,
+                         if w.has_ffb() { "on" } else { "unavailable" }, w.devices());
                 Some(w)
             }
             Err(e) => {
@@ -1845,7 +1852,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     // scenery alone: drawn straight into its layer when the cell changes, no
     // cache texture and no 64 MB copy a frame.
     let dhero = cached && drive_hero() && opts.playback.is_none();
-    let shadow_cache = (cached && !dhero).then(|| {
+    let make_shadow_cache = |device: &wgpu::Device| {
         let t = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("shadow cache"),
             size: wgpu::Extent3d { width: shadow_dim, height: shadow_dim, depth_or_array_layers: 1 },
@@ -1858,7 +1865,14 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
         });
         let v = t.create_view(&Default::default());
         (t, v)
-    });
+    };
+    // ⚠ with the hero map the opponents (race / online) were in NO shadow
+    // map: the near layer held the scenery alone and the hero box only the
+    // player (plus a square-clipped slice of an opponent beside it). While
+    // opponents exist the hero path keeps the cache too (made on first need)
+    // and draws them over it each frame, as the plain cached path draws cars.
+    let mut shadow_cache = (cached && !dhero).then(|| make_shadow_cache(&device));
+    let mut hero_opp_last = false;
     let mut shadow_cache_vp: Option<glam::Mat4> = None;
     // far cascade: tracks only (a car is all inside its hero map)
     let far_on = shadows_on && !hero_on && opts.start_fly && cascades();
@@ -2338,9 +2352,9 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
             let most = crate::envc::var("EVOVIEW_DRIVE_FPS").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(hz);
             let k_min = (hz / most.max(1.0)).ceil().max(1.0);
             let k0 = (hz / 90.0).ceil().max(1.0);
-            Pace { hz, k: k_min.max(k0), k_min, miss: 0, fast: 0, n: 0, slept: 0.0 }
+            Pace { hz, k: k_min.max(k0), k_min, miss: 0, fast: 0, n: 0, slept: 0.0, err: 0.0 }
         })
-    }.filter(|_| crate::envc::var("EVOVIEW_MAX_FPS").is_err() && crate::envc::var("EVOVIEW_NOVSYNC").is_err());
+    }.filter(|p| p.hz.is_finite() && p.hz >= 20.0).filter(|_| crate::envc::var("EVOVIEW_MAX_FPS").is_err() && crate::envc::var("EVOVIEW_NOVSYNC").is_err());
     if let Some(p) = &drive_pace {
         println!("pacing: {:.0} Hz display, starting at every {:.0} refreshes = {:.1} fps (adapts)", p.hz, p.k, p.hz / p.k);
     }
@@ -2356,11 +2370,16 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     let mut next_frame = std::time::Instant::now();
     // frames counted for the rear-view screen's outside-the-car cadence
     let mut mirror_tick: u32 = 0;
+    // the centre mirror's turns seen from outside (one in 4 is drawn)
+    let mut centre_tick: u32 = 0;
     let mut fps_frames: u32 = 0;
     let mut fps_clock = std::time::Instant::now();
     let mut fps_now: f32 = 0.0;
     // Replay playhead, in seconds of captured motion.
     let mut play_t = opts.playback.as_ref().map_or(0.0f32, |pb| pb.start.max(0.0));
+    // last frame's playhead, and a replay jump seen this frame (a cut)
+    let mut play_last: Option<f32> = None;
+    let mut play_cut = false;
     let mut playing = true;
     let mut play_speed = 1.0f32;
     let mut follow = if opts.track_drive.is_some() && crate::envc::var_os("EVOVIEW_FLY").is_none() {
@@ -2627,6 +2646,14 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
             match event {
                 Event::WindowEvent { event, .. } => match event {
                     WindowEvent::CloseRequested => elwt.exit(),
+                    // ⚠ focus lost / window hidden: no force left latched on
+                    // the wheel's motor (frames may stop coming to update it);
+                    // the next frame's step sends the real force again
+                    WindowEvent::Focused(false) | WindowEvent::Occluded(true) => {
+                        if let Some(w) = wheel.as_mut() {
+                            w.zero_force();
+                        }
+                    }
                     // a bench / capture run takes no input: the window pops up
                     // under whatever the user is typing, and their keys flew
                     // the camera somewhere else
@@ -3451,11 +3478,14 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             // how far the recording moved this frame (the rigs'
                             // springs and wheel spin advance by it)
                             let mut play_dt = 0.0f32;
+                            let mut step = 0.0f32;
                             if scrub != 0.0 {
-                                play_t += scrub * dt * 10.0 * play_speed;
+                                step = scrub * dt * 10.0 * play_speed;
+                                play_t += step;
                                 play_dt = dt * 10.0 * play_speed;
                             } else if playing {
-                                play_t += dt * play_speed;
+                                step = dt * play_speed;
+                                play_t += step;
                                 play_dt = dt * play_speed;
                             }
                             // Loop, so a replay left running keeps showing
@@ -3463,6 +3493,15 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             if span > 0.0 {
                                 play_t = play_t.rem_euclid(span);
                             }
+                            // ⚠ a seek, a restart or the loop's wrap moves every
+                            // car at once while the camera may not move: a cut
+                            // all the same (the camera test alone missed it, and
+                            // each car got a motion vector as long as its jump)
+                            if play_last.map_or(false, |l: f32| (play_t - (l + step)).abs() > 0.05 + 2.0 * step.abs()) {
+                                play_cut = true;
+                                carcull.cut();
+                            }
+                            play_last = Some(play_t);
                             // Body and the four wheels are separate instance
                             // streams: the wheels steer, spin and follow their
                             // own suspension travel, so they cannot share the
@@ -3558,7 +3597,10 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     }
                                     body.extend_from_slice(&b.to_cols_array());
                                     body.extend_from_slice(&tail);
-                                    if hide_drv == Some(ci) {
+                                    // B (driver off) too: carcull rewrites these
+                                    // rows every frame, so the toggle's one write
+                                    // to the driver meshes did nothing in replays
+                                    if hide_drv == Some(ci) || !driver_on {
                                         body_drv.extend_from_slice(&[0.0f32; 20]);
                                     } else {
                                         body_drv.extend_from_slice(&b.to_cols_array());
@@ -3697,6 +3739,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                             Ok(x) => x,
                                             Err(e) => {
                                                 eprintln!("mp: car #{n}: {e}");
+                                                m.load_failed(n);
                                                 continue;
                                             }
                                         };
@@ -3938,8 +3981,13 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             if let Some((body, wheels)) = slot_gpu.first() {
                                 let br = row(b);
                                 // the driver stays hidden in the cockpit views
+                                // ⚠ not while watching another player (Numpad
+                                // 4/6): the view is a chase on them, and our
+                                // car, when in sight, needs its driver
+                                let watching = view_ai.and_then(|k| opts.race.as_ref().and_then(|r| r.ai.get(k)))
+                                    .map_or(false, |a| a.td.pos.y > -1000.0);
                                 let inside = car_cams.get(cam_sel).map_or(false, |c| c.mode == 1 || c.mode == 4)
-                                    && follow != crate::camera::Follow::Free;
+                                    && follow != crate::camera::Follow::Free && !watching;
                                 let zero = vec![0.0f32; 20];
                                 for &gi in body {
                                     let hide = (inside || !driver_on) && driver_meshes.contains(&gi);
@@ -4098,6 +4146,10 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             Some(f) => (f.view_proj(aspect), f.pos),
                             None => (cam.view_proj(aspect), cam.eye()),
                         };
+                        // ⚠ false unless this frame's camera logic says
+                        // otherwise: only stored on the follow / onboard paths,
+                        // it stuck true onto the free camera (+0.75 EV)
+                        INTERIOR.store(false, std::sync::atomic::Ordering::Relaxed);
                         // the cockpit views hide the driver's body (whichever way
                         // the camera got there: C, EVOVIEW_CAM, the start)
                         if opts.track_drive.is_some() && Some(cam_sel) != cam_applied {
@@ -4186,12 +4238,11 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             let hb = held.contains(&KeyCode::ControlLeft) || held.contains(&KeyCode::ControlRight);
                             let mut f = td.sound_feed(hb);
                             let p = td.pose();
-                            let inv = view_proj.inverse();
-                            let a = inv * glam::Vec4::new(0.0, 0.0, 0.5, 1.0);
-                            let cam_fwd = (a.truncate() / a.w - eye).normalize_or_zero();
-                            let b = inv * glam::Vec4::new(0.0, 1.0, 0.5, 1.0);
-                            let cam_up = ((b.truncate() / b.w - eye) - cam_fwd * (b.truncate() / b.w - eye).dot(cam_fwd))
-                                .normalize_or_zero();
+                            // from the matrix rows (view_forward): clip y is
+                            // the up row, less any lens shift along forward
+                            let cam_fwd = view_forward(view_proj);
+                            let up_row = view_proj.row(1).truncate();
+                            let cam_up = (up_row - cam_fwd * up_row.dot(cam_fwd)).normalize_or_zero();
                             f.car_pos = (p.pos + p.up * 0.5).to_array();
                             f.car_vel = (p.forward * td.vx).to_array();
                             f.car_fwd = p.forward.to_array();
@@ -4328,11 +4379,8 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         // further than any real frame does. Every history
                         // restarts (TAA, motion vectors, SSR, DLSS/FSR, motion
                         // blur); kept, the old view ghosted ~20 frames.
-                        let fwd = {
-                            let f = view_proj.inverse() * glam::Vec4::new(0.0, 0.0, 0.5, 1.0);
-                            (f.truncate() / f.w - eye).normalize_or_zero()
-                        };
-                        let cut = cut_prev.map_or(false, |(pe, pf): (Vec3, Vec3)| {
+                        let fwd = view_forward(view_proj);
+                        let cut = std::mem::take(&mut play_cut) || cut_prev.map_or(false, |(pe, pf): (Vec3, Vec3)| {
                             pe.distance(eye) > 12.0 || pf.dot(fwd) < 0.9
                         });
                         cut_prev = Some((eye, fwd));
@@ -4507,6 +4555,9 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         // The sun and the scenery are static, so the shadow map
                         // only needs redrawing when its box moves - or every
                         // frame during a replay, where the cars cast.
+                        // put back if the frame is abandoned (surface error)
+                        // before any shadow pass is encoded
+                        let shadow_state0 = (shadow_drawn, far_drawn, mid_drawn, shadow_invalid, shadow_cache_vp);
                         let light_vp = if hero_on {
                             car_light_matrix(lo, hi).0
                         } else if cached {
@@ -4520,11 +4571,23 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         // livery), and the car is drawn over the cache every
                         // frame anyway - it redrew the scenery (~3 ms) every
                         // 4th frame. The matrix carries the cell and the sun.
+                        // hero map + opponents: the near layer is the cache
+                        // copy with the opponents on top, every frame. A
+                        // change either way redraws the cache / the layer
+                        // (no opponent shadows left baked in it)
+                        let hero_opp = dhero && slot_gpu.len() > 1;
+                        if hero_opp != hero_opp_last {
+                            hero_opp_last = hero_opp;
+                            shadow_cache_vp = None;
+                            if hero_opp && shadow_cache.is_none() {
+                                shadow_cache = Some(make_shadow_cache(&device));
+                            }
+                        }
                         let cache_dirty = cached && shadow_cache_vp != Some(light_vp);
                         // with the hero map the near layer IS the cache: only
                         // a new cell redraws it, the car changing does not
                         let every = crate::envc::var_os("EVOVIEW_SHADOW_EVERY_FRAME").is_some();
-                        let shadow_dirty = shadows_on && if dhero { cache_dirty || every } else {
+                        let shadow_dirty = shadows_on && if dhero { cache_dirty || every || hero_opp } else {
                             shadow_invalid || shadow_drawn != Some(light_vp) || shadow_cache.is_some()
                                 || opts.playback.is_some() || every
                         };
@@ -4751,6 +4814,9 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             None => match surface.get_current_texture() {
                                 Ok(f) => Some(f),
                                 Err(_) => {
+                                    // ⚠ nothing was drawn: the cascades must
+                                    // not count as redrawn on their new matrices
+                                    (shadow_drawn, far_drawn, mid_drawn, shadow_invalid, shadow_cache_vp) = shadow_state0;
                                     surface.configure(&device, &config);
                                     return;
                                 }
@@ -4805,34 +4871,41 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 }
                             };
                             // jobs: (layer, target, clear, what) - what 0 all,
-                            // 1 the scenery only (the cache), 2 the car only
+                            // 1 the scenery only (the cache), 2 the cars only,
+                            // 3 the opponents only (carcull's meshes), 4 the
+                            // player's car only (the hero map)
                             let mut jobs: Vec<(usize, &wgpu::TextureView, bool, u8)> = Vec::new();
                             if shadow_dirty {
-                                match shadow_cache.as_ref() {
+                                match shadow_cache.as_ref().filter(|_| !dhero || hero_opp) {
                                     Some((_, cv)) => {
                                         if cache_dirty {
                                             jobs.push((0, cv, true, 1));
                                         }
-                                        jobs.push((0, &shadow_layers[0], false, 2));
+                                        jobs.push((0, &shadow_layers[0], false, if dhero { 3 } else { 2 }));
                                     }
                                     None => jobs.push((0, &shadow_layers[0], true, if dhero { 1 } else { 0 })),
                                 }
                             }
+                            // ⚠ replays too draw them scenery only: they are
+                            // redrawn only when their snap cell moves, so cars
+                            // baked in stayed as shadows where the grid stood
+                            // (the near cascade, redrawn every frame, has them)
+                            let far_what = if cached || opts.playback.is_some() { 1 } else { 0 };
                             if far_dirty {
-                                jobs.push((1, &shadow_layers[1], true, if cached { 1 } else { 0 }));
+                                jobs.push((1, &shadow_layers[1], true, far_what));
                             }
                             if mid_dirty {
-                                jobs.push((LAYER_MID as usize, &shadow_layers[LAYER_MID as usize], true, if cached { 1 } else { 0 }));
+                                jobs.push((LAYER_MID as usize, &shadow_layers[LAYER_MID as usize], true, far_what));
                             }
                             if hero_vp.is_some() {
-                                jobs.push((LAYER_HERO as usize, &shadow_layers[LAYER_HERO as usize], true, 2));
+                                jobs.push((LAYER_HERO as usize, &shadow_layers[LAYER_HERO as usize], true, 4));
                             }
                             if cache_dirty && shadow_dirty {
                                 shadow_cache_vp = Some(light_vp);
                             }
                             let mut enc_sec = crate::bench::cpu("enc shadow");
                             for (layer, target, clear_it, what) in jobs {
-                                if what == 2 {
+                                if what == 2 || what == 3 {
                                     // the cached scenery into the live cascade
                                     if let Some((ct, _)) = shadow_cache.as_ref() {
                                         enc.copy_texture_to_texture(
@@ -4885,7 +4958,11 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                         continue;
                                     }
                                     // track geometry carries its extra stream, the car not
-                                    if (what == 1 && m.extra.is_none()) || (what == 2 && m.extra.is_some()) {
+                                    if (what == 1 && m.extra.is_none()) || (what >= 2 && m.extra.is_some()) {
+                                        continue;
+                                    }
+                                    // opponents (carcull's) vs the player's car
+                                    if (what == 3 && !carcull.manages(mi_mesh)) || (what == 4 && carcull.manages(mi_mesh)) {
                                         continue;
                                     }
                                     if m.extra.is_none() && m.instance_count > 0
@@ -4920,7 +4997,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                         sp.draw_indexed(start..start + count, 0, 0..n);
                                     }
                                 }
-                                if let Some(t) = track.as_ref().filter(|_| what != 2) {
+                                if let Some(t) = track.as_ref().filter(|_| what < 2) {
                                     let cul = culler.as_ref();
                                     t.draw_shadow_cutouts(&mut sp, layer, &meshes, &|gi| {
                                         let m = &meshes[gi];
@@ -4950,12 +5027,22 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 // from outside the car, the centre mirror and the rear-view
                                 // screen sit behind the roof and tinted glass: every 4th
                                 // frame. EVOVIEW_MIRROR_SEEN=0: always drawn.
-                                let inside = follow != crate::camera::Follow::Free
+                                // (watching another player: outside our car)
+                                let watching = view_ai.and_then(|k| opts.race.as_ref().and_then(|r| r.ai.get(k)))
+                                    .map_or(false, |a| a.td.pos.y > -1000.0);
+                                let inside = follow != crate::camera::Follow::Free && !watching
                                     && car_cams.get(cam_sel).map_or(false, |c| c.mode == 1 || c.mode == 4);
                                 let all = crate::envc::var("EVOVIEW_MIRROR_SEEN").map_or(false, |v| v == "0");
                                 let seen = |mr: &crate::mirrors::Mirrors, i: usize| all || mr.seen(i, body, vp_draw, eye);
+                                // ⚠ the centre mirror's outside cadence counts its
+                                // OWN turns: on the global frame tick, with 2 or 4
+                                // glass mirrors the two counters never lined up
+                                // and it was never refreshed from outside
                                 let glass = mr.due().filter(|&i| seen(mr, i)
-                                    && (all || inside || mr.list[i].def.kind != 0 || mirror_tick % 4 == 0));
+                                    && (all || inside || mr.list[i].def.kind != 0 || {
+                                        centre_tick = centre_tick.wrapping_add(1);
+                                        centre_tick % 4 == 1
+                                    }));
                                 let cam = mr.camera().filter(|&i| seen(mr, i) && (all || inside || mirror_tick % 4 == 0));
                                 mirror_tick = mirror_tick.wrapping_add(1);
                                 let due = [glass.map(|i| (i, 2usize, 1usize)), cam.map(|i| (i, 4, 3))];
@@ -5671,6 +5758,10 @@ struct Pace {
     n: u32,
     /// the pacing sleep inside the last frame (not work)
     slept: f32,
+    /// measured time not yet stepped: snapping each frame to the period
+    /// alone drifts the sim off real time when the real rate is not the
+    /// assumed one (VRR, a monitor change)
+    err: f32,
 }
 
 impl Pace {
@@ -5705,6 +5796,15 @@ impl Pace {
             self.miss = 0;
             self.fast = 0;
         }
-        if (m - p).abs() < 0.3 * p { p } else { m }
+        if (m - p).abs() < 0.3 * p {
+            // the period, nudged by a tenth of the time owed, so the steps
+            // add up to the real time while each one stays even
+            let out = (p + 0.1 * self.err).clamp(0.7 * p, 1.3 * p);
+            self.err = (self.err + m - out).clamp(-p, p);
+            out
+        } else {
+            self.err = 0.0;
+            m
+        }
     }
 }

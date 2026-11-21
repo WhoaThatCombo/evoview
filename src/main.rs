@@ -1242,7 +1242,8 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
         let lay = cs.iter().filter_map(|c| {
             let b = c.rsplit(['\\', '/']).next()?.to_lowercase();
             b.strip_prefix("layout_")?.strip_suffix(".scene").map(str::to_string)
-        }).next();
+        // the server's text into set_var (a NUL panicked the join)
+        }).filter(|l| mp::ident_ok(l)).next();
         if let Some(l) = lay {
             println!("mp: the server runs layout {l}");
             crate::envc::set_var("EVOVIEW_LAYOUT", l);
@@ -1331,7 +1332,9 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
     // lap timing (laps.rs); scripted drivers' laps are not saved as PBs
     let scripted = flag("--drive-test").is_some() || flag("--bench").is_some() || crate::envc::var_os("EVOVIEW_DRIVE_LINE").is_some();
     let mut laps = laps::Session::load(pkg, track, car_id, !scripted);
-    let mut race = (!ai_cars.is_empty()).then(|| {
+    // online always: without a Race nothing sent our car or drew a late
+    // joiner (EVOVIEW_MP_SPARE=0 on an empty server: parked in the pit box)
+    let mut race = (!ai_cars.is_empty() || mp.is_some()).then(|| {
         let grid = pits::PitLane::load(pkg, track).map(|l| l.grid).unwrap_or_default();
         let mut r = race::Race::new(trackdrive::racing_line(pkg, track), ai_cars, &grid, &mut td);
         r.net = mp.is_some();

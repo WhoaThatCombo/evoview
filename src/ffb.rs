@@ -240,6 +240,10 @@ impl Effects {
             0.0
         };
         self.v = [kerb * fade, bump, slip * fade, 0.0, abs];
+        // one NaN speed latched `dist` (and so the kerb buzz) for good
+        if !(self.dist.is_finite() && self.v.iter().all(|x| x.is_finite())) {
+            *self = Effects::default();
+        }
     }
 
     /// The offset the device adds to the force (fn 0x142128e70).
@@ -315,17 +319,33 @@ pub fn soft_lock(wheel_deg: f32, stop_deg: f32, rate: f32) -> f32 {
     -x.signum() * s * (40.0 * over + if outward { 1.8 * rate.abs() } else { 0.0 })
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct Ffb {
     rack: f32,
     steer_prev: f32,
     /// the steering rate, low-passed (getFFB with DAT_145c93be1 set)
     rate_f: f32,
-    /// the last wheel position over the lock, for the stop's rate term
+    /// the last wheel position over the lock, for the stop's rate term.
+    /// NaN until the first frame: from 0, a wheel resting past the stop
+    /// read as a ~60 /s swing and slammed it toward centre (a NaN rate
+    /// is never `outward` in soft_lock, so the rate term sits out once)
     pub lock_prev: f32,
     /// the road effects' offset (Effects::offset), added to the next step
     pub fx: f32,
+    /// the torque part of the last output, for its slew limit
+    torque_prev: f32,
 }
+
+impl Default for Ffb {
+    fn default() -> Self {
+        Ffb { rack: 0.0, steer_prev: 0.0, rate_f: 0.0, lock_prev: f32::NAN, fx: 0.0, torque_prev: 0.0 }
+    }
+}
+
+/// How fast the torque part of the force may change, full scale per second:
+/// a physics blow-up's huge-but-finite frames went out as +-100 % at once.
+/// The road effects (kerb, ABS square wave) are not limited.
+const TORQUE_SLEW: f32 = 25.0;
 
 /// What one step sends to the wheel.
 #[derive(Clone, Copy, Debug, Default)]
@@ -345,6 +365,13 @@ impl Ffb {
     /// SteerControlsData f1 and f5 (gamma 1 = linear).
     pub fn step(&mut self, s: &Settings, hub_torque: f32, steer: f32, omega_front: f32, speed_kmh: f32, ff_mult: f32, car_gamma: f32, dt: f32) -> Out {
         let dt = dt.max(1e-4);
+        // a NaN once latched `rack` (NaN x 0 = NaN) and the wheel went limp
+        // for the session: no force this step, and start over
+        if !(hub_torque.is_finite() && steer.is_finite() && omega_front.is_finite() && speed_kmh.is_finite() && dt.is_finite()) {
+            self.reset();
+            return Out::default();
+        }
+        let fx = if self.fx.is_finite() { self.fx } else { 0.0 };
         self.rack = (self.rack - hub_torque) * s.smooth + hub_torque;
         // The game's damping term with its smoothing switch (DAT_145c93be1,
         // 1 in the shipped exe): the steering rate low-passed by 0.2 a 3 ms
@@ -369,7 +396,19 @@ impl Ffb {
         let fade = (speed_kmh / 10.0).clamp(0.0, 1.0);
         // InputManager::setFF: the force x gain plus the device's road
         // effects, then the optional stages on the sum
-        let mut raw = (out * low * s.gain * s.boost + self.fx) * if s.invert { -1.0 } else { 1.0 };
+        let torque = out * low * s.gain * s.boost;
+        let torque = if torque.is_finite() {
+            let k = TORQUE_SLEW * dt;
+            self.torque_prev + (torque - self.torque_prev).clamp(-k, k)
+        } else {
+            0.0
+        };
+        if !(torque.is_finite() && self.rack.is_finite() && self.rate_f.is_finite()) {
+            self.reset();
+            return Out::default();
+        }
+        self.torque_prev = torque;
+        let mut raw = (torque + fx) * if s.invert { -1.0 } else { 1.0 };
         if s.soft_clip {
             raw = soft_clip(raw, 0.75);
         }
@@ -385,7 +424,7 @@ impl Ffb {
     }
 
     pub fn reset(&mut self) {
-        *self = Ffb::default();
+        *self = Ffb { lock_prev: self.lock_prev, ..Ffb::default() };
     }
 }
 
@@ -441,16 +480,36 @@ mod tests {
     #[test]
     fn linear_in_torque_and_ffmult() {
         let s = Settings { min_damper: 0.0, damper_gain: 0.1, ..Default::default() };
+        // settled past the torque slew limit
+        let settle = |f: &mut Ffb, kmh: f32| (0..100).map(|_| f.step(&s, 500.0, 0.0, 0.0, kmh, 2.0, 1.0, 0.003)).last().unwrap();
         let mut a = Ffb::default();
-        let o = a.step(&s, 500.0, 0.0, 0.0, 100.0, 2.0, 1.0, 0.003);
+        let o = settle(&mut a, 100.0);
         // -( -(500) x 0.9 ) ... out = 0.9 x 500 x 0.002
         assert!((o.force - 0.9).abs() < 1e-4, "{o:?}");
         // min_damper 0: no damper above 10 km/h, 0.7 x damper_gain parked
         assert!(o.damper.abs() < 1e-6);
         let mut b = Ffb::default();
-        let p = b.step(&s, 500.0, 0.0, 0.0, 0.0, 2.0, 1.0, 0.003);
+        let p = settle(&mut b, 0.0);
         assert!((p.damper - 0.07).abs() < 1e-6);
         // half the force at standstill (the low-speed fade)
         assert!((p.force - 0.45).abs() < 1e-4, "{p:?}");
+    }
+
+    /// A NaN torque gives no force and does not latch; a spike is slewed.
+    #[test]
+    fn nan_does_not_latch_and_spikes_are_slewed() {
+        let s = Settings { gain: 1.0, ..Default::default() };
+        let mut f = Ffb::default();
+        let o = f.step(&s, f32::NAN, 0.0, 0.0, 100.0, 2.0, 1.0, 0.016);
+        assert_eq!(o.force, 0.0);
+        let o = f.step(&s, 100.0, 0.0, 0.0, 100.0, 2.0, 1.0, 0.016);
+        assert!(o.force.is_finite() && o.force != 0.0, "{o:?}");
+        let mut g = Ffb::default();
+        let o = g.step(&s, 1e9, 0.0, 0.0, 100.0, 2.0, 1.0, 0.016);
+        assert!(o.force.abs() <= TORQUE_SLEW * 0.016 + 1e-6, "{o:?}");
+        let mut e = Effects::default();
+        e.step(&FxIn { speed: f32::NAN, ..Default::default() }, 0.003);
+        e.step(&FxIn { speed: 20.0, kerb: (0.3, 0.5), ..Default::default() }, 0.003);
+        assert!(e.dist.is_finite() && e.v.iter().all(|x| x.is_finite()));
     }
 }

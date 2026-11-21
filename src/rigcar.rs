@@ -675,6 +675,29 @@ impl RigCar {
                 ev.step(self, ground);
                 self.ev = Some(ev);
             }
+            // never let one bad step poison the car: back to the last good
+            // state, at rest. Before the road effects, and everything that
+            // carries a value step to step with it: the effects' distance,
+            // the rack torque sum and the links' hubs stayed NaN for good
+            // (the wheel limp, the car frozen until a pit reset)
+            if !(self.cg.is_finite() && self.v.is_finite() && self.w.is_finite() && self.q.is_finite()) {
+                (self.cg, self.q, self.c) = keep;
+                self.v = Vec3::ZERO;
+                self.w = Vec3::ZERO;
+                for c in self.c.iter_mut() {
+                    c.xv = 0.0;
+                    c.omega = 0.0;
+                }
+                self.acc_prev = Vec3::ZERO;
+                self.fx_v = Vec3::ZERO;
+                self.mz_sum = 0.0;
+                self.mz_n = 0;
+                self.mz_front = 0.0;
+                self.ffb_fx = Default::default();
+                if let Some(l) = self.links.as_mut() {
+                    l.reset(self.cg, self.q);
+                }
+            }
             // the FFB's road effects at the game's rate (fn 0x14222d4f0):
             // the strongest kerb and the most slip under a loaded tyre
             let up_g = ((self.v - self.fx_v) / DT / 9.806).dot(self.up());
@@ -695,17 +718,6 @@ impl RigCar {
                 }
             }
             self.ffb_fx.step(&fi, DT);
-            // never let one bad step poison the car: back to the last good
-            // state, at rest
-            if !(self.cg.is_finite() && self.v.is_finite() && self.w.is_finite() && self.q.is_finite()) {
-                (self.cg, self.q, self.c) = keep;
-                self.v = Vec3::ZERO;
-                self.w = Vec3::ZERO;
-                for c in self.c.iter_mut() {
-                    c.xv = 0.0;
-                    c.omega = 0.0;
-                }
-            }
         }
     }
 

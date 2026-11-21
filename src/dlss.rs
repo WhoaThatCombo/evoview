@@ -361,6 +361,7 @@ fn open_device(adapter: &wgpu::Adapter, desc: &wgpu::DeviceDescriptor) -> Option
                 }
             }
             let mut exts = a.required_device_extensions(desc.required_features);
+            let wgpu_bda = exts.iter().any(|e| e.to_bytes().ends_with(b"buffer_device_address"));
             let raw_inst = a.shared_instance().raw_instance();
             let avail = raw_inst.enumerate_device_extension_properties(a.raw_physical_device()).ok()?;
             for e in &dev_exts {
@@ -378,12 +379,19 @@ fn open_device(adapter: &wgpu::Adapter, desc: &wgpu::DeviceDescriptor) -> Option
             let prio = [1.0f32];
             let fam = [vk::DeviceQueueCreateInfo::default().queue_family_index(family_index).queue_priorities(&prio)];
             let names: Vec<*const std::ffi::c_char> = exts.iter().map(|s| s.as_ptr()).collect();
-            // NGX may ask for buffer device address; its feature bit has to be on
+            // NGX may ask for buffer device address; its feature bit has to be
+            // on, in the struct that matches the extension (the core / KHR
+            // struct with VK_EXT_buffer_device_address is invalid), and not
+            // twice when wgpu enabled it itself
             let mut bda = vk::PhysicalDeviceBufferDeviceAddressFeatures::default().buffer_device_address(true);
-            let want_bda = exts.iter().any(|e| e.to_bytes().ends_with(b"buffer_device_address"));
+            let mut bda_ext = vk::PhysicalDeviceBufferDeviceAddressFeaturesEXT::default().buffer_device_address(true);
+            let named = |n: &[u8]| exts.iter().any(|e| e.to_bytes() == n);
+            let (want_ext, want_khr) = (named(b"VK_EXT_buffer_device_address"), named(b"VK_KHR_buffer_device_address") && !wgpu_bda);
             let mut info = feats.add_to_device_create(
                 vk::DeviceCreateInfo::default().queue_create_infos(&fam).enabled_extension_names(&names));
-            if want_bda {
+            if want_ext && !wgpu_bda {
+                info = info.push_next(&mut bda_ext);
+            } else if want_khr {
                 info = info.push_next(&mut bda);
             }
             let raw = match raw_inst.create_device(a.raw_physical_device(), &info, None) {
@@ -415,6 +423,11 @@ pub struct Dlss {
         params: *mut ffi::Param,
         feature: Option<Feature>,
         raw_device: ash::vk::Device,
+    /// for vkDeviceWaitIdle in Drop (no wgpu::Device to poll there)
+    ash_dev: ash::Device,
+    /// the feature-path list handed to Init: kept for NGX's life rather
+    /// than freed when `new` returned (a deferred DLL load would read it)
+    _paths: (Vec<Vec<u16>>, Vec<*const u16>, Vec<u16>),
     /// DLSS's output (screen size, storage)
     pub out: wgpu::TextureView,
     out_tex: wgpu::Texture,
@@ -457,9 +470,10 @@ impl Dlss {
             let handles = device.as_hal::<Vulkan, _, _>(|d| d.map(|d| {
                 let inst = d.shared_instance();
                 (inst.raw_instance().handle(), d.raw_physical_device(), d.raw_device().handle(),
-                 inst.entry().static_fn().get_instance_proc_addr, inst.raw_instance().fp_v1_0().get_device_proc_addr)
+                 inst.entry().static_fn().get_instance_proc_addr, inst.raw_instance().fp_v1_0().get_device_proc_addr,
+                 d.raw_device().clone())
             })).flatten().ok_or("not a Vulkan device")?;
-            let (inst, pd, dev, gipa, gdpa) = handles;
+            let (inst, pd, dev, gipa, gdpa, ash_dev) = handles;
             let r = ffi::NVSDK_NGX_VULKAN_Init_with_ProjectID(
                 c"8a9c0e2b-6f1d-4c3e-9b7a-0e7e01e7f00d".as_ptr(), 0, c"evoview".as_ptr(), data_w.as_ptr(),
                 inst, pd, dev, Some(gipa), Some(gdpa), &info, ffi::VERSION_API);
@@ -486,7 +500,7 @@ impl Dlss {
             let _ = color_format;
             let (out_tex, out) = Self::output(device, w, h);
             let (tr_pipe, tr_bgl) = Self::transition_pipe(device);
-            Ok(Dlss { params, feature: None, raw_device: dev, out, out_tex, tr_pipe, tr_bgl, size: (w, h), quality: quality().0, reset: true })
+            Ok(Dlss { params, feature: None, raw_device: dev, ash_dev, _paths: (dir_w, dir_p, data_w), out, out_tex, tr_pipe, tr_bgl, size: (w, h), quality: quality().0, reset: true })
         }
     }
 
@@ -621,15 +635,19 @@ impl Dlss {
             let size = self.size;
             let quality = self.quality;
             let need_new = self.feature.as_ref().map_or(true, |f| f.rsize != rsize || f.size != size);
-            let old = if need_new { self.feature.take() } else { None };
+            // ⚠ the old feature's images may still be in use by the frame
+            // in flight: wait for the GPU before NGX destroys them (a resize
+            // is rare, the stall invisible). Released here, not in the
+            // closure, so an error there cannot leak it.
+            if let Some(f) = need_new.then(|| self.feature.take()).flatten() {
+                device.poll(wgpu::Maintain::Wait);
+                ffi::NVSDK_NGX_VULKAN_ReleaseFeature(f.handle);
+            }
             let reset = std::mem::replace(&mut self.reset, false) || need_new;
             let out = enc.as_hal_mut::<Vulkan, _, _>(|e| -> Result<Option<Feature>, String> {
                 let cmd = e.ok_or("no Vulkan encoder")?.raw_handle();
                 let mut created = None;
                 if need_new {
-                    if let Some(f) = old {
-                        ffi::NVSDK_NGX_VULKAN_ReleaseFeature(f.handle);
-                    }
                     ffi::NVSDK_NGX_Parameter_SetUI(p, c"CreationNodeMask".as_ptr(), 1);
                     ffi::NVSDK_NGX_Parameter_SetUI(p, c"VisibilityNodeMask".as_ptr(), 1);
                     ffi::NVSDK_NGX_Parameter_SetUI(p, c"Width".as_ptr(), rsize.0);
@@ -686,6 +704,11 @@ impl Dlss {
                 ffi::NVSDK_NGX_Parameter_SetF(p, c"DLSS.Exposure.Scale".as_ptr(), 1.0);
                 ffi::NVSDK_NGX_Parameter_SetVoidPointer(p, c"ExposureTexture".as_ptr(), std::ptr::null_mut());
                 let r = ffi::NVSDK_NGX_VULKAN_EvaluateFeature_C(cmd, handle, p, std::ptr::null());
+                // the four point at this call's locals: not left dangling in
+                // the long-lived parameter block (CreateFeature1 reads it)
+                for n in [c"Color", c"Output", c"Depth", c"MotionVectors"] {
+                    ffi::NVSDK_NGX_Parameter_SetVoidPointer(p, n.as_ptr(), std::ptr::null_mut());
+                }
                 if !ffi::ok(r) {
                     return Err(format!("EvaluateFeature failed {r:#x}"));
                 }
@@ -699,9 +722,19 @@ impl Dlss {
 impl Dlss {
     /// Release the feature and NGX once the GPU is idle; before the device
     /// is dropped (left to the process exit, the driver crashed on the way out).
-    pub fn shutdown(mut self, device: &wgpu::Device) {
+    pub fn shutdown(self, device: &wgpu::Device) {
         device.poll(wgpu::Maintain::Wait);
+        drop(self);
+    }
+}
+
+/// Also when dropped without `shutdown` (DLSS turned off after an error,
+/// a panic unwinding the frame loop): left to the process exit, the driver
+/// crashed on the way out.
+impl Drop for Dlss {
+    fn drop(&mut self) {
         unsafe {
+            let _ = self.ash_dev.device_wait_idle();
             if let Some(f) = self.feature.take() {
                 ffi::NVSDK_NGX_VULKAN_ReleaseFeature(f.handle);
             }

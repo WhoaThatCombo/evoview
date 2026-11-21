@@ -27,10 +27,16 @@ pub fn var_os<K: AsRef<OsStr>>(key: K) -> Option<OsString> {
             return v.clone();
         }
     }
-    let v = std::env::var_os(k);
-    if let Ok(mut c) = CACHE.write() {
-        c.get_or_insert_with(HashMap::new).insert(k.to_os_string(), v.clone());
+    // ⚠ the OS read under the write lock: read unlocked, a `set_var` on
+    // another thread could land between the read and the insert, and the
+    // stale value was then cached for good
+    let Ok(mut c) = CACHE.write() else { return std::env::var_os(k) };
+    let m = c.get_or_insert_with(HashMap::new);
+    if let Some(v) = m.get(k) {
+        return v.clone();
     }
+    let v = std::env::var_os(k);
+    m.insert(k.to_os_string(), v.clone());
     v
 }
 
@@ -42,24 +48,26 @@ pub fn var<K: AsRef<OsStr>>(key: K) -> Result<String, VarError> {
     }
 }
 
-fn forget(k: &OsStr) {
-    if let Ok(mut c) = CACHE.write() {
-        if let Some(m) = c.as_mut() {
-            m.remove(k);
-        }
+/// The OS change and the cache entry under one lock, the entry set to the
+/// new value (not just dropped: a reader that raced the change re-cached
+/// the old one).
+fn store(k: &OsStr, v: Option<&OsStr>) {
+    let mut c = CACHE.write().unwrap_or_else(|p| p.into_inner());
+    match v {
+        Some(v) => std::env::set_var(k, v),
+        None => std::env::remove_var(k),
     }
+    c.get_or_insert_with(HashMap::new).insert(k.to_os_string(), v.map(OsStr::to_os_string));
 }
 
 /// `std::env::set_var`, keeping the cache true.
 pub fn set_var<K: AsRef<OsStr>, V: AsRef<OsStr>>(key: K, value: V) {
-    std::env::set_var(key.as_ref(), value);
-    forget(key.as_ref());
+    store(key.as_ref(), Some(value.as_ref()));
 }
 
 /// `std::env::remove_var`, keeping the cache true.
 pub fn remove_var<K: AsRef<OsStr>>(key: K) {
-    std::env::remove_var(key.as_ref());
-    forget(key.as_ref());
+    store(key.as_ref(), None);
 }
 
 #[cfg(test)]

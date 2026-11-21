@@ -649,7 +649,9 @@ impl Replay {
             let v = u32::from_le_bytes(d[o..o + 4].try_into().unwrap()) as usize;
             let (len, body) = if v == 123 {
                 let l = u32::from_le_bytes(d[o + 4..o + 8].try_into().unwrap()) as usize;
-                if o + 8 + l > d.len() || !TAGS.contains(&d[o + 8]) {
+                // `get`: a truncated file ending in a zero-length 123 block
+                // put o + 8 at the end, and d[o + 8] panicked
+                if o + 8 + l > d.len() || !d.get(o + 8).map_or(false, |t| TAGS.contains(t)) {
                     return o;
                 }
                 (l, o + 8)
@@ -963,4 +965,23 @@ fn car_path(buf: &[u8], from: usize, to: usize) -> Option<String> {
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+#[cfg(test)]
+mod skip_metadata_tests {
+    use super::Replay;
+
+    #[test]
+    fn truncated_zero_length_block_does_not_panic() {
+        let r = Replay {
+            data: vec![123, 0, 0, 0, 0, 0, 0, 0],
+            explicit: false,
+            version: 0,
+            duration: 0.0,
+            model: String::new(),
+            track: None,
+            cars: Vec::new(),
+        };
+        assert_eq!(r.skip_metadata(0), 0);
+    }
 }

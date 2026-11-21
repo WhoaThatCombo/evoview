@@ -1838,6 +1838,12 @@ fn view_ray(ndc: vec2<f32>) -> vec3<f32> {
     let r0 = vec3<f32>(m[0].x, m[1].x, m[2].x);
     let r1 = vec3<f32>(m[0].y, m[1].y, m[2].y);
     let r3 = vec3<f32>(m[0].w, m[1].w, m[2].w);
+    // orthographic (the shadow passes' light matrix): r3 is zero, so the
+    // sign test below never fires and cross(r0, r1) - the BACKWARD axis -
+    // came back unflipped (camera-facing cards cast their mirror image)
+    if (dot(r3, r3) < 1e-12) {
+        return -normalize(cross(r0, r1));
+    }
     var d = cross(r0 - ndc.x * r3, r1 - ndc.y * r3);
     // in front of the camera: positive clip w
     if (dot(d, r3) < 0.0) {

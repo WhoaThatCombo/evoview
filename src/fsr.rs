@@ -231,6 +231,8 @@ pub struct Fsr {
     /// (render size, output size) the context was made for
     made: Option<((u32, u32), (u32, u32))>,
     dc: (ash::vk::Device, ash::vk::PhysicalDevice, ash::vk::PFN_vkGetDeviceProcAddr),
+    /// for vkDeviceWaitIdle in Drop (no wgpu::Device to poll there)
+    ash_dev: ash::Device,
     /// FSR's output (screen size, storage)
     pub out: wgpu::TextureView,
     out_tex: wgpu::Texture,
@@ -256,10 +258,11 @@ impl Fsr {
             return Err("needs single-sample depth (EVOVIEW_TRACK_MSAA=1)".into());
         }
         let api = load()?;
-        let dc = unsafe {
+        let (dc, ash_dev) = unsafe {
             use wgpu::hal::api::Vulkan;
             device.as_hal::<Vulkan, _, _>(|d| d.map(|d| {
-                (d.raw_device().handle(), d.raw_physical_device(), d.shared_instance().raw_instance().fp_v1_0().get_device_proc_addr)
+                ((d.raw_device().handle(), d.raw_physical_device(), d.shared_instance().raw_instance().fp_v1_0().get_device_proc_addr),
+                 d.raw_device().clone())
             })).flatten().ok_or("not a Vulkan device")?
         };
         // the providers on offer (FSR 4 only on the AMD GPUs it supports)
@@ -291,7 +294,7 @@ impl Fsr {
         let (out_tex, out) = Self::output(device, w, h);
         let (tr_pipe, tr_bgl) = Self::transition_pipe(device);
         let (z_pipe, z_bgl) = Self::depth_pipe(device);
-        Ok(Fsr { api, ctx: std::ptr::null_mut(), made: None, dc, out, out_tex, zcopy: None, z_pipe, z_bgl, tr_pipe, tr_bgl,
+        Ok(Fsr { api, ctx: std::ptr::null_mut(), made: None, dc, ash_dev, out, out_tex, zcopy: None, z_pipe, z_bgl, tr_pipe, tr_bgl,
                  size: (w, h), reset: true, version })
     }
 
@@ -416,6 +419,11 @@ impl Fsr {
         let rsize = (color.0.width(), color.0.height());
         let hdr = color.0.format() == wgpu::TextureFormat::Rgba16Float;
         if self.made != Some((rsize, self.size)) {
+            // ⚠ the old context's resources may still be in use by the frame
+            // in flight: wait for the GPU first (a resize is rare)
+            if !self.ctx.is_null() {
+                device.poll(wgpu::Maintain::Wait);
+            }
             self.destroy_ctx();
             let (dev, phys, gdpa) = self.dc;
             let mut backend = CreateBackendVk { header: Header { ty: CREATE_BACKEND_VK, next: std::ptr::null_mut() }, device: dev, phys, gdpa };
@@ -567,5 +575,16 @@ impl Fsr {
     pub fn shutdown(mut self, device: &wgpu::Device) {
         device.poll(wgpu::Maintain::Wait);
         self.destroy_ctx();
+    }
+}
+
+/// Also when dropped without `shutdown` (a panic unwinding the frame loop):
+/// the context goes before the loader DLL (`api`) unloads.
+impl Drop for Fsr {
+    fn drop(&mut self) {
+        if !self.ctx.is_null() {
+            let _ = unsafe { self.ash_dev.device_wait_idle() };
+            self.destroy_ctx();
+        }
     }
 }

@@ -22,6 +22,57 @@ use std::net::{TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// The largest CarFinalStateData taken from another car: a stock one is a
+/// few KB; a peer's is parsed on the main thread at join (load.rs
+/// netcar_visual) and kept for the session.
+const MAX_FINAL_STATE: usize = 256 * 1024;
+/// The largest TCP frame accepted: a declared 4 GiB grew `buf` until it all
+/// arrived.
+const MAX_FRAME: usize = 8 << 20;
+/// Car numbers tracked beyond the ones the server listed or has a netcar
+/// for: a peer cycling 65 536 numbers built 150 MB of jitter buffers and a
+/// netcar request per number.
+const EXTRA_NUMBERS: usize = 128;
+/// Late joiners' cars loaded per session, and the gap between two loads:
+/// nothing is ever unloaded, so a stream of tags or of joins grew the
+/// scene without end.
+const MAX_LATE: usize = 32;
+const LATE_GAP: Duration = Duration::from_secs(2);
+
+/// Peer / server text for the console and the HUD: no control characters
+/// (escape sequences), at most `n` characters.
+fn clean(s: &str, n: usize) -> String {
+    s.chars().filter(|c| !c.is_control()).take(n).collect()
+}
+
+/// A server-supplied track / layout id used as a folder name or an env var:
+/// `..`, `c:` or a NUL in one read outside the tracks or panicked set_var.
+pub fn ident_ok(s: &str) -> bool {
+    (1..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+/// One TCP frame at the head of `buf`: (header length, body length), None
+/// until it is all there.
+fn frame_len(buf: &[u8]) -> Result<Option<(usize, usize)>, String> {
+    if buf.len() < 2 {
+        return Ok(None);
+    }
+    let (h, n) = match u16::from_le_bytes([buf[0], buf[1]]) {
+        0xffff if buf.len() >= 6 => {
+            // the u32 is the body length + 2: a declared 0 or 1 wrapped
+            // `- 2` and sliced buf[6..4]
+            let l = u32::from_le_bytes([buf[2], buf[3], buf[4], buf[5]]) as usize;
+            (6, l.checked_sub(2).ok_or("bad frame length")?)
+        }
+        0xffff => return Ok(None),
+        n => (2, n as usize),
+    };
+    if n > MAX_FRAME {
+        return Err(format!("frame too large ({n} bytes)"));
+    }
+    Ok((buf.len() >= h + n).then_some((h, n)))
+}
+
 /// One car's state as it goes over the wire (world space, game conventions).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CarState {
@@ -196,6 +247,34 @@ struct Shared {
     /// loaded for (late joiners)
     loaded: std::collections::HashSet<u16>,
     loading: std::collections::HashSet<u16>,
+    /// roster numbers that came from another evoview's tag (a netcar for
+    /// the number replaces them)
+    tagged: std::collections::HashSet<u16>,
+    /// late joiners' cars handed out to load, and when the last one was
+    late: (usize, Option<Instant>),
+}
+
+impl Shared {
+    /// A number's roster entry from a netcar or a tag: a number taken over
+    /// by someone else (a new player, another car) is loaded afresh - it
+    /// wore the departed player's car.
+    fn set_car(&mut self, n: u16, car: String, who: String, fs: Vec<u8>) {
+        let changed = self.roster.get(&n).map_or(false, |r| !r.0.eq_ignore_ascii_case(&car))
+            || self.states.get(&n).map_or(false, |s| *s != fs);
+        if changed {
+            self.loaded.remove(&n);
+            self.loading.remove(&n);
+        }
+        self.roster.insert(n, (car, who));
+        self.states.insert(n, fs);
+    }
+
+    /// Whether packets for number `n` are kept: the ones the server listed
+    /// or has a netcar for, plus a few more.
+    fn tracks(&self, n: u16) -> bool {
+        self.remotes.contains_key(&n) || self.roster.contains_key(&n) || self.listed.contains(&n)
+            || self.remotes.len() < EXTRA_NUMBERS
+    }
 }
 
 pub struct Mp {
@@ -242,14 +321,21 @@ pub fn parse_car(p: &[u8]) -> Option<(u16, CarState)> {
     let slot = u16::from_le_bytes([p[56], p[57]]);
     let wb = p[45] as f32 - 100.0;
     let steer = (u16::from_le_bytes([p[49], p[50]]) as f32 - 32767.0) / 32767.0;
+    let (pos, ypr, vel) = (v(9), v(21), v(33));
+    // a peer's bytes: a NaN yaw or a 1e30 velocity went into the pose, the
+    // follow camera and FMOD's doppler (a black frame, garbage pitch)
+    if !(pos.is_finite() && ypr.is_finite() && vel.is_finite())
+        || pos.abs().max_element() > 1e5 || ypr.abs().max_element() > 100.0 || vel.length() > 200.0 {
+        return None;
+    }
     Some((slot, CarState {
-        pos: v(9),
-        ypr: v(21),
-        vel: v(33),
+        pos,
+        ypr,
+        vel,
         wheel: wb.signum() * (10f32.powf(wb.abs() / 20.0) - 1.0),
         steer,
         rpm: u16::from_le_bytes([p[51], p[52]]),
-        gear: p[53],
+        gear: p[53].min(12),
         throttle: p[54] as f32 / 255.0,
         brake: p[55] as f32 / 255.0,
     }))
@@ -373,9 +459,15 @@ impl Mp {
         let sh = Arc::new(Mutex::new(Shared { status: format!("connecting to {addr}"), me_name: name.clone(), ..Default::default() }));
         let s2 = sh.clone();
         std::thread::Builder::new().name("mp".into()).spawn(move || {
-            if let Err(e) = run(&addr, &user, &name, &fs, &mech, &s2) {
+            // a panic here (a bad packet) left the status "driving": no red
+            // banner, the other cars just vanished
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&addr, &user, &name, &fs, &mech, &s2)))
+                .unwrap_or_else(|_| Err("the network thread crashed".into()));
+            if let Err(e) = r {
                 eprintln!("mp: {e}");
-                s2.lock().unwrap().status = format!("disconnected: {e}");
+                // a panic with the lock held poisoned it for the frame loop too
+                s2.clear_poison();
+                s2.lock().unwrap_or_else(|p| p.into_inner()).status = format!("disconnected: {e}");
             }
         }).ok();
         Mp { sh }
@@ -478,16 +570,28 @@ impl Mp {
             .collect();
         let mut out = Vec::new();
         for n in fresh {
-            g.loading.insert(n);
             let car = g.roster.get(&n).map(|r| r.0.clone()).unwrap_or_default();
             if car.is_empty() || car.eq_ignore_ascii_case(&g.spare) {
+                g.loading.insert(n);
                 continue;
             }
-            println!("mp: loading #{n}'s car ({car})");
+            // one at a time, a few seconds apart, and a session's worth at
+            // most (the rest borrow a spare slot); the others stay fresh
+            if g.late.0 >= MAX_LATE || g.late.1.map_or(false, |t| t.elapsed() < LATE_GAP) {
+                continue;
+            }
+            g.late = (g.late.0 + 1, Some(Instant::now()));
+            g.loading.insert(n);
             out.push((n, car, g.states.get(&n).cloned()));
         }
         if crate::envc::var_os("EVOVIEW_MP_LOG").is_some() && !out.is_empty() {
             println!("mp: {} car(s) to load; roster {}, heard {}, loaded {}", out.len(), g.roster.len(), g.remotes.len(), g.loaded.len());
+        }
+        // printed unlocked: a console selection (QuickEdit) blocks stdout,
+        // and with the lock held the mp thread and the next frame with it
+        drop(g);
+        for (n, car, _) in &out {
+            println!("mp: loading #{n}'s car ({car})");
         }
         out
     }
@@ -504,6 +608,15 @@ impl Mp {
         g.ai.push((model.to_string(), Some(n)));
         g.loaded.insert(n);
         g.loading.remove(&n);
+    }
+
+    /// A late joiner's car could not be loaded (content missing, a broken
+    /// mod): not asked for again - it borrows a spare slot. A new car on the
+    /// same number clears this (number reuse resets `loaded`).
+    pub fn load_failed(&self, n: u16) {
+        let mut g = self.sh.lock().unwrap();
+        g.loading.remove(&n);
+        g.loaded.insert(n);
     }
 
     /// Per opponent index: the other car drawn there. A car not placed yet
@@ -658,7 +771,12 @@ fn session_clock(d: &[u8]) -> Option<(f64, f64, (i32, u32, u32))> {
             t[n as usize - 1] = x as i64;
         }
     });
-    Some(((t[3] * 60 + t[4]) as f64 + t[5] as f64 / 60.0, mult, (t[0] as i32, t[1].max(1) as u32, t[2].max(1) as u32)))
+    // the server's numbers, unchecked: wrapped hours, month 4e9 or a NaN /
+    // 1e9 multiplier reached sky::set (and re-ran sky::activate every frame)
+    let c = |i: usize, lo: i64, hi: i64| t[i].clamp(lo, hi);
+    let mult = if mult.is_finite() { mult.clamp(0.0, 120.0) } else { 1.0 };
+    Some(((c(3, 0, 23) * 60 + c(4, 0, 59)) as f64 + c(5, 0, 59) as f64 / 60.0, mult,
+          (c(0, 0, 9999) as i32, c(1, 1, 12) as u32, c(2, 1, 31) as u32)))
 }
 
 /// The session's track: 5 { 1 season { 10 { 2 { 4 { 2 session { 21 scene {
@@ -679,7 +797,8 @@ fn session_track(d: &[u8]) -> Option<String> {
         r = sub(r, want)?;
     }
     let p = crate::proto::text(d, r).replace(char::from(92), "/");
-    p.trim_end_matches('/').rsplit('/').next().map(|s| s.to_lowercase()).filter(|s| !s.is_empty())
+    // used as a folder name (laps, loose tracks): `..` read the parent dir
+    p.trim_end_matches('/').rsplit('/').next().map(|s| s.to_lowercase()).filter(|s| ident_ok(s))
 }
 
 /// Who is signed in to Steam here (config/loginusers.vdf, the account Steam
@@ -762,7 +881,9 @@ fn netcar(d: &[u8]) -> Option<(u16, String, String, Vec<u8>)> {
             if let (5, Some((a, b))) = (n, v.range()) {
                 fields(d, a, b, |n, v| {
                     if let (2, Some((a, b))) = (n, v.range()) {
-                        fs = d[a..b].to_vec();
+                        if b - a <= MAX_FINAL_STATE {
+                            fs = d[a..b].to_vec();
+                        }
                         fields(d, a, b, |n, v| {
                             if let (1, Some(r)) = (n, v.range()) {
                                 let p = text(d, r).replace(char::from(92), "/");
@@ -785,9 +906,14 @@ fn netcar(d: &[u8]) -> Option<(u16, String, String, Vec<u8>)> {
         _ => {}
     });
     let name = if !nick.is_empty() { nick } else { format!("{first} {last}").trim().to_string() };
+    // no spawn data: not a car (it replaced car 0's entry with nothing and
+    // parked number 0 in `loading` for good)
+    if car.is_empty() {
+        return None;
+    }
     // ⚠ proto3 leaves a 0 out: car number 0 (the first car on a server)
     // has no field 7 at all - reading that as 'no number' hid that car
-    Some((num.unwrap_or(0), car, name, fs))
+    Some((num.unwrap_or(0), car, clean(&name, 32), fs))
 }
 
 /// The field of UpdateGameCarState another evoview's car rides in (see run).
@@ -809,8 +935,9 @@ fn evoview_tag(d: &[u8]) -> Option<(u16, String, String, Vec<u8>)> {
     fields(d, a, b, |n, v| match (n, v) {
         (1, Val::Bytes(x, y)) => ok = &d[x..y] == b"evoview",
         (2, Val::Varint(x)) => num = x as u16,
-        (3, Val::Bytes(x, y)) => fs = d[x..y].to_vec(),
-        (4, Val::Bytes(x, y)) => who = text(d, (x, y)),
+        // a peer's bytes, parsed on the main thread at join
+        (3, Val::Bytes(x, y)) if y - x <= MAX_FINAL_STATE => fs = d[x..y].to_vec(),
+        (4, Val::Bytes(x, y)) => who = clean(&text(d, (x, y)), 32),
         _ => {}
     });
     if !ok || fs.is_empty() {
@@ -827,6 +954,8 @@ fn evoview_tag(d: &[u8]) -> Option<(u16, String, String, Vec<u8>)> {
             }
         }
     });
+    // a peer's folder name, printed and drawn: no control characters
+    let car = clean(&car, 64);
     (!car.is_empty()).then_some((num, car, who, fs))
 }
 
@@ -891,6 +1020,7 @@ fn run(addr: &str, user: &str, name: &str, fs: &[u8], mech: &str, sh: &Mutex<Sha
     let mut last_state = Instant::now();
     let mut last_send = Instant::now();
     let mut seq = 0u8;
+    let mut ask = (64.0f64, Instant::now());
     loop {
         // TCP in
         match tcp.read(&mut rd) {
@@ -906,15 +1036,7 @@ fn run(addr: &str, user: &str, name: &str, fs: &[u8], mech: &str, sh: &Mutex<Sha
             }
             Err(e) => return Err(e.to_string()),
         }
-        while buf.len() >= 2 {
-            let (n, h) = match u16::from_le_bytes([buf[0], buf[1]]) {
-                0xffff if buf.len() >= 6 => (u32::from_le_bytes([buf[2], buf[3], buf[4], buf[5]]) as usize - 2, 6),
-                0xffff => break,
-                n => (n as usize, 2),
-            };
-            if buf.len() < h + n {
-                break;
-            }
+        while let Some((h, n)) = frame_len(&buf)? {
             let p: Vec<u8> = buf[h..h + n].to_vec();
             buf.drain(..h + n);
             if p.len() < 3 || u16::from_le_bytes([p[0], p[1]]) != 2 {
@@ -1021,8 +1143,11 @@ fn run(addr: &str, user: &str, name: &str, fs: &[u8], mech: &str, sh: &Mutex<Sha
                 }
                 "ServerWorldTime" => {
                     crate::proto::fields(d, 0, d.len(), |n, v| {
+                        // a NaN / inf time went into every packet stamp and the sky clock
                         if let (1, crate::proto::Val::F64(t)) = (n, v) {
-                            server_time = Some((t, Instant::now()));
+                            if t.is_finite() {
+                                server_time = Some((t, Instant::now()));
+                            }
                         }
                     });
                     sh.lock().unwrap().world = server_time;
@@ -1030,7 +1155,9 @@ fn run(addr: &str, user: &str, name: &str, fs: &[u8], mech: &str, sh: &Mutex<Sha
                 "ServerGameModeTime" => {
                     crate::proto::fields(d, 0, d.len(), |n, v| {
                         if let (1, crate::proto::Val::F64(t)) = (n, v) {
-                            sh.lock().unwrap().mode_start = t;
+                            if t.is_finite() {
+                                sh.lock().unwrap().mode_start = t;
+                            }
                         }
                     });
                 }
@@ -1045,6 +1172,9 @@ fn run(addr: &str, user: &str, name: &str, fs: &[u8], mech: &str, sh: &Mutex<Sha
                         (4, Val::Bytes(a, b)) => msg = text(d, (a, b)),
                         _ => {}
                     });
+                    // laid out glyph by glyph every frame for 20 s, and printed
+                    // raw (escape sequences) to the console
+                    let (who, msg) = (clean(&who, 32), clean(&msg, 200));
                     println!("chat: {}{msg}", if who.is_empty() { String::new() } else { format!("{who}: ") });
                     let mut g = sh.lock().unwrap();
                     g.chat.push_back((Instant::now(), who, msg, kind));
@@ -1056,10 +1186,20 @@ fn run(addr: &str, user: &str, name: &str, fs: &[u8], mech: &str, sh: &Mutex<Sha
                 "UpdateGameCarState" => {
                     if let Some((n, car, who, fs)) = evoview_tag(d) {
                         let mut g = sh.lock().unwrap();
-                        if n != g.slot && !g.roster.contains_key(&n) {
-                            println!("mp: car {n}: {car} ({who}, evoview)");
-                            g.roster.insert(n, (car, who));
-                            g.states.insert(n, fs);
+                        // a peer's claim: only for a number the server listed or
+                        // that is on the air, never over a game car's netcar (a
+                        // tag could name and model other players' cars)
+                        let netcar = g.roster.contains_key(&n) && !g.tagged.contains(&n);
+                        let known = (g.listed.contains(&n) || g.remotes.contains_key(&n))
+                            && (g.tagged.contains(&n) || g.tagged.len() < 2 * EXTRA_NUMBERS);
+                        let same = g.roster.get(&n).map_or(false, |r| r.0 == car && r.1 == who)
+                            && g.states.get(&n) == Some(&fs);
+                        if n != g.slot && !netcar && known && !same {
+                            let say = format!("mp: car {n}: {car} ({who}, evoview)");
+                            g.tagged.insert(n);
+                            g.set_car(n, car, who, fs);
+                            drop(g);
+                            println!("{say}");
                         }
                     }
                 }
@@ -1072,8 +1212,8 @@ fn run(addr: &str, user: &str, name: &str, fs: &[u8], mech: &str, sh: &Mutex<Sha
                             println!("mp: car {n}: {car} ({who})");
                         }
                         let mut g = sh.lock().unwrap();
-                        g.roster.insert(n, (car, who));
-                        g.states.insert(n, fs);
+                        g.tagged.remove(&n);
+                        g.set_car(n, car, who, fs);
                     }
                 }
                 // the server (re)numbers a car: ours -> our packets' slot
@@ -1103,6 +1243,13 @@ fn run(addr: &str, user: &str, name: &str, fs: &[u8], mech: &str, sh: &Mutex<Sha
                 }
             }
         }
+        // netcar requests (0xB): a budget for all numbers together (16 a
+        // second, 64 at once) - a flood of numbers fired one per number
+        let ask_ok = |ask: &mut (f64, Instant)| {
+            ask.0 = (ask.0 + ask.1.elapsed().as_secs_f64() * 16.0).min(64.0);
+            ask.1 = Instant::now();
+            (ask.0 >= 1.0).then(|| ask.0 -= 1.0).is_some()
+        };
         // UDP in
         let mut ub = [0u8; 2048];
         while let Ok(n) = udp.recv(&mut ub) {
@@ -1120,7 +1267,7 @@ fn run(addr: &str, user: &str, name: &str, fs: &[u8], mech: &str, sh: &Mutex<Sha
             }
             if let Some((slot, st)) = parse_car(&ub[..n]) {
                 let mut g = sh.lock().unwrap();
-                if slot != g.slot {
+                if slot != g.slot && g.tracks(slot) {
                     g.remotes.insert(slot, Remote { state: st, at: Instant::now() });
                     let ms = i32::from_le_bytes([ub[3], ub[4], ub[5], ub[6]]);
                     let local = g.epoch.get_or_insert_with(Instant::now).elapsed().as_secs_f64();
@@ -1130,7 +1277,8 @@ fn run(addr: &str, user: &str, name: &str, fs: &[u8], mech: &str, sh: &Mutex<Sha
                     // the server answers only clients driving a car, and only for
                     // players' cars - a local server's vAI car never answers)
                     if g.spawn.is_some() && !g.roster.contains_key(&slot)
-                        && g.asked.get(&slot).map_or(true, |t| t.elapsed() > Duration::from_secs(2)) {
+                        && g.asked.get(&slot).map_or(true, |t| t.elapsed() > Duration::from_secs(2))
+                        && ask_ok(&mut ask) {
                         g.asked.insert(slot, Instant::now());
                         let mut q = 0xbu16.to_le_bytes().to_vec();
                         q.extend_from_slice(&(slot as u32).to_le_bytes());
@@ -1142,12 +1290,18 @@ fn run(addr: &str, user: &str, name: &str, fs: &[u8], mech: &str, sh: &Mutex<Sha
         // the session's cars we have no netcar for: ask (2 s apart each)
         {
             let mut g = sh.lock().unwrap();
+            if g.asked.len() > 4 * EXTRA_NUMBERS {
+                g.asked.retain(|_, t| t.elapsed() < Duration::from_secs(10));
+            }
             if g.spawn.is_some() {
                 let want: Vec<u16> = g.listed.iter().copied()
                     .filter(|n| *n != g.slot && !g.roster.contains_key(n)
                         && g.asked.get(n).map_or(true, |t| t.elapsed() > Duration::from_secs(2)))
                     .collect();
                 for n in want {
+                    if !ask_ok(&mut ask) {
+                        break;
+                    }
                     g.asked.insert(n, Instant::now());
                     let mut q = 0xbu16.to_le_bytes().to_vec();
                     q.extend_from_slice(&(n as u32).to_le_bytes());
@@ -1197,7 +1351,9 @@ fn run(addr: &str, user: &str, name: &str, fs: &[u8], mech: &str, sh: &Mutex<Sha
             if let (Some(me), Some((t, at))) = (me, server_time) {
                 if g.spawn.is_some() {
                     seq = seq.wrapping_add(1);
-                    let ms = ((t + at.elapsed().as_secs_f64()) * 1000.0) as i32;
+                    // wraps (as the stamp is read back) rather than sticking at
+                    // i32::MAX once the server's clock passes 24.8 days
+                    let ms = ((t + at.elapsed().as_secs_f64()) * 1000.0) as i64 as i32;
                     udp.send(&car_packet(seq, ms, g.slot, &me)).ok();
                 }
             }
@@ -1220,6 +1376,65 @@ mod tests {
         assert_eq!(r.rpm, 5000);
         assert!((r.steer - 0.25).abs() < 1e-3);
         assert!((r.wheel - 88.0).abs() / 88.0 < 0.15);
+    }
+
+    #[test]
+    fn frame_lengths() {
+        // short and big frames, whole and partial
+        assert_eq!(frame_len(&[3, 0, 1, 2, 3]), Ok(Some((2, 3))));
+        assert_eq!(frame_len(&[3, 0, 1]), Ok(None));
+        assert_eq!(frame_len(&[0xff, 0xff, 5]), Ok(None));
+        let mut b = tcp_frame(&vec![7u8; 0x1_0000]);
+        assert_eq!(frame_len(&b), Ok(Some((6, 0x1_0000))));
+        b.truncate(100);
+        assert_eq!(frame_len(&b), Ok(None));
+        // a declared big length of 0 or 1 wrapped `- 2`; 4 GiB grew the buffer
+        assert!(frame_len(&[0xff, 0xff, 0, 0, 0, 0]).is_err());
+        assert!(frame_len(&[0xff, 0xff, 1, 0, 0, 0]).is_err());
+        assert!(frame_len(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff]).is_err());
+        assert_eq!(frame_len(&[0xff, 0xff, 2, 0, 0, 0]), Ok(Some((6, 0))));
+    }
+
+    #[test]
+    fn bad_remote_state_is_dropped() {
+        let ok = CarState { pos: Vec3::new(1.0, 2.0, 3.0), vel: Vec3::new(0.0, 0.0, 30.0), gear: 3, ..Default::default() };
+        assert!(parse_car(&car_packet(1, 0, 2, &ok)).is_some());
+        for bad in [
+            CarState { pos: Vec3::new(f32::NAN, 0.0, 0.0), ..ok },
+            CarState { ypr: Vec3::new(0.0, f32::INFINITY, 0.0), ..ok },
+            CarState { vel: Vec3::new(1e30, 0.0, 0.0), ..ok },
+            CarState { pos: Vec3::new(0.0, 0.0, 1e7), ..ok },
+        ] {
+            assert!(parse_car(&car_packet(1, 0, 2, &bad)).is_none(), "{bad:?}");
+        }
+        let g = parse_car(&car_packet(1, 0, 2, &CarState { gear: 250, ..ok })).unwrap().1.gear;
+        assert!(g <= 12);
+    }
+
+    #[test]
+    fn peer_text_and_ids() {
+        assert_eq!(clean("a\x1b[2Jb\nc", 200), "a[2Jbc");
+        assert_eq!(clean(&"x".repeat(500), 32).len(), 32);
+        assert!(ident_ok("road_atlanta") && ident_ok("gp-2"));
+        for s in ["", "..", "c:", "a/b", "A", "a\0b"] {
+            assert!(!ident_ok(s), "{s:?}");
+        }
+    }
+
+    /// A number taken over by another car loads again; the same netcar
+    /// resent does not.
+    #[test]
+    fn number_reuse_reloads() {
+        let mut g = Shared::default();
+        g.set_car(5, "a".into(), "x".into(), vec![1]);
+        g.loaded.insert(5);
+        g.set_car(5, "a".into(), "x".into(), vec![1]);
+        assert!(g.loaded.contains(&5));
+        g.set_car(5, "b".into(), "y".into(), vec![1]);
+        assert!(!g.loaded.contains(&5));
+        g.loaded.insert(5);
+        g.set_car(5, "b".into(), "y".into(), vec![2]);
+        assert!(!g.loaded.contains(&5));
     }
 
     /// A car on a 60 m circle at 30 m/s, a packet every 57 ms (its own clock
