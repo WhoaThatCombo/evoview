@@ -1219,8 +1219,10 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
             .unwrap_or_else(|| "evoview driver".into());
         println!("mp: joining {addr} as {name:?}");
         Some(mp::Mp::start(addr, user, name, fs, mech))
-    });
-    let (ai_models, ai_own) = match mp.as_ref() {
+    }).or_else(|| stress::joins().map(|(n, at, gap)| mp::Mp::fake(pkg, &stress::join_models(), n, at, gap)));
+    // EVOVIEW_STRESS join=N: the stand-in session has no roster at start
+    let real_mp = mp.as_ref().filter(|m| !m.is_fake());
+    let (ai_models, ai_own) = match real_mp {
         Some(m) => mp_models(pkg, car_id, m),
         // EVOVIEW_AI_OWN=<file>: every opponent wears that CarFinalStateData
         // (a player's look captured online) - checks of the online liveries
@@ -1228,7 +1230,7 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
             .and_then(|f| std::fs::read(f).ok()).map_or(Vec::new(), |b| vec![Some(b); n_ai])),
     };
     // online: the server's track, whatever the evoview tab had picked
-    let server_track = mp.as_ref().and_then(|m| m.track());
+    let server_track = real_mp.and_then(|m| m.track());
     let track: &str = match server_track.as_deref() {
         Some(t) if !t.eq_ignore_ascii_case(track) => {
             println!("mp: the server runs {t}; loading that instead of {track}");
@@ -1238,7 +1240,7 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
     };
     // online: the server's layout - its containers, and the layout id its
     // layout_<id>.scene names (the racing line and the name rules follow it)
-    if let Some(m) = mp.as_ref() {
+    if let Some(m) = real_mp {
         let cs = m.containers();
         let lay = cs.iter().filter_map(|c| {
             let b = c.rsplit(['\\', '/']).next()?.to_lowercase();
@@ -1268,6 +1270,7 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
             std::process::exit(1);
         }
     };
+    crate::perf::stamp("scene built");
     let phys = carphys::Physics::read(&mut car_vfs);
     let phys_pits = phys.clone();
     let aero = phys.as_ref().map(|p| lapsim::aero(&mut car_vfs, p)).unwrap_or_default();
@@ -1277,6 +1280,7 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
         std::process::exit(1);
     };
     let ground = std::sync::Arc::new(trackdrive::Ground::new(coll, &env.map(|e| e.surface_defs.clone()).unwrap_or_default()));
+    crate::perf::stamp("player physics + ground");
     let slot = scene.slots[0].clone();
     // the opponents: each its own physics on its model's data
     let ai_rig = crate::envc::var("EVOVIEW_AI_RIG").map_or(crate::envc::var_os("EVOVIEW_RIGCAR").is_some(), |v| v != "0");
@@ -1302,8 +1306,13 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
         eprintln!("no drivable surface at the spawn point ({:.0}, {:.0}, {:.0})", at.x, at.y, at.z);
     }
     // online: the pit box the server handed out
-    let mp_spawn = mp.as_ref().and_then(|m| mp_spawn(pkg, track, m));
-    if let Some(m) = mp.as_ref() {
+    // the stand-in session: every opponent is a net car, numbered from 1
+    if let Some(m) = mp.as_ref().filter(|m| m.is_fake()) {
+        m.set_ai(ai_models.iter().enumerate().map(|(k, c)| (c.clone(), Some(k as u16 + 1))).collect(), car_id);
+    }
+    let real_mp = mp.as_ref().filter(|m| !m.is_fake());
+    let mp_spawn = real_mp.and_then(|m| mp_spawn(pkg, track, m));
+    if let Some(m) = real_mp {
         match mp_spawn {
             Some((at, yaw)) => {
                 if !td.place_from(at, yaw, 3.0) {
@@ -1313,6 +1322,7 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
             None => eprintln!("mp: no car from the server yet ({})", m.status()),
         }
     }
+    crate::perf::stamp("opponents' physics, spawn");
     println!("{car_id} on {track}: spawned at ({:.1}, {:.1}, {:.1}) heading {:.0} deg, {:.1}s",
              td.pos.x, td.pos.y, td.pos.z, yaw.to_degrees(), t0.elapsed().as_secs_f32());
     // the pit lane, its rules and the car's pit data (pits.rs)
@@ -1480,6 +1490,7 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
         }).unwrap_or((1280, 720));
         bench::Opts { seconds: secs, width, height, name: track.to_string(), shot: flag("--bench-shot").map(PathBuf::from) }
     });
+    crate::perf::stamp("race set up, renderer starts");
     pollster::block_on(render::run(
         scene.car, scene.skeleton, scene.animations,
         render::ViewOpts {

@@ -32,17 +32,35 @@ pub fn add(name: &'static str, secs: f64) {
     }
 }
 
+/// EVOVIEW_LOAD_LOG=1: the start-up as a timeline - `stamp`s, every timed
+/// phase's end and the VRAM checkpoints, in seconds since process start.
+fn load_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::envc::var_os("EVOVIEW_LOAD_LOG").is_some())
+}
+
+/// A start-up checkpoint (EVOVIEW_LOAD_LOG=1).
+pub fn stamp(what: &str) {
+    if load_log() {
+        println!("load @ {:7.2} s: {what}", since_start());
+    }
+}
+
 /// Time `f` under `name`.
 pub fn time<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
     let t = Instant::now();
     let r = f();
     add(name, t.elapsed().as_secs_f64());
+    if load_log() && t.elapsed().as_secs_f64() > 0.1 {
+        stamp(&format!("{name} ({:.2} s)", t.elapsed().as_secs_f64()));
+    }
     r
 }
 
 /// EVOVIEW_VRAM_LOG=1: this process's dedicated VRAM after a step (a PDH
 /// query over every process: ~ms, startup checkpoints only).
 pub fn vram_note(what: &str) {
+    stamp(what);
     if crate::envc::var_os("EVOVIEW_VRAM_LOG").is_some() {
         if let Some(v) = vram_bytes() {
             println!("vram: {:.0} MB after {what}", v as f64 / 1048576.0);

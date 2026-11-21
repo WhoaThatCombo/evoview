@@ -252,6 +252,52 @@ struct Shared {
     tagged: std::collections::HashSet<u16>,
     /// late joiners' cars handed out to load, and when the last one was
     late: (usize, Option<Instant>),
+    /// EVOVIEW_STRESS join=N: an offline stand-in session (no network)
+    fake: Option<Fake>,
+}
+
+/// EVOVIEW_STRESS `join=N,join_at=s,join_gap=s`: an offline session whose
+/// players join while driving - the late-join load path (new_cars ->
+/// load_net_car -> the scene append) without a server. Every car rides in a
+/// fixed formation ahead of ours, so it is in view and the run repeats.
+struct Fake {
+    at: f32,
+    gap: f32,
+    /// per join: model, its CarFinalStateData
+    joins: Vec<(String, Option<Vec<u8>>)>,
+    start: Option<Instant>,
+    added: usize,
+}
+
+impl Shared {
+    /// The stand-in session's frame: who has joined by now, and every car's
+    /// state in the formation around ours.
+    fn fake_tick(&mut self) {
+        let Some(me) = self.me else { return };
+        let Some(f) = self.fake.as_mut() else { return };
+        let t = f.start.get_or_insert_with(Instant::now).elapsed().as_secs_f32();
+        let mut joined = Vec::new();
+        while f.added < f.joins.len() && t >= f.at + f.added as f32 * f.gap {
+            let (car, fs) = f.joins[f.added].clone();
+            joined.push((1000 + f.added as u16, car, fs));
+            f.added += 1;
+        }
+        for (n, car, fs) in joined {
+            println!("stress: #{n} joins in {car} at {t:.1} s");
+            self.set_car(n, car, format!("join {n}"), fs.unwrap_or_default());
+        }
+        let mut nums: Vec<u16> = self.ai.iter().filter_map(|a| a.1).chain(self.roster.keys().copied()).collect();
+        nums.sort();
+        nums.dedup();
+        let yaw = -me.ypr.x;
+        let (fwd, side) = (Vec3::new(yaw.sin(), 0.0, yaw.cos()), Vec3::new(yaw.cos(), 0.0, -yaw.sin()));
+        let now = Instant::now();
+        for (i, n) in nums.into_iter().enumerate() {
+            let mut st = me;
+            st.pos = me.pos + fwd * (14.0 + 9.0 * (i / 3) as f32) + side * ((i % 3) as f32 - 1.0) * 4.0;
+            self.remotes.insert(n, Remote { state: st, at: now });
+        }
+    }
 }
 
 impl Shared {
@@ -446,6 +492,16 @@ pub fn car_final_state(pkg: &std::path::Path, car: &str) -> Option<(Vec<u8>, Str
     Some((d, mech))
 }
 
+/// Every .carfinalstate of a car in the game package (stress joins: one
+/// look per join), in name order.
+fn final_states(pkg: &std::path::Path, car: &str) -> Vec<Vec<u8>> {
+    let dir = format!("content\\cars\\{}\\presets\\", car.to_lowercase());
+    let Ok(p) = crate::pkg::Package::open_filtered(pkg, &[&dir]) else { return Vec::new() };
+    let mut keys: Vec<&String> = p.by_path.keys().filter(|k| k.ends_with(".carfinalstate")).collect();
+    keys.sort();
+    keys.into_iter().filter_map(|k| p.by_path.get(k).map(|&e| p.read(e))).collect()
+}
+
 impl Mp {
     /// Connect in the background; `fs` / `mech` from `car_final_state`.
     /// Not connected, and why: evoview drives offline under the red banner
@@ -453,6 +509,27 @@ impl Mp {
     pub fn failed(why: String) -> Mp {
         eprintln!("mp: {why}");
         Mp { sh: Arc::new(Mutex::new(Shared { status: format!("disconnected: {why}"), ..Default::default() })) }
+    }
+
+    /// EVOVIEW_STRESS join=N (see `Fake`): `models` are cycled, each model's
+    /// presets in turn (a second join of a model wears its next look).
+    pub fn fake(pkg: &std::path::Path, models: &[String], n: usize, at: f32, gap: f32) -> Mp {
+        let mut presets: HashMap<String, Vec<Vec<u8>>> = HashMap::new();
+        let joins = (0..n).filter(|_| !models.is_empty()).map(|k| {
+            let car = models[k % models.len()].clone();
+            let all = presets.entry(car.clone()).or_insert_with(|| final_states(pkg, &car));
+            let fs = (!all.is_empty()).then(|| all[(k / models.len()) % all.len()].clone());
+            (car, fs)
+        }).collect::<Vec<_>>();
+        println!("stress: {} join(s) from {at:.1} s, every {gap:.1} s", joins.len());
+        let fake = Fake { at, gap, joins, start: None, added: 0 };
+        Mp { sh: Arc::new(Mutex::new(Shared { status: "driving (stress joins)".into(), epoch: Some(Instant::now()),
+            fake: Some(fake), ..Default::default() })) }
+    }
+
+    /// The offline stand-in session (EVOVIEW_STRESS join=N).
+    pub fn is_fake(&self) -> bool {
+        self.sh.lock().unwrap().fake.is_some()
     }
 
     pub fn start(addr: String, user: String, name: String, fs: Vec<u8>, mech: String) -> Mp {
@@ -624,6 +701,7 @@ impl Mp {
     /// silent for 5 s frees its index.
     pub fn placed(&self) -> Vec<Option<Remote>> {
         let mut g = self.sh.lock().unwrap();
+        g.fake_tick();
         g.remotes.retain(|_, r| r.at.elapsed() < Duration::from_secs(5));
         let live: std::collections::HashSet<u16> = g.remotes.keys().copied().collect();
         g.hist.retain(|n, _| live.contains(n));

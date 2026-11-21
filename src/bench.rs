@@ -140,6 +140,25 @@ impl Drop for CpuScope {
     }
 }
 
+/// EVOVIEW_BENCH_HITCH=ms: each frame slower than that is printed with the
+/// CPU scopes that grew most in it (what a hitch was spent on).
+fn hitch(frame: u64, t: f32, ms: f64) {
+    static LIMIT: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    static PREV: std::sync::Mutex<Vec<(&'static str, f64)>> = std::sync::Mutex::new(Vec::new());
+    let Some(limit) = *LIMIT.get_or_init(|| crate::envc::var("EVOVIEW_BENCH_HITCH").ok().and_then(|v| v.parse().ok())) else { return };
+    let now = CPU.lock().map(|v| v.clone()).unwrap_or_default();
+    let mut prev = PREV.lock().unwrap();
+    if ms > limit {
+        let mut d: Vec<(&str, f64)> = now.iter()
+            .map(|(l, v)| (*l, v - prev.iter().find(|p| p.0 == *l).map_or(0.0, |p| p.1)))
+            .filter(|x| x.1 > 1.0).collect();
+        d.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let top: Vec<String> = d.iter().take(16).map(|(l, v)| format!("{l} {v:.1}")).collect();
+        println!("hitch: frame {frame} at {t:.2} s: {ms:.1} ms [{}]", top.join(", "));
+    }
+    *prev = now;
+}
+
 /// GPU time since the previous mark (or the frame start) is reported as
 /// `label`. A no-op outside --bench or without timestamp queries. Labels
 /// are matched by name, so a mark may be skipped on some frames.
@@ -297,10 +316,13 @@ impl Bench {
             self.start = Some(now);
             // time to first frame: process start to the first encoder
             self.load_s = crate::perf::since_start();
+            crate::perf::stamp("first frame");
         }
         if let Some(l) = self.last {
             if self.t() > WARMUP_S {
-                self.cpu_ms.push(now.duration_since(l).as_secs_f64() * 1e3);
+                let ms = now.duration_since(l).as_secs_f64() * 1e3;
+                self.cpu_ms.push(ms);
+                hitch(self.frame, self.t(), ms);
             }
         }
         self.last = Some(now);
@@ -545,6 +567,10 @@ impl Bench {
             None => println!("{label}: n/a"),
         };
         line(&format!("cpu frame ({} frames)", self.cpu_ms.len()), stats(&self.cpu_ms));
+        // hitches (late joins, streaming): the worst frame and how many missed 30 fps
+        let worst = self.cpu_ms.iter().copied().fold(0.0f64, f64::max);
+        let over = |ms: f64| self.cpu_ms.iter().filter(|&&v| v > ms).count();
+        println!("cpu frame worst {worst:.1} ms; {} frame(s) > 33 ms, {} > 50 ms, {} > 100 ms", over(33.3), over(50.0), over(100.0));
         line(&format!("gpu frame ({} frames)", self.gpu_ms.len()), stats(&self.gpu_ms));
         let nf = self.gpu_ms.len().max(1) as f64;
         for (l, v) in &self.seg_ms {
@@ -604,11 +630,11 @@ impl Bench {
         println!(
             "BENCH_JSON {{\"name\":\"{}\",\"size\":\"{}x{}\",\"seconds\":{},\"load_s\":{:.4},\
              \"phases_s\":{{{}}},\"frames\":{},\"cpu_ms\":{},\"gpu_ms\":{},\"gpu_pass_ms\":{{{}}},\
-             \"vram_mb\":{:.1},\"peak_ws_mb\":{:.1},\"peak_commit_mb\":{:.1},\"ws_mb\":{:.1},\"info\":{{{}}}}}",
+             \"cpu_worst_ms\":{:.2},\"cpu_over33\":{},\"vram_mb\":{:.1},\"peak_ws_mb\":{:.1},\"peak_commit_mb\":{:.1},\"ws_mb\":{:.1},\"info\":{{{}}}}}",
             self.opts.name.replace('\\', "/").replace('"', ""),
             self.opts.width, self.opts.height, self.opts.seconds, self.load_s,
             phases.join(","), self.cpu_ms.len(), js(stats(&self.cpu_ms)),
-            js(stats(&self.gpu_ms)), segs.join(","), mb(self.vram_peak), mb(ws), mb(commit), mb(ws_now),
+            js(stats(&self.gpu_ms)), segs.join(","), worst, over(33.3), mb(self.vram_peak), mb(ws), mb(commit), mb(ws_now),
             info.join(","));
     }
 }

@@ -16,6 +16,12 @@
 //!   memory).
 //! - `cars=N`: N opponents (`--ai` stops at 24), over EVOVIEW_AI_CARS and
 //!   EVOVIEW_AI_LIVERIES as usual.
+//! - `join=N,join_at=s,join_gap=s`: an offline stand-in online session
+//!   (mp.rs `Mp::fake`) in which N players join while driving, the first
+//!   at `join_at` s (default 3) after the first frame, then every
+//!   `join_gap` s (default 2.5): the late-join load and its frame hitch,
+//!   repeatable. Their models: EVOVIEW_JOIN_CARS, else EVOVIEW_AI_CARS,
+//!   each model's presets in turn. The opponents become net cars too.
 //! Collision, the racing line, lamps and the irradiance volumes are not
 //! tiled: cars drive on the real track in the middle.
 
@@ -31,13 +37,16 @@ pub struct Opts {
     /// 0: the track's extent
     pub pitch: f32,
     pub cars: Option<usize>,
+    pub join: usize,
+    pub join_at: f32,
+    pub join_gap: f32,
 }
 
 pub fn opts() -> Option<Opts> {
     static O: std::sync::OnceLock<Option<Opts>> = std::sync::OnceLock::new();
     *O.get_or_init(|| {
         let v = crate::envc::var("EVOVIEW_STRESS").ok().filter(|v| !v.trim().is_empty())?;
-        let mut o = Opts { tiles: 1, ..Default::default() };
+        let mut o = Opts { tiles: 1, join_at: 3.0, join_gap: 2.5, ..Default::default() };
         for kv in v.split(',') {
             let (k, x) = kv.split_once('=').unwrap_or((kv, ""));
             let n = x.trim().parse::<f64>().unwrap_or(0.0).max(0.0);
@@ -48,6 +57,9 @@ pub fn opts() -> Option<Opts> {
                 "texdrop" => o.texdrop = n as u32,
                 "pitch" => o.pitch = n as f32,
                 "cars" => o.cars = Some(n as usize),
+                "join" => o.join = n as usize,
+                "join_at" => o.join_at = n as f32,
+                "join_gap" => o.join_gap = n as f32,
                 k => eprintln!("EVOVIEW_STRESS: unknown key {k:?}"),
             }
         }
@@ -62,6 +74,17 @@ pub fn opts() -> Option<Opts> {
 /// `cars=N`: the opponent count, past `--ai`'s 24.
 pub fn cars() -> Option<usize> {
     opts().and_then(|o| o.cars)
+}
+
+/// `join=N`: (N, first join s, gap s), when asked for.
+pub fn joins() -> Option<(usize, f32, f32)> {
+    opts().filter(|o| o.join > 0).map(|o| (o.join, o.join_at, o.join_gap))
+}
+
+/// The stress joins' models: EVOVIEW_JOIN_CARS, else EVOVIEW_AI_CARS.
+pub fn join_models() -> Vec<String> {
+    let v = crate::envc::var("EVOVIEW_JOIN_CARS").or_else(|_| crate::envc::var("EVOVIEW_AI_CARS")).unwrap_or_default();
+    v.split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect()
 }
 
 /// Tile k's place on the spiral, in pitches: (0, 0), then ring after ring.

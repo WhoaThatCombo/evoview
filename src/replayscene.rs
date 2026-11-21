@@ -822,6 +822,7 @@ impl Scene {
         let mut blob = t.car.take_blob();
         drop(t);
         let track_meshes = meshes.len();
+        crate::perf::stamp("track loaded");
         let open = |model: &str| open_car(pkg, model, base);
         let mut vfs = open(model)?;
         let mut loaded = crate::load::load(&mut vfs).map_err(|e| format!("car {model}: {e}"))?;
@@ -832,6 +833,7 @@ impl Scene {
         // fx / rain / skeleton are taken from `loaded` at the end)
         drop(loaded.car.take_blob());
         ram_log("track + player car", Some(&blob));
+        crate::perf::stamp("player car loaded");
         let mut slots = vec![s];
         let player_look = crate::load::pick_visual_preset(&mut vfs).map(|k| crate::livery::stem_of(&k));
         let max_looks = crate::envc::var("EVOVIEW_AI_LIVERIES").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(6);
@@ -993,6 +995,7 @@ impl Scene {
             crate::vram::plan(base, &mut textures[ai_tex_base..], &mut blob, opp_mesh);
         }
         ram_log("opponents planned", Some(&blob));
+        crate::perf::stamp("opponents loaded + planned");
         let mut car = Car::from_parts(meshes, textures, materials, blob);
         car.tex_src = tex_src;
         car.track_env = track_env;
