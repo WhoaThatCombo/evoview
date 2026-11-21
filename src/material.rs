@@ -864,7 +864,9 @@ impl Materials {
     /// switch: most of the car's maps are the same files).
     pub fn build_reusing(device: &wgpu::Device, queue: &wgpu::Queue, car: &Car, prev: TexCache) -> Self {
         BUILDING.with(|c| *c.borrow_mut() = Some(prev));
+        crate::replayscene::ram_log("materials start", None);
         let mut m = Self::build_inner(device, queue, car);
+        crate::replayscene::ram_log("materials built", None);
         m.textures = BUILDING.with(|c| c.borrow_mut().take()).unwrap_or_default();
         m
     }
@@ -1047,6 +1049,11 @@ impl Materials {
         let car_fx = car.fx.as_deref();
         // dash screens render into these (fxgpu.rs), bound as t_emis
         let mut dash_targets: Vec<(usize, wgpu::Texture)> = Vec::new();
+        // one target per dash page: every copy of the player's model on the
+        // grid (an opponent's look, same material paths) shows that page, and
+        // a target per copy made fxgpu draw and mip the same page again for
+        // each (`fx dash` 0.13 -> 0.6 ms at 49 looks, 1.4 at 69)
+        let mut dash_of: HashMap<usize, usize> = HashMap::new();
         // Paint detail maps are SHARED (flakes_NM sits on 60+ materials of one
         // car), so upload each once rather than once per material.
         let mut detail_cache: HashMap<usize, wgpu::TextureView> = HashMap::new();
@@ -1903,11 +1910,12 @@ impl Materials {
             let layer_r_view = arrays.build(device, queue, &rough_maps, false);
             apply_lights(&mut uniform, &light_src, light_state);
             let emis_tex = if let crate::lights::Class::Display(pi) = light_src.class {
-                let pg = &car_fx.unwrap().dash[pi];
-                let t = crate::fxgpu::dash_target(device, pg.width, pg.height);
-                let v = t.create_view(&Default::default());
-                dash_targets.push((pi, t));
-                v
+                let k = *dash_of.entry(pi).or_insert_with(|| {
+                    let pg = &car_fx.unwrap().dash[pi];
+                    dash_targets.push((pi, crate::fxgpu::dash_target(device, pg.width, pg.height)));
+                    dash_targets.len() - 1
+                });
+                dash_targets[k].1.create_view(&Default::default())
             } else {
                 crate::lights::emissive_slot(m, car_fx)
                     .and_then(|(i, srgb)| upload(device, queue, car, i, srgb))
