@@ -4676,6 +4676,9 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         } else {
                             light_matrix(focus)
                         };
+                        // the moving cars' rows go up now that the near cascade's
+                        // box is known: the cars inside it first (carcull.rs)
+                        carcull.upload(&device, &queue, &meshes, Some(light_vp));
                         // ⚠ not on shadow_invalid: that is the CAR changing (its
                         // pose every 4th frame while driving, the driver, a
                         // livery), and the car is drawn over the cache every
@@ -5197,8 +5200,11 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                         Some((b, n)) => (b.unwrap_or(&m.instances), n, 0),
                                         // (a moving car's mesh: its rows may be in
                                         // carcull's one buffer)
+                                        // (and into the near map, only its cars
+                                        // inside that map's box cast)
                                         None => match carcull.rows(mi_mesh) {
-                                            Some((b, _, first)) => (b, m.instance_count, first),
+                                            Some((b, _, first)) => (b, carcull.near_count(mi_mesh).filter(|_| layer == 0)
+                                                .unwrap_or(m.instance_count), first),
                                             None => (&m.instances, m.instance_count, 0),
                                         },
                                     };

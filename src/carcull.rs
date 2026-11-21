@@ -37,6 +37,14 @@
 //! it (`own`: the bloom's glow pass draws the emissive batches).
 //! EVOVIEW_CAR_ROWS_SHARED=0: each mesh's own buffer, as before.
 //!
+//! Within a mesh's rows, the cars inside the near shadow cascade's box come
+//! first (`upload`), and the near shadow map draws only those
+//! (`near_count`): a mesh used to cast with ALL its drawn cars as soon as
+//! one of them reached the box, and with a grid spread over the track every
+//! look had one (200 cars: 1.6 ms of the GPU's frame in a map a handful of
+//! them can reach). A car outside the box's sides leaves nothing in the
+//! map, so the map is the same. EVOVIEW_CAR_SHADOW_NEAR=0: all of them.
+//!
 //! EVOVIEW_CAR_CULL=0: no view test (every car drawn wherever it is; the
 //! cabin distance rule, the LODs and the dropping of absent cars still
 //! apply). EVOVIEW_CAR_LOD_SCALE: the LOD distances' multiplier (2; 0 =
@@ -124,6 +132,12 @@ pub struct CarCull {
     /// per gpu mesh: the frame its rows last went into `rows`, and its
     /// first row there
     at: Vec<(u64, u32)>,
+    /// per gpu mesh: the largest bounding radius among those rows' cars
+    reach: Vec<f32>,
+    /// per gpu mesh: the frame `upload` sorted its rows on, and how many of
+    /// them (the first ones) are inside the near shadow box
+    near: Vec<(u64, u32)>,
+    near_on: bool,
     on: bool,
     lod_scale: f32,
     meshes: Vec<Mesh>,
@@ -151,6 +165,9 @@ impl Default for CarCull {
             prev_buf: None,
             has_prev: false,
             at: Vec::new(),
+            reach: Vec::new(),
+            near: Vec::new(),
+            near_on: crate::envc::var("EVOVIEW_CAR_SHADOW_NEAR").map_or(true, |v| v != "0"),
             on: crate::envc::var("EVOVIEW_CAR_CULL").map_or(true, |v| v != "0"),
             lod_scale: crate::envc::var("EVOVIEW_CAR_LOD_SCALE").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(2.0),
             meshes: Vec::new(),
@@ -279,7 +296,84 @@ impl CarCull {
         Some((self.rows_buf.as_ref()?, self.prev_buf.as_ref().filter(|_| self.has_prev), first))
     }
 
-    /// Cull and upload every mesh `put` this frame. `vp` / `eye`: the camera
+    /// How many of mesh `gi`'s rows (the first ones, from `rows`) hold cars
+    /// that can cast into the near shadow map `upload` was given. None: not
+    /// sorted - all of them may.
+    pub fn near_count(&self, gi: usize) -> Option<u32> {
+        self.near.get(gi).filter(|n| n.0 == self.frame && self.frame > 0).map(|n| n.1)
+    }
+
+    /// Upload the rows `flush` gathered into the shared buffers: once a
+    /// frame, after `flush` and before anything is drawn. `near`: the near
+    /// shadow cascade's light matrix - within each mesh's rows, the cars
+    /// inside that box (its sides: see `casts_into`) are moved to the front
+    /// and counted (`near_count`). Their order is free: every pass draws a
+    /// mesh's rows as one instanced range, and last frame's rows move with
+    /// them.
+    pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, meshes: &[crate::render::GpuMesh], near: Option<Mat4>) {
+        if self.rows.is_empty() {
+            return;
+        }
+        let _t = crate::bench::cpu("car cull");
+        if let Some(lv) = near.filter(|_| self.near_on && self.on) {
+            let p = frustum(lv);
+            if self.near.len() < self.at.len() {
+                self.near.resize(self.at.len(), (0, 0));
+            }
+            let with_prev = self.has_prev && self.prev_rows.len() == self.rows.len();
+            for g in 0..self.at.len().min(meshes.len()) {
+                let (frame, first) = self.at[g];
+                if frame != self.frame {
+                    continue;
+                }
+                let (first, n) = (first as usize, meshes[g].instance_count as usize);
+                if (first + n) * ROW > self.rows.len() {
+                    continue;
+                }
+                let r = self.reach.get(g).copied().unwrap_or(f32::MAX);
+                let mut k = 0;
+                for i in 0..n {
+                    let o = (first + i) * ROW;
+                    let c = Vec3::new(self.rows[o + 12], self.rows[o + 13], self.rows[o + 14]);
+                    if sphere_in(&p[..4], c, r) {
+                        if i != k {
+                            let q = (first + k) * ROW;
+                            for j in 0..ROW {
+                                self.rows.swap(o + j, q + j);
+                                if with_prev {
+                                    self.prev_rows.swap(o + j, q + j);
+                                }
+                            }
+                        }
+                        k += 1;
+                    }
+                }
+                self.near[g] = (self.frame, k as u32);
+            }
+        }
+        // every mesh's rows in one write (and their previous rows in another)
+        let write = |buf: &mut Option<wgpu::Buffer>, rows: &[f32], label: &str| {
+            let need = (rows.len() * 4) as u64;
+            if buf.as_ref().map_or(true, |b| b.size() < need) {
+                *buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size: need.next_power_of_two().max(64 * 1024),
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+            }
+            if let Some(b) = buf.as_ref() {
+                queue.write_buffer(b, 0, bytemuck::cast_slice(rows));
+            }
+        };
+        write(&mut self.rows_buf, &self.rows, "car rows");
+        if self.has_prev {
+            write(&mut self.prev_buf, &self.prev_rows, "car rows (last frame)");
+        }
+    }
+
+    /// Cull every mesh `put` this frame, and gather (shared rows: `upload`
+    /// sends them) or upload its rows. `vp` / `eye`: the camera
     /// as drawn; `sun`: toward the key light; `detail_m`: see `Detail`.
     /// `own(material)`: a batch of this material is drawn by something that
     /// reads its mesh's own instance buffer (the glow pass).
@@ -312,6 +406,7 @@ impl CarCull {
         self.prev_rows.clear();
         if self.at.len() < meshes.len() {
             self.at.resize(meshes.len(), (0, 0));
+            self.reach.resize(meshes.len(), 0.0);
         }
         for gi in 0..self.meshes.len().min(meshes.len()) {
             if !self.meshes[gi].put {
@@ -423,6 +518,7 @@ impl CarCull {
                 let keep = cnt.min(meshes[g].instances.size() as usize / (ROW * 4));
                 if keep > 0 && self.shared_on {
                     self.at[g] = (frame, (self.rows.len() / ROW) as u32);
+                    self.reach[g] = l.r;
                     self.rows.extend_from_slice(&l.rows[..keep * ROW]);
                     if want_prev {
                         self.prev_rows.extend_from_slice(&l.prev[..keep * ROW]);
@@ -437,27 +533,6 @@ impl CarCull {
                     }
                 }
                 meshes[g].instance_count = keep as u32;
-            }
-        }
-        // every mesh's rows in one write (and their previous rows in another)
-        let upload = |buf: &mut Option<wgpu::Buffer>, rows: &[f32], label: &str| {
-            let need = (rows.len() * 4) as u64;
-            if buf.as_ref().map_or(true, |b| b.size() < need) {
-                *buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some(label),
-                    size: need.next_power_of_two().max(64 * 1024),
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }));
-            }
-            if let Some(b) = buf.as_ref() {
-                queue.write_buffer(b, 0, bytemuck::cast_slice(rows));
-            }
-        };
-        if !self.rows.is_empty() {
-            upload(&mut self.rows_buf, &self.rows, "car rows");
-            if want_prev {
-                upload(&mut self.prev_buf, &self.prev_rows, "car rows (last frame)");
             }
         }
         self.has_prev = want_prev;
