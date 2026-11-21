@@ -16,7 +16,9 @@
 //!             (fitted on the Nordschleife and Imola at 3440x1440, the
 //!             pixel term from 1720x720: within ~20 MB of the OS counter)
 //!   opponents 1.25 x their texture and mesh bytes (materials, LOD meshes,
-//!             bones, per-look buffers on top)
+//!             bones on top), geometry shared by a model's looks counted
+//!             once, + 4 MB per look (its materials, instance rows and
+//!             layer arrays: measured 1.7-4.8 MB a look at 23-69 looks)
 //! and checked against total VRAM minus what other processes hold, less
 //! EVOVIEW_VRAM_MARGIN_MB (800: paging starts before the last byte, and late
 //! joiners need room). EVOVIEW_VRAM_FREE_MB pretends that much is free (to
@@ -26,6 +28,9 @@ use crate::asset::TextureEntry;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 
 const MB: f64 = 1048576.0;
+
+/// VRAM an opponent look takes beyond its textures and (shared) geometry.
+const PER_LOOK: f64 = 4.0 * MB;
 
 /// Mip levels the other cars' textures were dropped by at load: late joiners
 /// get the same (or more, `late_drop`).
@@ -223,17 +228,28 @@ pub fn mesh_bytes(meshes: &[crate::asset::MeshEntry]) -> u64 {
     meshes.iter().map(|m| m.vertices as u64 * 80 + m.indices.map_or(0, |i| i[1])).sum()
 }
 
+/// `mesh_bytes`, geometry shared by several entries counted once: the
+/// extra looks of an opponent model point at the first look's streams
+/// (replayscene merge_shared) and render.rs uploads them once.
+pub fn mesh_bytes_shared(meshes: &[crate::asset::MeshEntry]) -> u64 {
+    let (mut pos, mut idx) = (std::collections::HashSet::new(), std::collections::HashSet::new());
+    meshes.iter().map(|m| {
+        let v = if m.positions.map_or(true, |p| pos.insert(p)) { m.vertices as u64 * 80 } else { 0 };
+        v + m.indices.filter(|i| idx.insert(*i)).map_or(0, |i| i[1])
+    }).sum()
+}
+
 /// Load time (Scene::build_race): how many levels the opponents' textures
 /// drop so the session fits, applied to `opp`. `base_bytes`: the track and
 /// player car's texture + mesh bytes.
-pub fn plan(base_bytes: u64, opp: &mut [TextureEntry], blob: &mut [u8], opp_mesh: u64) {
+pub fn plan(base_bytes: u64, opp: &mut [TextureEntry], blob: &mut [u8], opp_mesh: u64, looks: usize) {
     if !on() || opp.is_empty() {
         return;
     }
     let Some((free, total)) = free_total() else { return };
     let px = TARGET_PX.load(Relaxed) as f64;
     let base = (1.85 * base_bytes as f64 + 84.0 * px - 300.0 * MB).max(base_bytes as f64);
-    let need = |k: u32| base + 1.25 * (tex_bytes(opp, k) + opp_mesh) as f64;
+    let need = |k: u32| base + 1.25 * (tex_bytes(opp, k) + opp_mesh) as f64 + PER_LOOK * looks as f64;
     let room = free - margin();
     if crate::envc::var_os("EVOVIEW_VRAM_LOG").is_some() {
         let mut by: std::collections::BTreeMap<String, (u64, u64)> = Default::default();
@@ -290,6 +306,17 @@ mod tests {
         }).collect();
         let n = lv.iter().map(|l| l.bytes).sum();
         TextureEntry { name: "t".into(), format: fmt.into(), width: w, height: w, levels: lv, data: [1000, n] }
+    }
+
+    #[test]
+    fn shared_geometry_counts_once() {
+        let mesh = |pos: u64, idx: u64| -> crate::asset::MeshEntry {
+            serde_json::from_str(&format!(r#"{{"name":"m","vertices":10,"positions":[{pos},120],"indices":[{idx},60]}}"#)).unwrap()
+        };
+        // two looks of a model sharing one mesh's streams, and a mesh of its own
+        let v = [mesh(0, 200), mesh(0, 200), mesh(400, 600)];
+        assert_eq!(mesh_bytes(&v), 3 * (800 + 60));
+        assert_eq!(mesh_bytes_shared(&v), 2 * (800 + 60));
     }
 
     #[test]

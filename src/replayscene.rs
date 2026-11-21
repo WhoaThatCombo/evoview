@@ -933,8 +933,9 @@ impl Scene {
         // fit in the VRAM free (vram.rs)
         {
             let base = crate::vram::tex_bytes(&textures[..ai_tex_base], 0) + crate::vram::mesh_bytes(&meshes[..track_meshes]);
-            let opp_mesh = crate::vram::mesh_bytes(&meshes[ai_mesh_base..]);
-            crate::vram::plan(base, &mut textures[ai_tex_base..], &mut blob, opp_mesh);
+            // an extra look of a model shares its geometry (merge_shared): once
+            let opp_mesh = crate::vram::mesh_bytes_shared(&meshes[ai_mesh_base..]);
+            crate::vram::plan(base, &mut textures[ai_tex_base..], &mut blob, opp_mesh, slots.len() - 1);
         }
         ram_log("opponents planned", Some(&blob));
         crate::perf::stamp("opponents loaded + planned");
