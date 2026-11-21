@@ -110,13 +110,7 @@ fn engine_params(fm: &Fmod, i: Inst, f: &Feed, shift: Option<bool>, d: f32, vol:
     fm.pvol(i, vol);
 }
 
-/// A model's car bank out of the game's package (empty: none).
-fn car_bank(pkg: &Path, model: &str) -> Vec<u8> {
-    let Ok(p) = crate::pkg::Package::open_filtered(pkg, &[SFX_DIR]) else { return Vec::new() };
-    let key = format!("{SFX_DIR}{}.bank", model.to_ascii_lowercase());
-    p.by_path.get(&key).copied().map(|e| p.read(e)).unwrap_or_default()
-}
-
+/// Where the car banks are in the game's package (<model>.bank).
 const SFX_DIR: &str = "content\\sfx\\";
 
 /// One AI car's engine: its exterior engine event while it is among the
@@ -140,6 +134,12 @@ pub struct AiEngines {
     events: Vec<(String, Option<String>)>,
     /// seconds to the next EVOVIEW_AI_SND_LOG line
     log_t: f32,
+    /// models whose bank was asked of the reader thread, and that thread:
+    /// (models to read, (model, bank bytes) read). Opening the package and
+    /// reading a bank took ~50 ms on the render thread - a hitch at the
+    /// first frame and whenever an online player joined in a new model.
+    asked: std::collections::HashSet<String>,
+    reader: Option<(std::sync::mpsc::Sender<String>, std::sync::mpsc::Receiver<(String, Vec<u8>)>)>,
     pub starts: u32,
     pub stops: u32,
 }
@@ -371,25 +371,48 @@ impl CarSound {
         if self.ai.voices.len() != cars.len() {
             self.ai.voices.resize_with(cars.len(), AiVoice::default);
         }
-        // each model's event, its bank loaded once (the player's is in)
+        // each model's event, its bank loaded once (the player's is in);
+        // the bank is read on a thread of its own and loaded once it is there
         for c in cars {
             let m = c.model.to_ascii_lowercase();
             if self.ai.events.iter().any(|e| e.0 == m) {
                 continue;
             }
-            let ev = if m == self.model {
-                self.engine_event.clone()
-            } else {
-                let bank = car_bank(&self.pkg, &m);
-                if bank.is_empty() {
-                    None
-                } else {
-                    match self.fmod.load_extra(&bank) {
-                        Ok(evs) => evs.into_iter().find(|e| e.ends_with("engine_ext")),
-                        Err(e) => {
-                            eprintln!("AI sound {m}: {e}");
-                            None
+            if m == self.model {
+                println!("AI sound {m}: {}", self.engine_event.as_deref().unwrap_or("no engine event"));
+                self.ai.events.push((m, self.engine_event.clone()));
+                continue;
+            }
+            if !self.ai.asked.insert(m.clone()) {
+                continue;
+            }
+            let pkg = self.pkg.clone();
+            let reader = self.ai.reader.get_or_insert_with(|| {
+                let (tx, rx) = std::sync::mpsc::channel::<String>();
+                let (btx, brx) = std::sync::mpsc::channel();
+                std::thread::Builder::new().name("ai banks".into()).spawn(move || {
+                    let p = crate::pkg::Package::open_filtered(&pkg, &[SFX_DIR]).ok();
+                    for m in rx {
+                        let key = format!("{SFX_DIR}{m}.bank");
+                        let bank = p.as_ref().and_then(|p| p.by_path.get(&key).copied().map(|e| p.read(e))).unwrap_or_default();
+                        if btx.send((m, bank)).is_err() {
+                            break;
                         }
+                    }
+                }).ok();
+                (tx, brx)
+            });
+            reader.0.send(m).ok();
+        }
+        while let Some(Ok((m, bank))) = self.ai.reader.as_ref().map(|r| r.1.try_recv()) {
+            let ev = if bank.is_empty() {
+                None
+            } else {
+                match self.fmod.load_extra(&bank) {
+                    Ok(evs) => evs.into_iter().find(|e| e.ends_with("engine_ext")),
+                    Err(e) => {
+                        eprintln!("AI sound {m}: {e}");
+                        None
                     }
                 }
             };
