@@ -370,6 +370,22 @@ pub(crate) fn upload(
     })
 }
 
+/// `upload` for `Materials::build`: the cache's own view, shared by every
+/// bind group that binds the texture. A view made per binding was ~10 us of
+/// render-thread time each, thousands per car (a late joiner's hitch).
+fn upload_view(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    car: &Car,
+    idx: usize,
+    srgb: bool,
+) -> Option<std::rc::Rc<wgpu::TextureView>> {
+    BUILDING.with(|c| match c.borrow().as_ref() {
+        Some(cache) => cache.get(device, queue, car, idx, srgb),
+        None => upload_texture(device, queue, car, idx, srgb).map(|t| std::rc::Rc::new(t.create_view(&Default::default()))),
+    })
+}
+
 /// `upload`, but the texture itself (shared through the build's cache), for
 /// callers that make their own views - the layer arrays (layers.rs).
 pub(crate) fn upload_rc(
@@ -389,9 +405,11 @@ pub(crate) fn upload_rc(
 /// submit completes. Materials::build uploads every texture before anything
 /// is submitted, so a track briefly held a second, staged copy of all its
 /// textures (~1.3 GB) in system memory. Flushing every 256 MB caps that.
+/// Bytes written since the last flush, counted per `Materials::build`.
+static PENDING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn flush_staging(device: &wgpu::Device, queue: &wgpu::Queue, bytes: u64) {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static PENDING: AtomicU64 = AtomicU64::new(0);
+    use std::sync::atomic::Ordering;
     if PENDING.fetch_add(bytes, Ordering::Relaxed) + bytes >= 256 << 20 {
         PENDING.store(0, Ordering::Relaxed);
         let t = std::time::Instant::now();
@@ -815,8 +833,33 @@ fn paint_splat_constant(m: &MaterialEntry, slot_taken: bool) -> Option<[u8; 4]> 
     Some([q(c[0]), q(c[1]), q(c[2]), 255])
 }
 
+thread_local! {
+    /// `solid`'s 1x1 textures by colour: materials without a map bound a
+    /// fresh one each (several per material - a late joiner's car made
+    /// hundreds on the render thread, ~5 ms).
+    static SOLIDS: std::cell::RefCell<HashMap<(wgpu::Id<wgpu::Device>, [u8; 4]), wgpu::Texture>> = std::cell::RefCell::new(HashMap::new());
+}
+
+thread_local! {
+    /// `solid_view`'s views, by device and colour
+    static SOLID_VIEWS: std::cell::RefCell<HashMap<(wgpu::Id<wgpu::Device>, [u8; 4]), std::rc::Rc<wgpu::TextureView>>> = std::cell::RefCell::new(HashMap::new());
+}
+
+/// `solid`, one shared view per colour (see `upload_view`).
+fn solid_view(device: &wgpu::Device, queue: &wgpu::Queue, rgba: [u8; 4]) -> std::rc::Rc<wgpu::TextureView> {
+    SOLID_VIEWS.with(|c| {
+        c.borrow_mut().entry((device.global_id(), rgba)).or_insert_with(|| std::rc::Rc::new(solid(device, queue, rgba))).clone()
+    })
+}
+
 pub(crate) fn solid(device: &wgpu::Device, queue: &wgpu::Queue, rgba: [u8; 4]) -> wgpu::TextureView {
-    let tex = device.create_texture_with_data(
+    SOLIDS.with(|c| {
+        c.borrow_mut().entry((device.global_id(), rgba)).or_insert_with(|| solid_texture(device, queue, rgba)).create_view(&Default::default())
+    })
+}
+
+fn solid_texture(device: &wgpu::Device, queue: &wgpu::Queue, rgba: [u8; 4]) -> wgpu::Texture {
+    device.create_texture_with_data(
         queue,
         &wgpu::TextureDescriptor {
             label: Some("solid"),
@@ -830,8 +873,7 @@ pub(crate) fn solid(device: &wgpu::Device, queue: &wgpu::Queue, rgba: [u8; 4]) -
         },
         Default::default(),
         &rgba,
-    );
-    tex.create_view(&Default::default())
+    )
 }
 
 impl Materials {
@@ -864,8 +906,17 @@ impl Materials {
     /// switch: most of the car's maps are the same files).
     pub fn build_reusing(device: &wgpu::Device, queue: &wgpu::Queue, car: &Car, prev: TexCache) -> Self {
         BUILDING.with(|c| *c.borrow_mut() = Some(prev));
+        // ⚠ a late joiner's build counts its staging on its own: carried
+        // over from the load, its few MB crossed the 256 MB line and waited
+        // for the GPU to go idle mid-session (~35 ms); a running session's
+        // frames free the staging every submit anyway. (Only then: moving
+        // the load's flush points changed the first frames' pixels.)
+        let carried = car.appended.then(|| PENDING.swap(0, std::sync::atomic::Ordering::Relaxed));
         crate::replayscene::ram_log("materials start", None);
         let mut m = Self::build_inner(device, queue, car);
+        if let Some(c) = carried {
+            PENDING.store(c, std::sync::atomic::Ordering::Relaxed);
+        }
         crate::replayscene::ram_log("materials built", None);
         m.textures = BUILDING.with(|c| c.borrow_mut().take()).unwrap_or_default();
         m
@@ -1014,9 +1065,9 @@ impl Materials {
             ..Default::default()
         });
 
-        let white = solid(device, queue, [255, 255, 255, 255]);
-        let flat_normal = solid(device, queue, [128, 128, 255, 255]);
-        let black = solid(device, queue, [0, 0, 0, 255]);
+        let white = solid_view(device, queue, [255, 255, 255, 255]);
+        let flat_normal = solid_view(device, queue, [128, 128, 255, 255]);
+        let black = solid_view(device, queue, [0, 0, 0, 255]);
         // splat-layer colour / roughness maps, one array each (layers.rs)
         let mut arrays = crate::layers::LayerArrays::new(device, queue);
         let white_arr = arrays.white_view();
@@ -1056,7 +1107,7 @@ impl Materials {
         let mut dash_of: HashMap<usize, usize> = HashMap::new();
         // Paint detail maps are SHARED (flakes_NM sits on 60+ materials of one
         // car), so upload each once rather than once per material.
-        let mut detail_cache: HashMap<usize, wgpu::TextureView> = HashMap::new();
+        let mut detail_cache: HashMap<usize, std::rc::Rc<wgpu::TextureView>> = HashMap::new();
         let (mut n_pd_n, mut n_pd_cc, mut n_pd_ao) = (0u32, 0u32, 0u32);
 
         // Track materials are shaded by the track pipeline (track.rs), which
@@ -1178,7 +1229,7 @@ impl Materials {
             // anything was wrong. Roll-bar padding, seat fabric and steering
             // rims all share `t_fabric_archliner_colour`, so one missing file
             // turned several parts of an interior pure white at once.
-            let albedo_tex = albedo_i.and_then(|i| upload(device, queue, car, i, true));
+            let albedo_tex = albedo_i.and_then(|i| upload_view(device, queue, car, i, true));
             let has_albedo_tex = albedo_tex.is_some();
             let albedo_missing = albedo_i.is_some() && albedo_tex.is_none();
             if albedo_missing {
@@ -1186,23 +1237,23 @@ impl Materials {
                 crate::strict::note("T11", &m.file, alb_name_of(car, albedo_i));
             }
             let albedo = albedo_tex
-                .unwrap_or_else(|| solid(device, queue, [255, 255, 255, 255]));
-            let normal_tex = normal_i.and_then(|i| upload(device, queue, car, i, false));
+                .unwrap_or_else(|| solid_view(device, queue, [255, 255, 255, 255]));
+            let normal_tex = normal_i.and_then(|i| upload_view(device, queue, car, i, false));
             if normal_i.is_some() && normal_tex.is_none() {
                 crate::strict::note("T12", &m.file, format!("normal map {}", alb_name_of(car, normal_i)));
             }
-            let normal = normal_tex.unwrap_or_else(|| solid(device, queue, [128, 128, 255, 255]));
-            let ao_tex = data_i.and_then(|i| upload(device, queue, car, i, false));
+            let normal = normal_tex.unwrap_or_else(|| solid_view(device, queue, [128, 128, 255, 255]));
+            let ao_tex = data_i.and_then(|i| upload_view(device, queue, car, i, false));
             if data_i.is_some() && ao_tex.is_none() {
                 crate::strict::note("T12", &m.file, format!("AO / data map {}", alb_name_of(car, data_i)));
             }
-            let ao = ao_tex.unwrap_or_else(|| solid(device, queue, [255, 255, 255, 255]));
+            let ao = ao_tex.unwrap_or_else(|| solid_view(device, queue, [255, 255, 255, 255]));
             // A dedicated roughness map, separate from `data`. `data_i` collapses
             // roughness and AO into one slot (fine for tracks, wrong for cars,
             // which ship both).
-            let rough_tex = rough_i.and_then(|i| upload(device, queue, car, i, false));
-            let gao_tex = gao_i.and_then(|i| upload(device, queue, car, i, false));
-            let coat_tex = coat_map_i.and_then(|i| upload(device, queue, car, i, false));
+            let rough_tex = rough_i.and_then(|i| upload_view(device, queue, car, i, false));
+            let gao_tex = gao_i.and_then(|i| upload_view(device, queue, car, i, false));
+            let coat_tex = coat_map_i.and_then(|i| upload_view(device, queue, car, i, false));
             for (i, t, what) in [(rough_i, rough_tex.is_some(), "roughness"), (gao_i, gao_tex.is_some(), "global AO"),
                                  (coat_map_i, coat_tex.is_some(), "clear coat")] {
                 if i.is_some() && !t {
@@ -1231,13 +1282,13 @@ impl Materials {
             if rough_layer_i[0].is_some() { n_redrough += 1; }
             if maps[2] > 0.0 { n_gao += 1; }
             if maps[3] > 0.0 { n_coat += 1; }
-            let t_rough = rough_tex.unwrap_or_else(|| solid(device, queue, [255, 255, 255, 255]));
-            let t_gao = gao_tex.unwrap_or_else(|| solid(device, queue, [255, 255, 255, 255]));
-            let t_coat = coat_tex.unwrap_or_else(|| solid(device, queue, [255, 255, 255, 255]));
+            let t_rough = rough_tex.unwrap_or_else(|| solid_view(device, queue, [255, 255, 255, 255]));
+            let t_gao = gao_tex.unwrap_or_else(|| solid_view(device, queue, [255, 255, 255, 255]));
+            let t_coat = coat_tex.unwrap_or_else(|| solid_view(device, queue, [255, 255, 255, 255]));
             let pd = paint_detail_maps(m);
             for i in [pd.n_r, pd.n_gb, pd.cc_n, pd.ao].into_iter().flatten() {
                 if !detail_cache.contains_key(&i) {
-                    if let Some(v) = upload(device, queue, car, i, false) {
+                    if let Some(v) = upload_view(device, queue, car, i, false) {
                         detail_cache.insert(i, v);
                     }
                 }
@@ -1602,10 +1653,10 @@ impl Materials {
             // splat path unchanged.
             let splat_const = paint_splat_constant(m, splat_i.is_some() || extra_i.is_some());
             let splat = match splat_const {
-                Some(w) => solid(device, queue, w),
+                Some(w) => solid_view(device, queue, w),
                 None => extra_i
-                    .and_then(|i| upload(device, queue, car, i, extra_srgb))
-                    .unwrap_or_else(|| solid(device, queue, [0, 0, 0, 255])),
+                    .and_then(|i| upload_view(device, queue, car, i, extra_srgb))
+                    .unwrap_or_else(|| solid_view(device, queue, [0, 0, 0, 255])),
             };
             let _has_opacity_map = splat_i.is_none() && opacity_i.is_some();
             // misc.w: 0 none, 1 opacity-in-splat, 2 world-space terrain tile,
@@ -1915,15 +1966,15 @@ impl Materials {
                     dash_targets.push((pi, crate::fxgpu::dash_target(device, pg.width, pg.height)));
                     dash_targets.len() - 1
                 });
-                dash_targets[k].1.create_view(&Default::default())
+                std::rc::Rc::new(dash_targets[k].1.create_view(&Default::default()))
             } else {
                 crate::lights::emissive_slot(m, car_fx)
-                    .and_then(|(i, srgb)| upload(device, queue, car, i, srgb))
-                    .unwrap_or_else(|| solid(device, queue, [0, 0, 0, 255]))
+                    .and_then(|(i, srgb)| upload_view(device, queue, car, i, srgb))
+                    .unwrap_or_else(|| solid_view(device, queue, [0, 0, 0, 255]))
             };
             let mask2_tex = crate::lights::mask2_slot(m, car_fx)
-                .and_then(|i| upload(device, queue, car, i, false))
-                .unwrap_or_else(|| solid(device, queue, [0, 0, 0, 255]));
+                .and_then(|i| upload_view(device, queue, car, i, false))
+                .unwrap_or_else(|| solid_view(device, queue, [0, 0, 0, 255]));
             // Rim motion blur (VehicleRim): z 1 = shows with speed (blur
             // rim), 2 = hides with speed (the static rim); w = VelocityGamma
             if m.shader.as_deref().map_or(false, |sh| sh.eq_ignore_ascii_case("VehicleRim")) {
@@ -1940,9 +1991,9 @@ impl Materials {
                 } else { 1.0 };
                 uniform.fx_m[3] = m.param(&["VelocityGamma"], 1.0).max(0.01);
             }
-            let dirt_tex = match m.slot(&["Dirt_Map"]).and_then(|i| upload(device, queue, car, i, false)) {
+            let dirt_tex = match m.slot(&["Dirt_Map"]).and_then(|i| upload_view(device, queue, car, i, false)) {
                 Some(v) => { uniform.fx_m[1] = 1.0; v }
-                None => solid(device, queue, [0, 0, 0, 255]),
+                None => solid_view(device, queue, [0, 0, 0, 255]),
             };
             // the cabin stays dry in the rain (shader wetness)
             if is_cabin(&m.file.to_lowercase()) {
@@ -2190,6 +2241,33 @@ impl Materials {
         let ground = groups.len() - 1;
 
         println!("materials: {} bound, fallback for the rest", by_name.len());
+        // a late joiner's car (Car::appended): only its groups are kept
+        // (`append`); the scene's environment, BRDF and grading stay, and
+        // its env LOD is not reset to "no cube" (which a joiner's car, with
+        // no cube of its own, did)
+        if car.appended {
+            let tiny = |dimension, layers| device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("appended placeholder"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: layers },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let env_view = tiny(wgpu::TextureDimension::D2, 6).create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::Cube),
+                ..Default::default()
+            });
+            let flat = tiny(wgpu::TextureDimension::D2, 1).create_view(&Default::default());
+            let lut_view = tiny(wgpu::TextureDimension::D3, 1).create_view(&Default::default());
+            let env_samp = device.create_sampler(&Default::default());
+            return Materials { layout, groups, by_name, by_path, fallback, ground, blend,
+                               env_view, env_samp, has_env: false, brdf_view: flat, lut_view,
+                               buffers, uniforms, light_srcs, light_state, dash_targets,
+                               textures: TexCache::default() };
+        }
         let env = car.env.as_ref().and_then(|c| upload_cube(device, queue, c));
         let has_env = env.is_some();
         // how many mips actually reached the GPU decides the roughest lookup

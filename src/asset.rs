@@ -174,6 +174,11 @@ pub struct Car {
     pub rain_tex: [Option<usize>; 3],
     /// the side windows' streak maps, packed (rain::pack_streaks)
     pub rain_streaks: Option<std::sync::Arc<Vec<u8>>>,
+    /// Built to be appended to a running scene (online: a late joiner's
+    /// car, replayscene::load_net_car): its materials are taken on by the
+    /// scene's (`Materials::append`), so they need no environment, BRDF or
+    /// grading tables of their own and must not reset the scene's env LOD.
+    pub appended: bool,
 }
 
 impl Car {
@@ -198,6 +203,7 @@ impl Car {
             fx: None,
             rain_tex: [None; 3],
             rain_streaks: None,
+            appended: false,
         }
     }
 
@@ -226,6 +232,7 @@ impl Car {
             fx: None,
             rain_tex: [None; 3],
             rain_streaks: None,
+            appended: false,
         })
     }
 

@@ -1065,6 +1065,7 @@ pub fn load_net_car(pkg: &Path, base: Option<&Path>, model: &str, own: Option<&[
     crate::vram::late_drop(&mut textures, &mut blob, crate::vram::mesh_bytes(&meshes));
     let mut car = Car::from_parts(meshes, textures, materials, blob);
     car.tex_src = tex_src;
+    car.appended = true;
     Ok((car, slot))
 }
 
