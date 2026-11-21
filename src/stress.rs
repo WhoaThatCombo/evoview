@@ -117,7 +117,25 @@ pub fn track(car: &mut Car) {
     car.tex_src.resize(car.textures.len(), String::new());
     // the track animates its props by mesh index: a copy would stand skinned
     // with no bones, so those stay with the instanced tiles
-    let animated: Vec<bool> = (0..n0).map(|i| crate::track::is_animated(car, i)).collect();
+    let mut animated: Vec<bool> = (0..n0).map(|i| crate::track::is_animated(car, i)).collect();
+    // ... and so does whatever shares a shadow caster with one: cull.rs
+    // sends a level's instance indices to its caster's rows, so both must
+    // hold the same placements
+    loop {
+        let mut grew = false;
+        for i in 0..n0 {
+            if let Some(Some(t)) = car.meshes[i].shadow_mesh {
+                if t < n0 && animated[i] != animated[t] {
+                    animated[i] = true;
+                    animated[t] = true;
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
     let (mut tex_left, mut n_tex, mut mats) = (o.tex, 0usize, Vec::new());
     for c in 1..=o.copies {
         let pre = format!("stress{c}/");
