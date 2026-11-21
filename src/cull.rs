@@ -71,17 +71,29 @@ struct Entry {
 /// view (main, mirror, probe, rear camera) was 20 ms of CPU a frame.
 /// Results are identical: a cell passes whenever any sphere in it could,
 /// and the visible instances are kept in their original order.
+///
+/// Only OCCUPIED cells are stored and walked (ascending by grid index): a
+/// view walking every cell of the square cost +0.4 ms per Nordschleife-sized
+/// tile of map (cells over empty land), and each mesh walking all of its
+/// runs cost the same again. A view now walks the occupied cells once and,
+/// in those that pass, the meshes' runs there (`refs`).
 struct Grid {
     origin: Vec3,
     cell: f32,
     nx: u32,
-    /// per cell: the box of its spheres (centre +- radius) and of their centres
+    nz: u32,
+    /// grid index -> occupied cell (u32::MAX: empty)
+    dense_of: Vec<u32>,
+    /// per occupied cell: the box of its spheres (centre +- radius) and of their centres
     boxes: Vec<[Vec3; 4]>,
-    /// per cell this update: frustum test passed, (min, max) squared distance
+    /// per occupied cell: its meshes' runs, refs[at[c]..at[c + 1]] as (entry, run)
+    at: Vec<u32>,
+    refs: Vec<(u32, u32)>,
+    /// per occupied cell this update: frustum test passed, (min, max) squared distance
     vis: Vec<bool>,
     dist: Vec<[f32; 2]>,
-    /// per cell this update (main view): the least view depth (`row3` .
-    /// centre) over its centres' box
+    /// per occupied cell this update (main view): the least view depth
+    /// (`row3` . centre) over its centres' box
     wmin: Vec<f32>,
 }
 
@@ -112,8 +124,19 @@ impl Grid {
         let nx = ((ex / cell).floor() + 1.0).min(4096.0) as u32;
         let nz = ((ez / cell).floor() + 1.0).min(4096.0) as u32;
         let empty = [Vec3::splat(f32::MAX), Vec3::splat(f32::MIN), Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)];
-        let mut g = Grid { origin: lo, cell, nx, boxes: vec![empty; (nx * nz) as usize],
-                           vis: Vec::new(), dist: Vec::new(), wmin: Vec::new() };
+        let mut g = Grid { origin: lo, cell, nx, nz, dense_of: vec![u32::MAX; (nx * nz) as usize], boxes: Vec::new(),
+                           at: Vec::new(), refs: Vec::new(), vis: Vec::new(), dist: Vec::new(), wmin: Vec::new() };
+        // the occupied cells, numbered in grid order
+        for s in spheres.iter().flat_map(|s| s.iter()) {
+            let c = g.full_cell(s.truncate()) as usize;
+            g.dense_of[c] = 0;
+        }
+        let mut n = 0u32;
+        for d in g.dense_of.iter_mut().filter(|d| **d != u32::MAX) {
+            *d = n;
+            n += 1;
+        }
+        g.boxes = vec![empty; n as usize];
         for s in spheres.iter().flat_map(|s| s.iter()) {
             let c = g.cell_of(s.truncate());
             let b = &mut g.boxes[c as usize];
@@ -138,24 +161,24 @@ impl Grid {
         }
     }
 
-    fn cell_of(&self, p: Vec3) -> u32 {
-        let nz = self.boxes.len() as u32 / self.nx;
+    fn full_cell(&self, p: Vec3) -> u32 {
         let x = (((p.x - self.origin.x) / self.cell).max(0.0) as u32).min(self.nx - 1);
-        let z = (((p.z - self.origin.z) / self.cell).max(0.0) as u32).min(nz - 1);
+        let z = (((p.z - self.origin.z) / self.cell).max(0.0) as u32).min(self.nz - 1);
         z * self.nx + x
     }
 
-    /// Per cell: whether its sphere box is inside every plane, and the
-    /// squared distance range from `eye` to its centres.
+    /// The occupied cell holding `p` (one of the spheres the grid was built
+    /// from; any other point may land in an empty cell: u32::MAX).
+    fn cell_of(&self, p: Vec3) -> u32 {
+        self.dense_of[self.full_cell(p) as usize]
+    }
+
+    /// Per occupied cell: whether its sphere box is inside every plane, and
+    /// the squared distance range from `eye` to its centres.
     fn update(&mut self, planes: &[Vec4], eye: Vec3) {
         self.vis.clear();
         self.dist.clear();
         for b in &self.boxes {
-            if b[0].x > b[1].x {
-                self.vis.push(false);
-                self.dist.push([0.0, 0.0]);
-                continue;
-            }
             let (lo, hi) = (b[0], b[1]);
             let inside = planes.iter().all(|p| {
                 // the box corner furthest along the plane normal
@@ -189,38 +212,101 @@ enum Tiny {
     Proj(f32),
 }
 
-fn candidates(e: &Entry, g: Option<&Grid>, win: Option<[f32; 2]>, s2: f32, tiny: Tiny, out: &mut Vec<u32>) -> bool {
-    out.clear();
-    let Some(g) = g.filter(|_| !e.runs.is_empty()) else {
-        return false;
+/// The grid over the entries with at least GRID_MIN instances, and their
+/// runs (instances grouped by occupied cell) and the cells' refs to them.
+fn grid_entries(entries: &mut [Entry]) -> Option<Grid> {
+    let mut grid = {
+        let big: Vec<&[Vec4]> = entries.iter().filter(|e| e.spheres.len() >= GRID_MIN).map(|e| e.spheres.as_slice()).collect();
+        Grid::build(&big)
     };
-    for (ri, &(c, a, b)) in e.runs.iter().enumerate() {
-        if !g.vis[c as usize] {
+    if let Some(g) = grid.as_ref() {
+        for e in entries.iter_mut().filter(|e| e.spheres.len() >= GRID_MIN) {
+            let mut keyed: Vec<(u32, u32)> = e.spheres.iter().enumerate()
+                .map(|(k, s)| (g.cell_of(s.truncate()), k as u32)).collect();
+            keyed.sort_unstable();
+            e.order = keyed.iter().map(|k| k.1).collect();
+            let mut i = 0;
+            while i < keyed.len() {
+                let c = keyed[i].0;
+                let mut j = i;
+                while j < keyed.len() && keyed[j].0 == c {
+                    j += 1;
+                }
+                e.runs.push((c, i as u32, j as u32));
+                e.run_r.push(keyed[i..j].iter().map(|k| e.spheres[k.1 as usize].w).fold(0.0f32, f32::max));
+                i = j;
+            }
+        }
+    }
+    // each occupied cell's (entry, run) refs
+    if let Some(g) = grid.as_mut() {
+        let n = g.boxes.len();
+        let mut at = vec![0u32; n + 1];
+        for e in entries.iter() {
+            for r in &e.runs {
+                at[r.0 as usize + 1] += 1;
+            }
+        }
+        for c in 0..n {
+            at[c + 1] += at[c];
+        }
+        let mut fill = at.clone();
+        let mut refs = vec![(0u32, 0u32); at[n] as usize];
+        for (ei, e) in entries.iter().enumerate() {
+            for (ri, r) in e.runs.iter().enumerate() {
+                let f = &mut fill[r.0 as usize];
+                refs[*f as usize] = (ei as u32, ri as u32);
+                *f += 1;
+            }
+        }
+        g.at = at;
+        g.refs = refs;
+    }
+    grid
+}
+
+/// Per gridded entry: the instances in cells that passed this update and
+/// whose distance range meets the entry's squared window `win(e)` (distances
+/// x s2, the LOD scale squared), in their original order. Walks the occupied
+/// cells once; a cell that fails costs nothing per mesh.
+fn gather(g: &Grid, entries: &[Entry], win: impl Fn(&Entry) -> Option<[f32; 2]>, s2: f32, tiny: Tiny,
+          out: &mut Vec<Vec<u32>>) {
+    out.resize_with(entries.len(), Vec::new);
+    for v in out.iter_mut() {
+        v.clear();
+    }
+    for c in 0..g.boxes.len() {
+        if !g.vis[c] {
             continue;
         }
-        let rmax = e.run_r.get(ri).copied().unwrap_or(f32::MAX);
-        match tiny {
-            Tiny::Dist(k2) if rmax * rmax < k2 * g.dist[c as usize][0] => continue,
-            Tiny::Proj(focal) => {
-                if let Some(&w) = g.wmin.get(c as usize) {
-                    if w > rmax && rmax * focal < MIN_PIXELS * w {
-                        continue;
+        let [dmin, dmax] = g.dist[c];
+        for &(ei, ri) in &g.refs[g.at[c] as usize..g.at[c + 1] as usize] {
+            let e = &entries[ei as usize];
+            let rmax = e.run_r[ri as usize];
+            match tiny {
+                Tiny::Dist(k2) if rmax * rmax < k2 * dmin => continue,
+                Tiny::Proj(focal) => {
+                    if let Some(&w) = g.wmin.get(c) {
+                        if w > rmax && rmax * focal < MIN_PIXELS * w {
+                            continue;
+                        }
                     }
                 }
+                _ => {}
             }
-            _ => {}
-        }
-        if let Some([lo2, hi2]) = win {
-            let [dmin, dmax] = g.dist[c as usize];
-            if dmax * s2 < lo2 || dmin * s2 >= hi2 {
-                continue;
+            if let Some([lo2, hi2]) = win(e) {
+                if dmax * s2 < lo2 || dmin * s2 >= hi2 {
+                    continue;
+                }
             }
+            let (_, a, b) = e.runs[ri as usize];
+            out[ei as usize].extend_from_slice(&e.order[a as usize..b as usize]);
         }
-        out.extend_from_slice(&e.order[a as usize..b as usize]);
     }
     // back to the original order (the instances' draw order)
-    out.sort_unstable();
-    true
+    for v in out.iter_mut().filter(|v| v.len() > 1) {
+        v.sort_unstable();
+    }
 }
 
 /// One LOD's camera-distance window with the game's crossfades (visibility
@@ -287,8 +373,8 @@ impl Band {
 pub struct Culler {
     entries: Vec<Entry>,
     grid: Option<Grid>,
-    /// scratch: the instances a view tests (Grid)
-    cand: Vec<u32>,
+    /// scratch: per entry, the instances a view tests (Grid)
+    cands: Vec<Vec<u32>>,
     /// visible instance count per GPU mesh; None = not culled, draw as is
     counts: Vec<Option<u32>>,
     /// GPU mesh -> entry index
@@ -395,30 +481,10 @@ impl Culler {
         }
         // EVOVIEW_CULL_GRID=0: test every instance in every view
         let grid = if crate::envc::var("EVOVIEW_CULL_GRID").map_or(true, |v| v != "0") {
-            let big: Vec<&[Vec4]> = entries.iter().filter(|e| e.spheres.len() >= GRID_MIN).map(|e| e.spheres.as_slice()).collect();
-            Grid::build(&big)
+            grid_entries(&mut entries)
         } else {
             None
         };
-        if let Some(g) = grid.as_ref() {
-            for e in entries.iter_mut().filter(|e| e.spheres.len() >= GRID_MIN) {
-                let mut keyed: Vec<(u32, u32)> = e.spheres.iter().enumerate()
-                    .map(|(k, s)| (g.cell_of(s.truncate()), k as u32)).collect();
-                keyed.sort_unstable();
-                e.order = keyed.iter().map(|k| k.1).collect();
-                let mut i = 0;
-                while i < keyed.len() {
-                    let c = keyed[i].0;
-                    let mut j = i;
-                    while j < keyed.len() && keyed[j].0 == c {
-                        j += 1;
-                    }
-                    e.runs.push((c, i as u32, j as u32));
-                    e.run_r.push(keyed[i..j].iter().map(|k| e.spheres[k.1 as usize].w).fold(0.0f32, f32::max));
-                    i = j;
-                }
-            }
-        }
         let mut entry_of = vec![None; meshes.len()];
         for (k, e) in entries.iter().enumerate() {
             entry_of[e.gpu] = Some(k);
@@ -437,7 +503,7 @@ impl Culler {
         Culler {
             entries,
             grid,
-            cand: Vec::new(),
+            cands: Vec::new(),
             entry_of,
             counts: vec![None; meshes.len()],
             scratch: Vec::new(),
@@ -543,12 +609,15 @@ impl Culler {
         for v in self.cast.iter_mut() {
             v.clear();
         }
+        if let Some(g) = self.grid.as_ref() {
+            gather(g, &self.entries, |e| e.lod, s2, tiny_run, &mut self.cands);
+        }
         for ei in 0..self.entries.len() {
             let e = &self.entries[ei];
             self.vis.clear();
-            let gridded = candidates(e, self.grid.as_ref(), e.lod, s2, tiny_run, &mut self.cand);
-            let all = 0..if gridded { 0 } else { e.spheres.len() as u32 };
-            for k in self.cand.iter().copied().chain(all) {
+            let gridded = self.grid.is_some() && !e.runs.is_empty();
+            let (cand, all) = if gridded { (&self.cands[ei][..], 0..0) } else { (&[][..], 0..e.spheres.len() as u32) };
+            for k in cand.iter().copied().chain(all) {
                 let s = &e.spheres[k as usize];
                 if s.w < min_radius {
                     continue;
@@ -649,13 +718,16 @@ impl Culler {
             g.update_depth(rows[3]);
         }
         let tiny_run = if focal > 0.0 { Tiny::Proj(focal) } else { Tiny::No };
-        for e in self.entries.iter_mut() {
+        if let Some(g) = self.grid.as_ref() {
+            gather(g, &self.entries, |e| e.band.map(|b| [b.lo2, b.hi2]).or(e.lod), 1.0, tiny_run, &mut self.cands);
+        }
+        let gridded_on = self.grid.is_some();
+        for (ei, e) in self.entries.iter_mut().enumerate() {
             self.vis.clear();
             self.fade.clear();
-            let win = e.band.map(|b| [b.lo2, b.hi2]).or(e.lod);
-            let gridded = candidates(e, self.grid.as_ref(), win, 1.0, tiny_run, &mut self.cand);
-            let all = 0..if gridded { 0 } else { e.spheres.len() as u32 };
-            for k in self.cand.iter().copied().chain(all) {
+            let gridded = gridded_on && !e.runs.is_empty();
+            let (cand, all) = if gridded { (&self.cands[ei][..], 0..0) } else { (&[][..], 0..e.spheres.len() as u32) };
+            for k in cand.iter().copied().chain(all) {
                 let s = &e.spheres[k as usize];
                 let c = s.truncate().extend(1.0);
                 let r = s.w;
@@ -858,5 +930,120 @@ mod grid_tests {
         let s = [Vec4::new(0.0, 0.0, 0.0, 1.0), Vec4::new(5000.0, 0.0, 3000.0, 1.0)];
         let g = Grid::build(&[&s[..]]).unwrap();
         assert_eq!(g.cell, CELL);
+    }
+
+    /// A small LCG: the tests' scenes are random but repeatable.
+    struct Rng(u64);
+    impl Rng {
+        fn f(&mut self) -> f32 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (self.0 >> 40) as f32 / (1u64 << 24) as f32
+        }
+    }
+
+    pub(super) fn test_entry(spheres: Vec<Vec4>, lod: Option<[f32; 2]>) -> Entry {
+        let n = spheres.len();
+        Entry {
+            gpu: 0, spheres, rows: vec![[0.0; 20]; n], last: Vec::new(), shadow_buf: Default::default(),
+            shadow_count: [0; 6], shadow_last: Default::default(), lod, raw_lod: None, raw_fade: [0.0; 4],
+            shadow_to: None, shadow_src: None, band: None, last_fade: Vec::new(), runs: Vec::new(),
+            run_r: Vec::new(), order: Vec::new(), name: String::new(),
+        }
+    }
+
+    /// Meshes scattered in clumps over a `span` metre square with gaps of
+    /// empty cells, some LOD-banded, some too few for the grid.
+    fn scene(r: &mut Rng, span: f32) -> Vec<Entry> {
+        let mut out = Vec::new();
+        for m in 0..24 {
+            let n = if m % 5 == 0 { 20 } else { 60 + (r.f() * 400.0) as usize };
+            let lod = match m % 3 {
+                0 => None,
+                1 => Some([0.0, (200.0 + r.f() * 800.0).powi(2)]),
+                _ => Some([(100.0 + r.f() * 300.0).powi(2), f32::INFINITY]),
+            };
+            let mut sp = Vec::with_capacity(n);
+            let clumps: Vec<(f32, f32)> = (0..6).map(|_| (r.f() * span, r.f() * span)).collect();
+            for k in 0..n {
+                let (cx, cz) = clumps[k % clumps.len()];
+                sp.push(Vec4::new(cx + r.f() * 150.0, r.f() * 30.0, cz + r.f() * 150.0, 0.05 + r.f() * r.f() * 6.0));
+            }
+            out.push(test_entry(sp, lod));
+        }
+        out
+    }
+
+    fn frustum(eye: Vec3, at: Vec3) -> [Vec4; 6] {
+        let vp = Mat4::perspective_rh(1.0, 1.6, 0.1, 5000.0) * Mat4::look_at_rh(eye, at, Vec3::Y);
+        let rows = [vp.row(0), vp.row(1), vp.row(2), vp.row(3)];
+        let mut planes = [rows[3] + rows[0], rows[3] - rows[0], rows[3] + rows[1], rows[3] - rows[1], rows[2], rows[3] - rows[2]];
+        for p in planes.iter_mut() {
+            *p /= p.truncate().length();
+        }
+        planes
+    }
+
+    /// The per-instance test of update_view.
+    fn passes(e: &Entry, s: Vec4, planes: &[Vec4], eye: Vec3, k: f32) -> bool {
+        let c = s.truncate().extend(1.0);
+        if s.w < k * s.truncate().distance(eye) || planes.iter().any(|p| p.dot(c) < -s.w) {
+            return false;
+        }
+        e.lod.map_or(true, |[a, b]| {
+            let d2 = s.truncate().distance_squared(eye);
+            d2 >= a && d2 < b
+        })
+    }
+
+    /// The occupied-cell walk keeps every instance the per-instance test
+    /// passes, and hands each mesh exactly what walking its own runs did.
+    #[test]
+    fn occupied_cells_give_the_same_candidates() {
+        let mut r = Rng(7);
+        for trial in 0..12 {
+            let span = if trial < 6 { 3000.0 } else { 40_000.0 };
+            let mut entries = scene(&mut r, span);
+            let mut g = grid_entries(&mut entries).unwrap();
+            // only occupied cells are stored
+            assert!(g.boxes.len() < (g.nx * g.nz) as usize);
+            assert_eq!(g.refs.len(), entries.iter().map(|e| e.runs.len()).sum::<usize>());
+            for v in 0..8 {
+                let eye = Vec3::new(r.f() * span, 2.0 + r.f() * 40.0, r.f() * span);
+                let at = eye + Vec3::new(r.f() - 0.5, -0.1, r.f() - 0.5);
+                let planes = frustum(eye, at);
+                let k = if v % 2 == 0 { 0.0 } else { 0.002 };
+                g.update(&planes, eye);
+                let tiny = if k > 0.0 { Tiny::Dist(k * k) } else { Tiny::No };
+                let mut out = Vec::new();
+                gather(&g, &entries, |e| e.lod, 1.0, tiny, &mut out);
+                for (ei, e) in entries.iter().enumerate() {
+                    if e.runs.is_empty() {
+                        assert!(out[ei].is_empty());
+                        continue;
+                    }
+                    // the old way: this mesh's own runs, every one checked
+                    let mut old = Vec::new();
+                    for (ri, &(c, a, b)) in e.runs.iter().enumerate() {
+                        let c = c as usize;
+                        if !g.vis[c] || (k > 0.0 && e.run_r[ri].powi(2) < k * k * g.dist[c][0]) {
+                            continue;
+                        }
+                        if let Some([lo2, hi2]) = e.lod {
+                            if g.dist[c][1] < lo2 || g.dist[c][0] >= hi2 {
+                                continue;
+                            }
+                        }
+                        old.extend_from_slice(&e.order[a as usize..b as usize]);
+                    }
+                    old.sort_unstable();
+                    assert_eq!(out[ei], old, "trial {trial} view {v} entry {ei}");
+                    for (i, s) in e.spheres.iter().enumerate() {
+                        if passes(e, *s, &planes, eye, k) {
+                            assert!(out[ei].binary_search(&(i as u32)).is_ok(), "visible instance dropped");
+                        }
+                    }
+                }
+            }
+        }
     }
 }
