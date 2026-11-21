@@ -3332,6 +3332,7 @@ impl TrackRender {
         inst: &dyn Fn(usize) -> (&'a wgpu::Buffer, u32),
     ) {
         let mut set = false;
+        let mut geo: *const wgpu::Buffer = std::ptr::null();
         for (gi, m) in meshes.iter().enumerate() {
             let Some(extra) = m.extra.as_ref() else { continue };
             if !m.draws.iter().any(|d| self.blend(d.2) == Some(Blend::Cutout)) {
@@ -3346,10 +3347,13 @@ impl TrackRender {
                 pass.set_bind_group(0, &self.shadow_bgs[layer.min(2)], &[]);
                 set = true;
             }
-            pass.set_vertex_buffer(0, m.vertices.slice(..));
+            if !std::ptr::eq(geo, std::sync::Arc::as_ptr(&m.vertices)) {
+                pass.set_vertex_buffer(0, m.vertices.slice(..));
+                pass.set_vertex_buffer(2, extra.slice(..));
+                pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+                geo = std::sync::Arc::as_ptr(&m.vertices);
+            }
             pass.set_vertex_buffer(1, buf.slice(..));
-            pass.set_vertex_buffer(2, extra.slice(..));
-            pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
             for &(start, cnt, mi) in &m.draws {
                 if self.blend(mi) != Some(Blend::Cutout) {
                     continue;
@@ -3550,6 +3554,7 @@ impl TrackRender {
         let mut last_group = usize::MAX;
         // (counted here and added once: several threads record views at once)
         let (mut n_draws, mut n_tris) = (0u64, 0u64);
+        let mut geo: *const wgpu::Buffer = std::ptr::null();
         for (gi, m) in meshes.iter().enumerate() {
             let Some(extra) = m.extra.as_ref() else { continue };
             let n = count(gi, m.instance_count);
@@ -3568,10 +3573,15 @@ impl TrackRender {
                     set = true;
                 }
                 if !bound {
-                    pass.set_vertex_buffer(0, m.vertices.slice(..));
+                    // (meshes share their geometry buffers with their
+                    // neighbours in the scene: render.rs GeomArena)
+                    if !std::ptr::eq(geo, std::sync::Arc::as_ptr(&m.vertices)) {
+                        pass.set_vertex_buffer(0, m.vertices.slice(..));
+                        pass.set_vertex_buffer(2, extra.slice(..));
+                        pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+                        geo = std::sync::Arc::as_ptr(&m.vertices);
+                    }
                     pass.set_vertex_buffer(1, inst(gi).unwrap_or(&m.instances).slice(..));
-                    pass.set_vertex_buffer(2, extra.slice(..));
-                    pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
                     bound = true;
                 }
                 if last_group != mi {

@@ -675,13 +675,62 @@ pub struct GpuMesh {
     pub src: usize,
     /// Track meshes only: vertex colour (4) + uv1 (2) per vertex, the second
     /// vertex stream of the track pipeline. None = not track geometry.
-    pub extra: Option<wgpu::Buffer>,
+    ///
+    /// Track meshes share their three geometry buffers with their
+    /// neighbours in the scene (`GeomArena`): `draws` index the shared index
+    /// buffer, whose indices point at the mesh's own vertices in the shared
+    /// vertex buffers. Bind them whole, as for a mesh with buffers of its own.
+    pub extra: Option<std::sync::Arc<wgpu::Buffer>>,
     /// The farthest vertex from the mesh origin (m, unskinned): carcull.rs
     /// bounds each moving car's instance with it. 0 where unused.
     pub radius: f32,
 }
 
 pub const FLOATS_PER_VERTEX: usize = 20; // pos3 nrm3 uv2 tan4 boneidx4 bonewgt4
+
+/// Track geometry gathered into shared buffers while a scene is built.
+///
+/// A track is thousands of small meshes, each drawn with a handful of
+/// calls: every pass bound a mesh's vertex, colour/uv1 and index buffers
+/// before its draws (three of the six calls a track draw cost, in the main
+/// pass, the mirror, the probe and the shadow maps). Meshes that follow
+/// each other in the scene now sit in the same three buffers - up to
+/// ARENA_BYTES of vertices each - with their indices offset to their own
+/// vertices, so a pass binds the buffers once per run of meshes. The
+/// buffers hold exactly what the per-mesh ones held.
+/// EVOVIEW_GEOM_ARENA=0: buffers per mesh, as before.
+struct GeomArena {
+    verts: Vec<f32>,
+    extra: Vec<f32>,
+    idx: Vec<u32>,
+    /// the meshes (positions in the scene's list) waiting for these buffers
+    members: Vec<usize>,
+}
+
+const ARENA_BYTES: usize = 64 << 20;
+
+impl GeomArena {
+    /// Upload what has been gathered and hand the buffers to its meshes.
+    fn flush(&mut self, device: &wgpu::Device, meshes: &mut [GpuMesh]) {
+        if self.members.is_empty() {
+            return;
+        }
+        let buf = |label: &str, bytes: &[u8], usage| std::sync::Arc::new(device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor { label: Some(label), contents: bytes, usage }));
+        let v = buf("track vertices", bytemuck::cast_slice(&self.verts), wgpu::BufferUsages::VERTEX);
+        let e = buf("track vertices (colour, uv1)", bytemuck::cast_slice(&self.extra), wgpu::BufferUsages::VERTEX);
+        let i = buf("track indices", bytemuck::cast_slice(&self.idx), wgpu::BufferUsages::INDEX);
+        for &k in &self.members {
+            meshes[k].vertices = v.clone();
+            meshes[k].indices = i.clone();
+            meshes[k].extra = Some(e.clone());
+        }
+        self.verts.clear();
+        self.extra.clear();
+        self.idx.clear();
+        self.members.clear();
+    }
+}
 
 /// A car mesh's vertex and index buffers, shared with any mesh already on
 /// the GPU whose contents are the same. Each AI look and each online player
@@ -766,6 +815,10 @@ pub fn build_scene(
     let mut meshes = Vec::new();
     let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
     let mut tris = 0u32;
+    let arena_on = crate::envc::var("EVOVIEW_GEOM_ARENA").map_or(true, |v| v != "0");
+    let mut arena = GeomArena { verts: Vec::new(), extra: Vec::new(), idx: Vec::new(), members: Vec::new() };
+    // (stands in for an arena mesh's buffers until its chunk is uploaded)
+    let mut arena_stub: Option<std::sync::Arc<wgpu::Buffer>> = None;
 
     for (src_i, m) in car.meshes.iter().enumerate() {
         // The rim_blur meshes are the spinning-wheel stand-ins: a smeared disc
@@ -851,6 +904,7 @@ pub fn build_scene(
         // Track meshes carry a second vertex stream (vertex colour + uv1)
         // for the track pipeline.
         let mut extra = None;
+        let mut in_arena = false;
         if m.colors.is_some() || m.uv1.is_some() {
             let col: Vec<f32> = car.floats(m.colors);
             let uv1: Vec<f32> = car.floats(m.uv1);
@@ -867,11 +921,35 @@ pub fn build_scene(
                     e[o + 5] = uv1[i * 2 + 1];
                 }
             }
-            extra = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(&format!("{}-extra", m.name)),
-                contents: bytemuck::cast_slice(&e),
-                usage: wgpu::BufferUsages::VERTEX,
-            }));
+            if arena_on && verts.len() * 4 <= ARENA_BYTES && idx.len() * 4 <= ARENA_BYTES {
+                // (a chunk that this mesh would overfill is uploaded first)
+                if (arena.verts.len() + verts.len()) * 4 > ARENA_BYTES || (arena.idx.len() + idx.len()) * 4 > ARENA_BYTES {
+                    arena.flush(device, &mut meshes);
+                }
+                let base = (arena.verts.len() / FLOATS_PER_VERTEX) as u32;
+                let first = arena.idx.len() as u32;
+                arena.verts.extend_from_slice(&verts);
+                arena.extra.extend_from_slice(&e);
+                arena.idx.extend(idx.iter().map(|&i| i + base));
+                for d in draws.iter_mut() {
+                    d.0 += first;
+                }
+                arena.members.push(meshes.len());
+                let stub = arena_stub.get_or_insert_with(|| std::sync::Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("track geometry (pending)"),
+                    size: 16,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::INDEX,
+                    mapped_at_creation: false,
+                })));
+                extra = Some(stub.clone());
+                in_arena = true;
+            } else {
+                extra = Some(std::sync::Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&format!("{}-extra", m.name)),
+                    contents: bytemuck::cast_slice(&e),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })));
+            }
         }
         let mut inst_data = pack_instances(&m.xforms, m.facing);
         crate::track::skin_rows(car, src_i, &mut inst_data);
@@ -886,7 +964,10 @@ pub fn build_scene(
             }
         }
         // car geometry is shared between identical meshes (car_geometry)
-        let (vbuf, ibuf) = if extra.is_none() && crate::envc::var("EVOVIEW_SHARE_GEOMETRY").map_or(true, |v| v != "0") {
+        let (vbuf, ibuf) = if in_arena {
+            let stub = extra.clone().expect("an arena mesh has its stub");
+            (stub.clone(), stub)
+        } else if extra.is_none() && crate::envc::var("EVOVIEW_SHARE_GEOMETRY").map_or(true, |v| v != "0") {
             car_geometry(device, &m.name, &verts, &idx)
         } else {
             (std::sync::Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -926,6 +1007,7 @@ pub fn build_scene(
                 .map(|v| v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).fold(0.0f32, f32::max).sqrt(),
         });
     }
+    arena.flush(device, &mut meshes);
     // A machine-readable line so a sweep over every car can tell a real
     // failure from an ugly render. Batches that fell back are the honest
     // signal that a material did not bind.
@@ -5089,6 +5171,9 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 sp.set_bind_group(2, bone_bg, &[]);
                                 let (mut n_mesh, mut n_draw) = (0u64, 0u64);
                                 let mut group_set = false;
+                                let mut pipe_track: Option<bool> = Some(true);
+                                let mut geo_bound: *const wgpu::Buffer = std::ptr::null();
+                                let mut inst_bound: *const wgpu::Buffer = std::ptr::null();
                                 for (mi_mesh, m) in meshes.iter().enumerate() {
                                     if Some(mi_mesh) == ground_mesh {
                                         continue;
@@ -5121,11 +5206,22 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                         continue;
                                     }
                                     // track geometry carries its extra stream; cars do not
-                                    sp.set_pipeline(if m.extra.is_some() { &pipes_all.shadow } else { &pipes_all.shadow_car });
-                                    sp.set_vertex_buffer(0, m.vertices.slice(..));
-                                    sp.set_vertex_buffer(1, inst_buf.slice(..));
-                                    sp.set_index_buffer(m.indices.slice(..),
-                                                        wgpu::IndexFormat::Uint32);
+                                    if pipe_track != Some(m.extra.is_some()) {
+                                        sp.set_pipeline(if m.extra.is_some() { &pipes_all.shadow } else { &pipes_all.shadow_car });
+                                        pipe_track = Some(m.extra.is_some());
+                                    }
+                                    // (track meshes share their buffers with their
+                                    // neighbours, and the moving cars their rows)
+                                    if !std::ptr::eq(geo_bound, std::sync::Arc::as_ptr(&m.vertices)) {
+                                        sp.set_vertex_buffer(0, m.vertices.slice(..));
+                                        sp.set_index_buffer(m.indices.slice(..),
+                                                            wgpu::IndexFormat::Uint32);
+                                        geo_bound = std::sync::Arc::as_ptr(&m.vertices);
+                                    }
+                                    if !std::ptr::eq(inst_bound, inst_buf) {
+                                        sp.set_vertex_buffer(1, inst_buf.slice(..));
+                                        inst_bound = inst_buf;
+                                    }
                                     n_mesh += 1;
                                     // These pipelines are depth only and read nothing
                                     // of the material (no fragment stage; vs_main takes
