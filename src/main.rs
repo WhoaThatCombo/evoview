@@ -1279,7 +1279,11 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
         eprintln!("{track}: no collision surfaces found");
         std::process::exit(1);
     };
-    let ground = std::sync::Arc::new(trackdrive::Ground::new(coll, &env.map(|e| e.surface_defs.clone()).unwrap_or_default()));
+    // built on a thread while the cars loaded (Scene::build_race)
+    let ground = match scene.ground.take() {
+        Some(g) => g,
+        None => std::sync::Arc::new(trackdrive::Ground::new(coll, &env.map(|e| e.surface_defs.clone()).unwrap_or_default())),
+    };
     crate::perf::stamp("player physics + ground");
     let slot = scene.slots[0].clone();
     // the opponents: each its own physics on its model's data

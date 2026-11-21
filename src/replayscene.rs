@@ -86,6 +86,9 @@ pub struct Scene {
     /// so a driven car keeps its steering, needles, lights and doors
     pub skeleton: Option<crate::load::Skeleton>,
     pub animations: Vec<crate::load::Animation>,
+    /// build_race: the driving ground of the track's colliders, built on a
+    /// thread of its own while the cars load (~4 s on the Nordschleife)
+    pub ground: Option<std::sync::Arc<crate::trackdrive::Ground>>,
 }
 
 /// Per-car wheel animation, precomputed once so scrubbing and looping stay
@@ -724,6 +727,7 @@ impl Scene {
             track_meshes,
             skeleton: None,
             animations: Vec::new(),
+            ground: None,
         })
     }
 
@@ -809,9 +813,45 @@ impl Scene {
     /// player's own design and paints, mp.rs) instead of a picked look.
     pub fn build_race(pkg: &Path, base: Option<&Path>, track: &str, model: &str, ai: &[String], own: &[Option<Vec<u8>>])
             -> Result<(Scene, crate::load::Vfs, Vec<(String, crate::load::Vfs)>, Vec<(usize, usize, usize)>), String> {
-        let mut t = crate::load::load_track_any(pkg, track, base)
-            .map_err(|e| format!("track {track}: {e}"))?;
-        let track_env = t.car.track_env.take();
+        // The cars (the player's, then the opponents') load on a thread of
+        // their own while this one loads the track: neither reads the
+        // other's data, and the loader globals the cars set (CAR_TEX_SKIP,
+        // the look env, the car LODs) are read by the car loader only.
+        // EVOVIEW_LOAD_SERIAL=1: one after the other, as before.
+        let serial = crate::envc::var_os("EVOVIEW_LOAD_SERIAL").is_some();
+        std::thread::scope(|sc| {
+            let job = if serial {
+                None
+            } else {
+                std::thread::Builder::new().name("car load".into())
+                    .spawn_scoped(sc, || race_cars(pkg, base, model, ai, own)).ok()
+            };
+            let mut t = crate::load::load_track_any(pkg, track, base).map_err(|e| format!("track {track}: {e}"));
+            crate::perf::stamp("track loaded");
+            // the driving ground (one more thread) while the cars finish:
+            // it needs only the colliders; the env comes back with it
+            let ground_job = t.as_mut().ok().and_then(|t| t.car.track_env.take()).map(|e| std::thread::spawn(move || {
+                let t0 = std::time::Instant::now();
+                let g = e.collision.as_ref().map(|c| std::sync::Arc::new(crate::trackdrive::Ground::new(c, &e.surface_defs)));
+                crate::perf::add("ground (thread)", t0.elapsed().as_secs_f64());
+                (e, g)
+            }));
+            let cars = match job {
+                Some(j) => j.join().map_err(|_| "the car loader crashed".to_string())?,
+                None => race_cars(pkg, base, model, ai, own),
+            };
+            crate::perf::stamp("cars loaded");
+            Self::race_scene(t?, cars?, ground_job, model, track)
+        })
+    }
+
+    /// build_race's second half: the track, the player's car and the
+    /// opponents (merged among themselves by `race_cars`) into one scene,
+    /// the same as merging them one after the other.
+    #[allow(clippy::type_complexity)]
+    fn race_scene(mut t: crate::load::Loaded, cars: RaceCars, ground_job: Option<GroundJob>, model: &str, track: &str)
+            -> Result<(Scene, crate::load::Vfs, Vec<(String, crate::load::Vfs)>, Vec<(usize, usize, usize)>), String> {
+        let RaceCars { vfs, mut loaded, ai_vfs, place, ai_meshes, ai_textures, ai_tex_src, ai_materials, ai_blob, ai_slots, share } = cars;
         let mut meshes = Vec::new();
         let mut textures = Vec::new();
         let mut materials = Vec::new();
@@ -822,170 +862,72 @@ impl Scene {
         let mut blob = t.car.take_blob();
         drop(t);
         let track_meshes = meshes.len();
-        crate::perf::stamp("track loaded");
-        let open = |model: &str| open_car(pkg, model, base);
-        let mut vfs = open(model)?;
-        let mut loaded = crate::load::load(&mut vfs).map_err(|e| format!("car {model}: {e}"))?;
         let car_tex_base = textures.len();
+        // room for the player's car and the opponents at once: one move of
+        // the GBs of track blob, not one per append
+        grow(&mut blob, loaded.car.blob().len() + ai_blob.len() + 64);
         let range = merge(&mut meshes, &mut textures, &mut tex_src, &mut materials, &mut blob, &loaded.car, Some("c0"));
         let s = measure_slot(&mut meshes, range, &loaded.car, model, 1);
         // merged and measured: its blob is a dead copy from here on (only
         // fx / rain / skeleton are taken from `loaded` at the end)
         drop(loaded.car.take_blob());
         ram_log("track + player car", Some(&blob));
-        crate::perf::stamp("player car loaded");
         let mut slots = vec![s];
-        let player_look = crate::load::pick_visual_preset(&mut vfs).map(|k| crate::livery::stem_of(&k));
-        let max_looks = crate::envc::var("EVOVIEW_AI_LIVERIES").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(6);
-        let mut ai_vfs: Vec<(String, crate::load::Vfs)> = Vec::new();
-        let mut place = vec![(0usize, 0usize, 0usize); ai.len()];
-        // the env the loader reads a look from, put back after
-        let saved = (crate::envc::var("EVOVIEW_VISUAL").ok(), crate::envc::var("EVOVIEW_PAINT").ok());
-        let restore = |k: &str, v: &Option<String>| match v {
-            Some(v) => crate::envc::set_var(k, v),
-            None => crate::envc::remove_var(k),
-        };
-        let t_ai = std::time::Instant::now();
         let (ai_tex_base, ai_mesh_base) = (textures.len(), meshes.len());
-        // the opponents' textures EVOVIEW_AI_TEX_SKIP mips down: 1 (a quarter
-        // of the memory), 2 online (a whole server of liveries)
-        let ai_skip = crate::envc::var("EVOVIEW_AI_TEX_SKIP").ok().and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(if own.iter().any(|o| o.is_some()) { 2 } else { 1 });
-        crate::load::CAR_TEX_SKIP.store(ai_skip, std::sync::atomic::Ordering::Relaxed);
-        crate::load::set_car_lods(true);
-        // put the loader's globals back on every way out, an early `?` included
-        struct Restore;
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                crate::load::CAR_TEX_SKIP.store(0, std::sync::atomic::Ordering::Relaxed);
-                crate::load::set_car_lods(false);
+        // the opponents: a texture whose content the track or the player's
+        // car already has points at that copy (as merge_shared, merging
+        // after them, did); the rest, the meshes and the slots shift past
+        // the track's and the player's
+        let have: std::collections::HashMap<&str, usize> = tex_src.iter().enumerate()
+            .filter(|(_, k)| share && !k.is_empty() && !k.starts_with("merged:"))
+            .map(|(i, k)| (k.as_str(), i))
+            .collect();
+        let mut to = Vec::with_capacity(ai_textures.len());
+        let mut kept = 0usize;
+        for k in &ai_tex_src {
+            match have.get(k.as_str()) {
+                Some(&j) => to.push(j),
+                None => {
+                    to.push(ai_tex_base + kept);
+                    kept += 1;
+                }
             }
         }
-        let _restore = Restore;
-        let mut models: Vec<&String> = Vec::new();
-        for m in ai {
-            if !models.contains(&m) {
-                models.push(m);
+        drop(have);
+        grow(&mut blob, ai_blob.len() + 16);
+        while blob.len() % 16 != 0 {
+            blob.push(0);
+        }
+        let off = blob.len() as u64;
+        blob.extend_from_slice(&ai_blob);
+        drop(ai_blob);
+        tex_src.resize(textures.len(), String::new());
+        for (i, (mut t, k)) in ai_textures.into_iter().zip(ai_tex_src).enumerate() {
+            if to[i] >= ai_tex_base {
+                t.data[0] += off;
+                textures.push(t);
+                tex_src.push(k);
             }
         }
-        for (mi, m) in models.iter().enumerate() {
-            // this model's geometry already in the blob (merge_shared)
-            let mut geo = std::collections::HashMap::new();
-            let cars: Vec<usize> = (0..ai.len()).filter(|&i| &ai[i] == *m).collect();
-            // ⚠ one opponent model that cannot be opened (a stub or
-            // unreleased car id on a server) must not end the session: those
-            // cars are drawn (and driven) as the player's model instead
-            let (mut v, m) = match open(m) {
-                Ok(v) => (v, m.as_str()),
-                Err(e) => {
-                    eprintln!("  AI car {m}: {e}; using {model} instead");
-                    (open(model)?, model)
-                }
-            };
-            let list = crate::livery::list(&mut v);
-            let looks: Vec<Option<crate::livery::Look>> = if max_looks == 0 {
-                vec![None; cars.len()]
-            } else {
-                let paints = crate::load::body_paints(&mut v);
-                let mine = if m == model { player_look.as_deref() } else { None };
-                // each livery's own paints (env-selected, as the loader reads them)
-                let own: Vec<(String, Vec<String>)> = list.iter().map(|l| {
-                    crate::envc::set_var("EVOVIEW_VISUAL", &l.stem);
-                    let p = crate::load::preset_paints(&mut v);
-                    (l.stem.clone(), p)
-                }).collect();
-                restore("EVOVIEW_VISUAL", &saved.0);
-                let own_of = |s: &str| own.iter().find(|o| o.0 == s).map_or(Vec::new(), |o| o.1.clone());
-                println!("AI model {m}: {} livery(s), {} body colour(s)", list.len(), paints.len());
-                if crate::envc::var_os("EVOVIEW_AI_LOOK_LOG").is_some() {
-                    for ext in ["design", "cardesign", "visualcarpreset", "oemmultilayercolor"] {
-                        for d in ["skins", "presets", "", "skins/designs"] {
-                            for k in v.list(d, ext) {
-                                println!("  look file {k}");
-                            }
-                        }
-                    }
-                    println!("  body paints {paints:?}");
-                }
-                let l = crate::livery::ai_looks(&list, mine, &paints, &own_of, cars.len(), max_looks, mi * 3);
-                if l.is_empty() { vec![None; cars.len()] } else { l.into_iter().map(Some).collect() }
-            };
-            // online: a player's own look, as a visual preset made from their
-            // final state (named by a hash of it, so equal looks share a slot)
-            let looks: Vec<Option<crate::livery::Look>> = cars.iter().zip(looks).map(|(&c, picked)| {
-                let Some(fs) = own.get(c).and_then(|o| o.as_ref()) else { return picked };
-                let Some(bytes) = crate::load::netcar_visual(&mut v, fs) else { return picked };
-                let mut h: u64 = 0xcbf29ce484222325;
-                for b in &bytes {
-                    h = (h ^ *b as u64).wrapping_mul(0x100000001b3);
-                }
-                let stem = format!("mp_{h:016x}");
-                v.add_file(&format!("presets/{stem}.visualcarpreset"), bytes);
-                Some(crate::livery::Look { visual: stem, paint: None })
-            }).collect();
-            let mut distinct: Vec<Option<crate::livery::Look>> = Vec::new();
-            for l in &looks {
-                if !distinct.contains(l) {
-                    distinct.push(l.clone());
-                }
+        for mut m in ai_materials {
+            for v in m.slots.values_mut() {
+                *v = to[*v];
             }
-            if distinct.len() > 1 {
-                // the decoded textures stay for the next look's load
-                v.keep_textures();
-            }
-            for look in &distinct {
-                if let Some(l) = look {
-                    crate::envc::set_var("EVOVIEW_VISUAL", &l.visual);
-                    match &l.paint {
-                        Some(p) => crate::envc::set_var("EVOVIEW_PAINT", p),
-                        None => restore("EVOVIEW_PAINT", &saved.1),
-                    }
-                }
-                let r = crate::load::load(&mut v);
-                restore("EVOVIEW_VISUAL", &saved.0);
-                restore("EVOVIEW_PAINT", &saved.1);
-                // a look that fails: the model's default look, then the
-                // player's model - never the whole session
-                let r = r.or_else(|e| {
-                    eprintln!("  AI car {m}: {e}; trying its default look");
-                    crate::load::load(&mut v)
-                }).or_else(|e| {
-                    eprintln!("  AI car {m}: {e}; drawn as {model}");
-                    open(model).and_then(|mut pv| crate::load::load(&mut pv))
-                });
-                let l = r.map_err(|e| format!("AI car {m}: {e}"))?;
-                let si = slots.len();
-                let mine: Vec<usize> = cars.iter().zip(&looks).filter(|(_, x)| *x == look).map(|(&c, _)| c).collect();
-                let tag = format!("a{}", si - 1);
-                let range = if crate::envc::var("EVOVIEW_AI_SHARE_TEX").map_or(true, |v| v != "0") {
-                    merge_shared(&mut meshes, &mut textures, &mut tex_src, &mut materials, &mut blob, &l.car, &tag, &mut geo)
-                } else {
-                    let r = merge(&mut meshes, &mut textures, &mut tex_src, &mut materials, &mut blob, &l.car, Some(&tag));
-                    for i in r.clone() {
-                        meshes[i].bone_idx = None;
-                        meshes[i].bone_wgt = None;
-                    }
-                    r
-                };
-                slots.push(measure_slot(&mut meshes, range, &l.car, m, mine.len()));
-                ram_log(&format!("look {} {m}", si - 1), Some(&blob));
-                for (inst, &c) in mine.iter().enumerate() {
-                    place[c] = (mi, si, inst);
-                }
-                println!("AI look {}: {m} {} {} x{}", si - 1,
-                         look.as_ref().map_or("(default)", |l| l.visual.as_str()),
-                         look.as_ref().and_then(|l| l.paint.as_deref()).unwrap_or("-"), mine.len());
-            }
-            // ⚠ the look caches (every decoded texture and file read) were
-            // only for this model's next look: kept, every model's stayed
-            // resident while all later models loaded and merged - only the
-            // physics is read from this vfs from here on
-            v.drop_kept();
-            ai_vfs.push((m.to_string(), v));
+            materials.push(m);
         }
-        drop(_restore);
-        if !ai.is_empty() {
-            println!("AI cars: {} model(s), {} look(s), loaded in {:.1}s", models.len(), slots.len() - 1, t_ai.elapsed().as_secs_f32());
+        for mut m in ai_meshes {
+            shift_mesh(&mut m, off);
+            meshes.push(m);
+        }
+        let sh = |v: &mut Vec<usize>| v.iter_mut().for_each(|i| *i += ai_mesh_base);
+        for mut s in ai_slots {
+            sh(&mut s.meshes);
+            s.wheels.iter_mut().for_each(sh);
+            s.lods.iter_mut().for_each(|l| {
+                l.0 += ai_mesh_base;
+                l.2 += ai_mesh_base;
+            });
+            slots.push(s);
         }
         // the other cars' textures further down when the session would not
         // fit in the VRAM free (vram.rs)
@@ -996,6 +938,12 @@ impl Scene {
         }
         ram_log("opponents planned", Some(&blob));
         crate::perf::stamp("opponents loaded + planned");
+        let (track_env, ground) = match ground_job.map(|j| j.join()) {
+            Some(Ok((e, g))) => (Some(e), g),
+            Some(Err(_)) => return Err(format!("track {track}: building the ground failed")),
+            None => (None, None),
+        };
+        crate::perf::stamp("ground joined");
         let mut car = Car::from_parts(meshes, textures, materials, blob);
         car.tex_src = tex_src;
         car.track_env = track_env;
@@ -1006,8 +954,194 @@ impl Scene {
         car.rain_streaks = loaded.car.rain_streaks.clone();
         let has_rig = loaded.skeleton.rig.is_some();
         Ok((Scene { car, slots, track_meshes,
-                    skeleton: has_rig.then_some(loaded.skeleton), animations: loaded.animations }, vfs, ai_vfs, place))
+                    skeleton: has_rig.then_some(loaded.skeleton), animations: loaded.animations, ground }, vfs, ai_vfs, place))
     }
+}
+
+/// build_race's cars, loaded beside the track: the player's (not merged
+/// yet) and the opponents, merged among themselves (`ai_*`: blob offsets
+/// into `ai_blob`, mesh indices into `ai_meshes`, texture indices into
+/// `ai_textures`).
+/// build_race's ground thread: the track's env (back) and its ground.
+type GroundJob = std::thread::JoinHandle<(Box<crate::track::TrackEnv>, Option<std::sync::Arc<crate::trackdrive::Ground>>)>;
+
+struct RaceCars {
+    vfs: crate::load::Vfs,
+    loaded: crate::load::Loaded,
+    ai_vfs: Vec<(String, crate::load::Vfs)>,
+    place: Vec<(usize, usize, usize)>,
+    ai_meshes: Vec<MeshEntry>,
+    ai_textures: Vec<crate::asset::TextureEntry>,
+    ai_tex_src: Vec<String>,
+    ai_materials: Vec<crate::asset::MaterialEntry>,
+    ai_blob: Vec<u8>,
+    ai_slots: Vec<Slot>,
+    /// EVOVIEW_AI_SHARE_TEX: textures shared by content key
+    share: bool,
+}
+
+fn race_cars(pkg: &Path, base: Option<&Path>, model: &str, ai: &[String], own: &[Option<Vec<u8>>]) -> Result<RaceCars, String> {
+    let open = |model: &str| open_car(pkg, model, base);
+    let mut vfs = open(model)?;
+    let loaded = crate::load::load(&mut vfs).map_err(|e| format!("car {model}: {e}"))?;
+    crate::perf::stamp("player car loaded");
+    let (mut meshes, mut textures, mut materials, mut tex_src, mut blob) = (Vec::new(), Vec::new(), Vec::new(), Vec::<String>::new(), Vec::new());
+    let mut slots: Vec<Slot> = Vec::new();
+    let share = crate::envc::var("EVOVIEW_AI_SHARE_TEX").map_or(true, |v| v != "0");
+    let player_look = crate::load::pick_visual_preset(&mut vfs).map(|k| crate::livery::stem_of(&k));
+    let max_looks = crate::envc::var("EVOVIEW_AI_LIVERIES").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(6);
+    let mut ai_vfs: Vec<(String, crate::load::Vfs)> = Vec::new();
+    let mut place = vec![(0usize, 0usize, 0usize); ai.len()];
+    // the env the loader reads a look from, put back after
+    let saved = (crate::envc::var("EVOVIEW_VISUAL").ok(), crate::envc::var("EVOVIEW_PAINT").ok());
+    let restore = |k: &str, v: &Option<String>| match v {
+        Some(v) => crate::envc::set_var(k, v),
+        None => crate::envc::remove_var(k),
+    };
+    let t_ai = std::time::Instant::now();
+    // the opponents' textures EVOVIEW_AI_TEX_SKIP mips down: 1 (a quarter
+    // of the memory), 2 online (a whole server of liveries)
+    let ai_skip = crate::envc::var("EVOVIEW_AI_TEX_SKIP").ok().and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(if own.iter().any(|o| o.is_some()) { 2 } else { 1 });
+    crate::load::CAR_TEX_SKIP.store(ai_skip, std::sync::atomic::Ordering::Relaxed);
+    crate::load::set_car_lods(true);
+    // put the loader's globals back on every way out, an early `?` included
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            crate::load::CAR_TEX_SKIP.store(0, std::sync::atomic::Ordering::Relaxed);
+            crate::load::set_car_lods(false);
+        }
+    }
+    let _restore = Restore;
+    let mut models: Vec<&String> = Vec::new();
+    for m in ai {
+        if !models.contains(&m) {
+            models.push(m);
+        }
+    }
+    for (mi, m) in models.iter().enumerate() {
+        // this model's geometry already in the blob (merge_shared)
+        let mut geo = std::collections::HashMap::new();
+        let cars: Vec<usize> = (0..ai.len()).filter(|&i| &ai[i] == *m).collect();
+        // ⚠ one opponent model that cannot be opened (a stub or
+        // unreleased car id on a server) must not end the session: those
+        // cars are drawn (and driven) as the player's model instead
+        let (mut v, m) = match open(m) {
+            Ok(v) => (v, m.as_str()),
+            Err(e) => {
+                eprintln!("  AI car {m}: {e}; using {model} instead");
+                (open(model)?, model)
+            }
+        };
+        let list = crate::livery::list(&mut v);
+        let looks: Vec<Option<crate::livery::Look>> = if max_looks == 0 {
+            vec![None; cars.len()]
+        } else {
+            let paints = crate::load::body_paints(&mut v);
+            let mine = if m == model { player_look.as_deref() } else { None };
+            // each livery's own paints (env-selected, as the loader reads them)
+            let own: Vec<(String, Vec<String>)> = list.iter().map(|l| {
+                crate::envc::set_var("EVOVIEW_VISUAL", &l.stem);
+                let p = crate::load::preset_paints(&mut v);
+                (l.stem.clone(), p)
+            }).collect();
+            restore("EVOVIEW_VISUAL", &saved.0);
+            let own_of = |s: &str| own.iter().find(|o| o.0 == s).map_or(Vec::new(), |o| o.1.clone());
+            println!("AI model {m}: {} livery(s), {} body colour(s)", list.len(), paints.len());
+            if crate::envc::var_os("EVOVIEW_AI_LOOK_LOG").is_some() {
+                for ext in ["design", "cardesign", "visualcarpreset", "oemmultilayercolor"] {
+                    for d in ["skins", "presets", "", "skins/designs"] {
+                        for k in v.list(d, ext) {
+                            println!("  look file {k}");
+                        }
+                    }
+                }
+                println!("  body paints {paints:?}");
+            }
+            let l = crate::livery::ai_looks(&list, mine, &paints, &own_of, cars.len(), max_looks, mi * 3);
+            if l.is_empty() { vec![None; cars.len()] } else { l.into_iter().map(Some).collect() }
+        };
+        // online: a player's own look, as a visual preset made from their
+        // final state (named by a hash of it, so equal looks share a slot)
+        let looks: Vec<Option<crate::livery::Look>> = cars.iter().zip(looks).map(|(&c, picked)| {
+            let Some(fs) = own.get(c).and_then(|o| o.as_ref()) else { return picked };
+            let Some(bytes) = crate::load::netcar_visual(&mut v, fs) else { return picked };
+            let mut h: u64 = 0xcbf29ce484222325;
+            for b in &bytes {
+                h = (h ^ *b as u64).wrapping_mul(0x100000001b3);
+            }
+            let stem = format!("mp_{h:016x}");
+            v.add_file(&format!("presets/{stem}.visualcarpreset"), bytes);
+            Some(crate::livery::Look { visual: stem, paint: None })
+        }).collect();
+        let mut distinct: Vec<Option<crate::livery::Look>> = Vec::new();
+        for l in &looks {
+            if !distinct.contains(l) {
+                distinct.push(l.clone());
+            }
+        }
+        if distinct.len() > 1 {
+            // the decoded textures stay for the next look's load
+            v.keep_textures();
+        }
+        for look in &distinct {
+            if let Some(l) = look {
+                crate::envc::set_var("EVOVIEW_VISUAL", &l.visual);
+                match &l.paint {
+                    Some(p) => crate::envc::set_var("EVOVIEW_PAINT", p),
+                    None => restore("EVOVIEW_PAINT", &saved.1),
+                }
+            }
+            let r = crate::load::load(&mut v);
+            restore("EVOVIEW_VISUAL", &saved.0);
+            restore("EVOVIEW_PAINT", &saved.1);
+            // a look that fails: the model's default look, then the
+            // player's model - never the whole session
+            let r = r.or_else(|e| {
+                eprintln!("  AI car {m}: {e}; trying its default look");
+                crate::load::load(&mut v)
+            }).or_else(|e| {
+                eprintln!("  AI car {m}: {e}; drawn as {model}");
+                open(model).and_then(|mut pv| crate::load::load(&mut pv))
+            });
+            let l = r.map_err(|e| format!("AI car {m}: {e}"))?;
+            let si = slots.len() + 1;
+            let mine: Vec<usize> = cars.iter().zip(&looks).filter(|(_, x)| *x == look).map(|(&c, _)| c).collect();
+            let tag = format!("a{}", si - 1);
+            let range = if crate::envc::var("EVOVIEW_AI_SHARE_TEX").map_or(true, |v| v != "0") {
+                merge_shared(&mut meshes, &mut textures, &mut tex_src, &mut materials, &mut blob, &l.car, &tag, &mut geo)
+            } else {
+                let r = merge(&mut meshes, &mut textures, &mut tex_src, &mut materials, &mut blob, &l.car, Some(&tag));
+                for i in r.clone() {
+                    meshes[i].bone_idx = None;
+                    meshes[i].bone_wgt = None;
+                }
+                r
+            };
+            slots.push(measure_slot(&mut meshes, range, &l.car, m, mine.len()));
+            ram_log(&format!("look {} {m}", si - 1), Some(&blob));
+            for (inst, &c) in mine.iter().enumerate() {
+                place[c] = (mi, si, inst);
+            }
+            println!("AI look {}: {m} {} {} x{}", si - 1,
+                     look.as_ref().map_or("(default)", |l| l.visual.as_str()),
+                     look.as_ref().and_then(|l| l.paint.as_deref()).unwrap_or("-"), mine.len());
+        }
+        // ⚠ the look caches (every decoded texture and file read) were
+        // only for this model's next look: kept, every model's stayed
+        // resident while all later models loaded and merged - only the
+        // physics is read from this vfs from here on
+        v.drop_kept();
+        ai_vfs.push((m.to_string(), v));
+    }
+    drop(_restore);
+    if !ai.is_empty() {
+        println!("AI cars: {} model(s), {} look(s), loaded in {:.1}s", models.len(), slots.len(), t_ai.elapsed().as_secs_f32());
+    }
+
+    Ok(RaceCars { vfs, loaded, ai_vfs, place, ai_meshes: meshes, ai_textures: textures, ai_tex_src: tex_src,
+                  ai_materials: materials, ai_blob: blob, ai_slots: slots, share })
 }
 
 /// A car's vfs: from the package, else a mod car (Saved Games/ACE/mods/
