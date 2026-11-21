@@ -1966,9 +1966,11 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
             .await
             .expect("device (does this GPU support BC textures?)"),
     };
-    // shared with the "mp cars" worker, which uploads a late joiner's meshes
+    // shared with the "mp cars" worker, which uploads a late joiner's meshes,
+    // and with the submit thread (submit.rs)
     let device = std::sync::Arc::new(device);
     let queue = std::sync::Arc::new(queue);
+    let mut submitter = if crate::submit::enabled() { crate::submit::Submitter::new(queue.clone()) } else { None };
     crate::perf::add("device init", t_device.elapsed().as_secs_f64());
 
     let size = window.inner_size();
@@ -5178,7 +5180,12 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         let mut enc = device.create_command_encoder(&Default::default());
                         // command buffers finished before `enc`'s, in submit order
                         let mut cmd_bufs: Vec<wgpu::CommandBuffer> = Vec::new();
-                        let mut motion_recorded: Option<(wgpu::CommandBuffer, Vec<(usize, &'static str)>)> = None;
+                        let mut motion_recorded: Option<(Option<wgpu::CommandBuffer>, Vec<(usize, &'static str)>)> = None;
+                        // the frame's way to the submit thread while its passes are
+                        // recorded on workers (submit.rs), and the place in the
+                        // frame's order of this thread's next command buffer
+                        let mut sub_tx: Option<crate::submit::FrameTx> = None;
+                        let mut sub_seq = 0u32;
                         // records the motion vectors (set up with the passes below)
                         let rec_motion;
                         let encode_t = crate::bench::cpu("encode");
@@ -5763,7 +5770,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             // and dash, 1 shadows, 2 mirrors, 3 probe, 4 cars, 5 the
                             // track's opaque batches, 6 motion vectors), each with
                             // the bench marks written into it
-                            type Recorded = (usize, wgpu::CommandBuffer, Vec<(usize, &'static str)>);
+                            type Recorded = (usize, Option<wgpu::CommandBuffer>, Vec<(usize, &'static str)>);
                             type Job<'j> = (usize, Box<dyn FnOnce(&mut wgpu::CommandEncoder) + Send + 'j>);
                             let rec_motion_r = &rec_motion;
                             let mut jobs_par: Vec<Job> = Vec::new();
@@ -5804,15 +5811,44 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 // what this thread recorded so far goes first
                                 crate::bench::marks_flush();
                                 let pre = std::mem::replace(&mut enc, device.create_command_encoder(&Default::default()));
-                                cmd_bufs.push(pre.finish());
+                                sub_tx = submitter.as_mut().map(|s| s.begin());
+                                match sub_tx.as_ref() {
+                                    Some(tx) => tx.cmd(0, pre.finish()),
+                                    None => cmd_bufs.push(pre.finish()),
+                                }
                             }
+                            // each job's place in the frame's order: after `pre`, by
+                            // slot; this thread's main pass follows the last of
+                            // slots 0-5, the motion vectors (slot 6) follow that
+                            let mut seq_of = [0u32; 7];
+                            {
+                                let mut slots: Vec<usize> = jobs_par.iter().map(|j| j.0).collect();
+                                slots.sort();
+                                let mut k = 1u32;
+                                for sl in slots {
+                                    if sl == 6 {
+                                        k += 1;
+                                    }
+                                    seq_of[sl] = k;
+                                    k += 1;
+                                }
+                                sub_seq = jobs_par.iter().filter(|j| j.0 < 6).count() as u32 + 1;
+                            }
+                            let sub_tx_r = sub_tx.as_ref();
                             let mut recorded: Vec<Recorded> = Vec::new();
                             std::thread::scope(|s| {
                             let mut workers = Vec::new();
                             let anim_worker = anim_time.take().and_then(|tm| track_r.map(|t| s.spawn(move || {
                                 let _t = crate::bench::cpu("track anim");
                                 t.animate(queue_r, tm);
+                                // (its writes are queued: the passes may go out)
+                                if let Some(tx) = sub_tx_r {
+                                    tx.open();
+                                }
                             })));
+                            if let (None, Some(tx)) = (anim_worker.as_ref(), sub_tx_r) {
+                                tx.open();
+                            }
                             if par {
                                 // shared out by their usual cost (ms of recording,
                                 // roughly), the biggest first, each to the worker
@@ -5830,7 +5866,14 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     workers.push(s.spawn(move || g.into_iter().map(|(slot, f)| {
                                         let mut e = device_r.create_command_encoder(&Default::default());
                                         f(&mut e);
-                                        (slot, e.finish(), crate::bench::marks_take())
+                                        let cb = match sub_tx_r {
+                                            Some(tx) => {
+                                                tx.cmd(seq_of[slot], e.finish());
+                                                None
+                                            }
+                                            None => Some(e.finish()),
+                                        };
+                                        (slot, cb, crate::bench::marks_take())
                                     }).collect::<Vec<Recorded>>()));
                                 }
                             } else {
@@ -6036,7 +6079,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 if slot == 6 {
                                     motion_recorded = Some((cb, marks));
                                 } else {
-                                    cmd_bufs.push(cb);
+                                    cmd_bufs.extend(cb);
                                     crate::bench::marks_append(marks);
                                 }
                             }
@@ -6123,8 +6166,15 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 (Some((cb, marks)), _) => {
                                     crate::bench::marks_flush();
                                     let before = std::mem::replace(&mut enc, device.create_command_encoder(&Default::default()));
-                                    cmd_bufs.push(before.finish());
-                                    cmd_bufs.push(cb);
+                                    match sub_tx.as_ref() {
+                                        // (the motion vectors' went from their worker)
+                                        Some(tx) => {
+                                            tx.cmd(sub_seq, before.finish());
+                                            sub_seq += 2;
+                                        }
+                                        None => cmd_bufs.push(before.finish()),
+                                    }
+                                    cmd_bufs.extend(cb);
                                     crate::bench::marks_append(marks);
                                     true
                                 }
@@ -6273,8 +6323,15 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         drop(encode_t);
                         let submitted = {
                             let _t = crate::bench::cpu("submit");
-                            cmd_bufs.push(enc.finish());
-                            queue.submit(cmd_bufs)
+                            match (sub_tx.take(), submitter.as_ref()) {
+                                // the rest went as it was finished: wait for the
+                                // submit thread to have put the whole frame on the queue
+                                (Some(_), Some(s)) => s.end(sub_seq, enc.finish()).expect("submit thread"),
+                                _ => {
+                                    cmd_bufs.push(enc.finish());
+                                    queue.submit(cmd_bufs)
+                                }
+                            }
                         };
                         if let Some(p) = post.as_ref() {
                             p.after_submit();

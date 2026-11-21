@@ -73,6 +73,7 @@ mod dlss;
 mod fsr;
 mod install;
 mod bench;
+mod submit;
 mod perf;
 mod audio;
 mod carsound;
