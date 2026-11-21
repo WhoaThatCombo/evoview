@@ -312,6 +312,8 @@ impl Motion {
             pass.draw(0..3, 0..1);
             pass.set_pipeline(&self.obj_pipe);
             let mut n_draw = 0u64;
+            static MERGE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            let merge = *MERGE.get_or_init(|| crate::envc::var("EVOVIEW_MOTION_MERGE").map_or(true, |v| v != "0"));
             for &i in &dyns {
                 let m = &meshes[i];
                 let Some(prev) = self.prev_inst[i].as_ref() else { continue };
@@ -319,11 +321,27 @@ impl Motion {
                 pass.set_vertex_buffer(1, m.instances.slice(..));
                 pass.set_vertex_buffer(2, prev.slice(..));
                 pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+                // (no material here: batches that follow each other in the
+                // index buffer are one draw, the triangles in the same order.
+                // EVOVIEW_MOTION_MERGE=0: a draw per batch)
+                let mut run: Option<(u32, u32)> = None;
                 for &(start, count, mi) in &m.draws {
-                    if opaque(mi) {
-                        pass.draw_indexed(start..start + count, 0, 0..m.instance_count);
-                        n_draw += 1;
+                    if !opaque(mi) {
+                        continue;
                     }
+                    run = match run {
+                        Some((a, b)) if b == start && merge => Some((a, start + count)),
+                        Some((a, b)) => {
+                            pass.draw_indexed(a..b, 0, 0..m.instance_count);
+                            n_draw += 1;
+                            Some((start, start + count))
+                        }
+                        None => Some((start, start + count)),
+                    };
+                }
+                if let Some((a, b)) = run {
+                    pass.draw_indexed(a..b, 0, 0..m.instance_count);
+                    n_draw += 1;
                 }
             }
             crate::bench::count("motion meshes", dyns.len() as u64);

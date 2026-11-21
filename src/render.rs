@@ -5029,6 +5029,8 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 else { (0..mat_groups.len()).map(|mi| materials.casts_no_shadow(mi)).collect() };
                             let (meshes_r, carcull_r, culler_r, track_r, mirrors_r, probe_r, ssr_r) =
                                 (&meshes[..], &carcull, culler.as_ref(), track.as_ref(), mirrors.as_ref(), probe.as_ref(), ssr.as_ref());
+                            static SHADOW_MERGE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                            let shadow_merge = *SHADOW_MERGE.get_or_init(|| crate::envc::var("EVOVIEW_SHADOW_MERGE").map_or(true, |v| v != "0"));
                             let rec_shadow = |enc: &mut wgpu::CommandEncoder| {
                             let _t = crate::bench::cpu("enc shadow");
                             let (meshes, carcull, culler, track) = (meshes_r, carcull_r, culler_r, track_r);
@@ -5082,6 +5084,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 };
                                 sp.set_bind_group(2, bone_bg, &[]);
                                 let (mut n_mesh, mut n_draw) = (0u64, 0u64);
+                                let mut group_set = false;
                                 for (mi_mesh, m) in meshes.iter().enumerate() {
                                     if Some(mi_mesh) == ground_mesh {
                                         continue;
@@ -5115,6 +5118,15 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     sp.set_index_buffer(m.indices.slice(..),
                                                         wgpu::IndexFormat::Uint32);
                                     n_mesh += 1;
+                                    // These pipelines are depth only and read nothing
+                                    // of the material (no fragment stage; vs_main takes
+                                    // the camera, the bones and the instance): one
+                                    // material group stays bound because the layout
+                                    // has one, and a mesh's casting batches that follow
+                                    // each other in the index buffer are one draw (a
+                                    // car mesh is ~7 batches: 7 binds + 7 draws before).
+                                    // EVOVIEW_SHADOW_MERGE=0: a draw per batch.
+                                    let mut run: Option<(u32, u32)> = None;
                                     for &(start, count, mi) in &m.draws {
                                         if mat_blend.get(mi).copied()
                                             .unwrap_or(Blend::Opaque).transparent()
@@ -5123,8 +5135,28 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                             || track.map_or(false, |t| t.casts_cutout(mi)) {
                                             continue;
                                         }
-                                        sp.set_bind_group(1, &mat_groups[mi], &[]);
-                                        sp.draw_indexed(start..start + count, 0, 0..n);
+                                        if !shadow_merge {
+                                            sp.set_bind_group(1, &mat_groups[mi], &[]);
+                                            sp.draw_indexed(start..start + count, 0, 0..n);
+                                            n_draw += 1;
+                                            continue;
+                                        }
+                                        if !group_set {
+                                            sp.set_bind_group(1, &mat_groups[mi], &[]);
+                                            group_set = true;
+                                        }
+                                        run = match run {
+                                            Some((a, b)) if b == start => Some((a, start + count)),
+                                            Some((a, b)) => {
+                                                sp.draw_indexed(a..b, 0, 0..n);
+                                                n_draw += 1;
+                                                Some((start, start + count))
+                                            }
+                                            None => Some((start, start + count)),
+                                        };
+                                    }
+                                    if let Some((a, b)) = run {
+                                        sp.draw_indexed(a..b, 0, 0..n);
                                         n_draw += 1;
                                     }
                                 }
