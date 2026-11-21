@@ -6334,6 +6334,9 @@ pub fn limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
     }
     wgpu::Limits {
         max_sampled_textures_per_shader_stage: have.min(32).max(16),
+        // (the default stops a buffer at 256 MiB: a mesh with more than
+        // 3.36 M instance rows - ten Nordschleife-sized tiles - panicked)
+        max_buffer_size: adapter.limits().max_buffer_size,
         ..wgpu::Limits::default()
     }
 }
