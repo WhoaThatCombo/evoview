@@ -4318,8 +4318,12 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         if let Some(c) = culler.as_mut() {
                             c.update(&queue, &meshes, view_proj, eye, rh);
                         }
-                        carcull.flush(&device, &queue, &mut meshes, motion.as_mut(), view_proj, eye,
-                                      crate::sky::key_dir(), car_detail_m);
+                        // (fxgpu.rs's glow pass draws the emissive batches from
+                        // their meshes' own instance buffers)
+                        carcull.flush(&device, &queue, &mut meshes, motion.as_mut(),
+                                      &|mi| materials.light_srcs.get(mi).and_then(|s| s.as_ref())
+                                          .map_or(false, |s| s.class != crate::lights::Class::None),
+                                      view_proj, eye, crate::sky::key_dir(), car_detail_m);
                         // EVOVIEW_VIEW_LOG=1: the watched car as drawn, once a second
                         if let (Some(k), Some(r)) = (view_ai, opts.race.as_ref()) {
                             static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -5103,10 +5107,15 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     }
                                     // culled to the light's box; casters
                                     // off camera still cast
-                                    let (inst_buf, n) = match culler.filter(|_| layer != LAYER_HERO as usize)
+                                    let (inst_buf, n, first) = match culler.filter(|_| layer != LAYER_HERO as usize)
                                         .and_then(|c| c.shadow(cslot, mi_mesh)) {
-                                        Some((b, n)) => (b.unwrap_or(&m.instances), n),
-                                        None => (&m.instances, m.instance_count),
+                                        Some((b, n)) => (b.unwrap_or(&m.instances), n, 0),
+                                        // (a moving car's mesh: its rows may be in
+                                        // carcull's one buffer)
+                                        None => match carcull.rows(mi_mesh) {
+                                            Some((b, _, first)) => (b, m.instance_count, first),
+                                            None => (&m.instances, m.instance_count, 0),
+                                        },
                                     };
                                     if n == 0 {
                                         continue;
@@ -5137,7 +5146,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                         }
                                         if !shadow_merge {
                                             sp.set_bind_group(1, &mat_groups[mi], &[]);
-                                            sp.draw_indexed(start..start + count, 0, 0..n);
+                                            sp.draw_indexed(start..start + count, 0, first..first + n);
                                             n_draw += 1;
                                             continue;
                                         }
@@ -5148,7 +5157,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                         run = match run {
                                             Some((a, b)) if b == start => Some((a, start + count)),
                                             Some((a, b)) => {
-                                                sp.draw_indexed(a..b, 0, 0..n);
+                                                sp.draw_indexed(a..b, 0, first..first + n);
                                                 n_draw += 1;
                                                 Some((start, start + count))
                                             }
@@ -5156,7 +5165,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                         };
                                     }
                                     if let Some((a, b)) = run {
-                                        sp.draw_indexed(a..b, 0, 0..n);
+                                        sp.draw_indexed(a..b, 0, first..first + n);
                                         n_draw += 1;
                                     }
                                 }
@@ -5249,6 +5258,9 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             macro_rules! generic_draws {
                                 ($pass:ident, $phase:expr) => {{
                                 let (mut n_mesh, mut n_draw) = (0u64, 0u64);
+                                // (the moving cars' rows are in carcull's one
+                                // buffer: bound once for all their meshes)
+                                let mut inst_bound: *const wgpu::Buffer = std::ptr::null();
                                 for (mi_mesh, m) in meshes_r.iter().enumerate() {
                                     if Some(mi_mesh) == ground_mesh && !ground_on {
                                         continue;
@@ -5260,8 +5272,16 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     if track_r.map_or(false, |t| t.owns_mesh(m)) {
                                         continue;
                                     }
+                                    let (inst_buf, first) = match carcull_r.rows(mi_mesh) {
+                                        Some((b, _, first)) => (b, first),
+                                        None => (&m.instances, 0),
+                                    };
+                                    let inst = first..first + instances;
                                     $pass.set_vertex_buffer(0, m.vertices.slice(..));
-                                    $pass.set_vertex_buffer(1, m.instances.slice(..));
+                                    if !std::ptr::eq(inst_bound, inst_buf) {
+                                        $pass.set_vertex_buffer(1, inst_buf.slice(..));
+                                        inst_bound = inst_buf;
+                                    }
                                     $pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
                                     n_mesh += 1;
                                     for &(start, count, mi) in &m.draws {
@@ -5277,10 +5297,10 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                         $pass.set_bind_group(1, &mat_groups[mi], &[]);
                                         if $phase == Blend::Glass {
                                             $pass.set_pipeline(&pipes_all.glass_tint);
-                                            $pass.draw_indexed(start..start + count, 0, 0..instances);
+                                            $pass.draw_indexed(start..start + count, 0, inst.clone());
                                             $pass.set_pipeline(&pipes_all.glass_add);
                                         }
-                                        $pass.draw_indexed(start..start + count, 0, 0..instances);
+                                        $pass.draw_indexed(start..start + count, 0, inst.clone());
                                         n_draw += 1;
                                     }
                                 }
@@ -5349,6 +5369,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 mo.run(device_r, queue_r, enc, depth_r, bone_buf_r, meshes_r,
                                        &|i| dyn_mesh[i],
                                        &|mi| !mat_blend.get(mi).copied().unwrap_or(Blend::Opaque).transparent(),
+                                       &|i| carcull_r.rows(i),
                                        vp_draw, view_proj, eye);
                                 // the track's animated props and swaying vegetation
                                 if let Some(tr) = track_r {

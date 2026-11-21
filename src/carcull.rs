@@ -28,6 +28,15 @@
 //! The shadow passes also ask `casts_into` per mesh: a mesh whose drawn cars
 //! all lie outside a light's box draws nothing into that map.
 //!
+//! The kept rows of every mesh and LOD go into ONE buffer (`rows`), and the
+//! same cars' previous rows into another: two uploads a frame instead of two
+//! per mesh and LOD (1,300 queue writes a frame with 69 different cars on
+//! screen, each its own staging buffer and copy at submit), and passes that
+//! draw many car meshes keep one instance buffer bound. A mesh's own
+//! instance buffer is still written when something outside this scheme reads
+//! it (`own`: the bloom's glow pass draws the emissive batches).
+//! EVOVIEW_CAR_ROWS_SHARED=0: each mesh's own buffer, as before.
+//!
 //! EVOVIEW_CAR_CULL=0: no view test (every car drawn wherever it is; the
 //! cabin distance rule, the LODs and the dropping of absent cars still
 //! apply). EVOVIEW_CAR_LOD_SCALE: the LOD distances' multiplier (2; 0 =
@@ -102,6 +111,19 @@ struct Level {
 }
 
 pub struct CarCull {
+    /// the kept rows of every mesh in one buffer (see the module notes)
+    shared_on: bool,
+    /// this frame's kept rows, every mesh and LOD one after the other, and
+    /// last frame's rows of the same cars in the same places
+    rows: Vec<f32>,
+    prev_rows: Vec<f32>,
+    rows_buf: Option<wgpu::Buffer>,
+    prev_buf: Option<wgpu::Buffer>,
+    /// `prev_buf` holds the last flush's previous rows
+    has_prev: bool,
+    /// per gpu mesh: the frame its rows last went into `rows`, and its
+    /// first row there
+    at: Vec<(u64, u32)>,
     on: bool,
     lod_scale: f32,
     meshes: Vec<Mesh>,
@@ -122,6 +144,13 @@ pub struct CarCull {
 impl Default for CarCull {
     fn default() -> Self {
         CarCull {
+            shared_on: crate::envc::var("EVOVIEW_CAR_ROWS_SHARED").map_or(true, |v| v != "0"),
+            rows: Vec::new(),
+            prev_rows: Vec::new(),
+            rows_buf: None,
+            prev_buf: None,
+            has_prev: false,
+            at: Vec::new(),
             on: crate::envc::var("EVOVIEW_CAR_CULL").map_or(true, |v| v != "0"),
             lod_scale: crate::envc::var("EVOVIEW_CAR_LOD_SCALE").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(2.0),
             meshes: Vec::new(),
@@ -238,11 +267,26 @@ impl CarCull {
             || (self.shadow != Vec3::ZERO && sphere_in(&self.planes, c + self.shadow * 0.5, r + self.shadow.length() * 0.5))
     }
 
+    /// Where mesh `gi`'s instance rows are this frame, when `flush` put them
+    /// in the shared buffers: (this frame's rows, last frame's rows of the
+    /// same cars when a motion pass was given, the mesh's first row). Its
+    /// `instance_count` rows from there; None: the mesh's own buffer.
+    pub fn rows(&self, gi: usize) -> Option<(&wgpu::Buffer, Option<&wgpu::Buffer>, u32)> {
+        let &(frame, first) = self.at.get(gi)?;
+        if frame != self.frame || frame == 0 {
+            return None;
+        }
+        Some((self.rows_buf.as_ref()?, self.prev_buf.as_ref().filter(|_| self.has_prev), first))
+    }
+
     /// Cull and upload every mesh `put` this frame. `vp` / `eye`: the camera
     /// as drawn; `sun`: toward the key light; `detail_m`: see `Detail`.
+    /// `own(material)`: a batch of this material is drawn by something that
+    /// reads its mesh's own instance buffer (the glow pass).
     #[allow(clippy::too_many_arguments)]
     pub fn flush(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, meshes: &mut [crate::render::GpuMesh],
-                 mut motion: Option<&mut crate::motion::Motion>, vp: Mat4, eye: Vec3, sun: Vec3, detail_m: f32) {
+                 mut motion: Option<&mut crate::motion::Motion>, own: &dyn Fn(usize) -> bool,
+                 vp: Mat4, eye: Vec3, sun: Vec3, detail_m: f32) {
         let _t = crate::bench::cpu("car cull");
         self.frame += 1;
         let planes = frustum(vp);
@@ -263,6 +307,12 @@ impl CarCull {
         self.total = 0;
         self.coarse = 0;
         let cut = std::mem::take(&mut self.cut);
+        let want_prev = motion.is_some();
+        self.rows.clear();
+        self.prev_rows.clear();
+        if self.at.len() < meshes.len() {
+            self.at.resize(meshes.len(), (0, 0));
+        }
         for gi in 0..self.meshes.len().min(meshes.len()) {
             if !self.meshes[gi].put {
                 // a car mesh not given rows this frame (an AI look parked
@@ -271,6 +321,11 @@ impl CarCull {
                     if let Some(x) = meshes.get_mut(l) {
                         x.instance_count = 0;
                     }
+                }
+                // (its last rows were in the shared buffer, which now holds
+                // other meshes': there is nothing left to draw it from)
+                if self.at[gi].0 > 0 && self.at[gi].0 + 1 == self.frame {
+                    meshes[gi].instance_count = 0;
                 }
                 continue;
             }
@@ -364,16 +419,48 @@ impl CarCull {
                 if g >= meshes.len() {
                     continue;
                 }
-                if cnt > 0 {
-                    let cap = (meshes[g].instances.size() as usize / 4).min(l.rows.len());
-                    queue.write_buffer(&meshes[g].instances, 0, bytemuck::cast_slice(&l.rows[..cap]));
+                // (never more rows than the mesh's own buffer holds)
+                let keep = cnt.min(meshes[g].instances.size() as usize / (ROW * 4));
+                if keep > 0 && self.shared_on {
+                    self.at[g] = (frame, (self.rows.len() / ROW) as u32);
+                    self.rows.extend_from_slice(&l.rows[..keep * ROW]);
+                    if want_prev {
+                        self.prev_rows.extend_from_slice(&l.prev[..keep * ROW]);
+                    }
+                    if meshes[g].draws.iter().any(|d| own(d.2)) {
+                        queue.write_buffer(&meshes[g].instances, 0, bytemuck::cast_slice(&l.rows[..keep * ROW]));
+                    }
+                } else if keep > 0 {
+                    queue.write_buffer(&meshes[g].instances, 0, bytemuck::cast_slice(&l.rows[..keep * ROW]));
                     if let Some(mo) = motion.as_deref_mut() {
                         mo.set_prev(device, queue, meshes, g, &l.prev);
                     }
                 }
-                meshes[g].instance_count = (cnt.min(meshes[g].instances.size() as usize / (ROW * 4))) as u32;
+                meshes[g].instance_count = keep as u32;
             }
         }
+        // every mesh's rows in one write (and their previous rows in another)
+        let upload = |buf: &mut Option<wgpu::Buffer>, rows: &[f32], label: &str| {
+            let need = (rows.len() * 4) as u64;
+            if buf.as_ref().map_or(true, |b| b.size() < need) {
+                *buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size: need.next_power_of_two().max(64 * 1024),
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+            }
+            if let Some(b) = buf.as_ref() {
+                queue.write_buffer(b, 0, bytemuck::cast_slice(rows));
+            }
+        };
+        if !self.rows.is_empty() {
+            upload(&mut self.rows_buf, &self.rows, "car rows");
+            if want_prev {
+                upload(&mut self.prev_buf, &self.prev_rows, "car rows (last frame)");
+            }
+        }
+        self.has_prev = want_prev;
         // EVOVIEW_CARCULL_LOG=1: the counts, twice a second at 60 fps
         if self.frame % 30 == 0 && crate::envc::var_os("EVOVIEW_CARCULL_LOG").is_some() {
             println!("carcull: {} of {} rows drawn, {} on a coarse LOD", self.drawn, self.total, self.coarse);

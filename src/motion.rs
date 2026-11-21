@@ -249,10 +249,15 @@ impl Motion {
     /// Write this frame's vectors. `vp_jit` is the projection the main pass
     /// drew with, `vp` the same without jitter; `dynamic` names the meshes
     /// that move (the cars), drawn with `bones` for their skinning.
+    /// `shared(mesh)`: where the mesh's instance rows are when they are not
+    /// in its own buffer - carcull.rs keeps every opponent / replay / online
+    /// car mesh's rows in one buffer, and last frame's rows of the same cars
+    /// in another: (this frame's, last frame's, the mesh's first row).
     #[allow(clippy::too_many_arguments)]
-    pub fn run(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder,
-               depth: &wgpu::TextureView, bones: &wgpu::Buffer, meshes: &[crate::render::GpuMesh],
+    pub fn run<'r>(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder,
+               depth: &wgpu::TextureView, bones: &wgpu::Buffer, meshes: &'r [crate::render::GpuMesh],
                dynamic: &dyn Fn(usize) -> bool, opaque: &dyn Fn(usize) -> bool,
+               shared: &dyn Fn(usize) -> Option<(&'r wgpu::Buffer, Option<&'r wgpu::Buffer>, u32)>,
                vp_jit: Mat4, vp: Mat4, eye: glam::Vec3) {
         let (rw, rh) = self.size;
         let u = U {
@@ -268,7 +273,14 @@ impl Motion {
             self.prev_inst.resize_with(meshes.len(), || None);
         }
         let dyns: Vec<usize> = (0..meshes.len()).filter(|&i| dynamic(i) && meshes[i].instance_count > 0).collect();
-        for &i in &dyns {
+        // Last frame's instance rows come from one of two places: the
+        // caller's shared buffers (`shared`), or a buffer per mesh here,
+        // copied from the mesh's instances at the end of each frame (the
+        // driven car; with EVOVIEW_CAR_ROWS_SHARED=0 every car, the fed
+        // ones overwritten by `set_prev`).
+        let fed: Vec<Option<(&wgpu::Buffer, Option<&wgpu::Buffer>, u32)>> = dyns.iter().map(|&i| shared(i)).collect();
+        let own: Vec<usize> = dyns.iter().zip(&fed).filter(|(_, f)| f.is_none()).map(|(&i, _)| i).collect();
+        for &i in &own {
             let sz = meshes[i].instances.size();
             if self.prev_inst[i].as_ref().map_or(true, |b| b.size() != sz) {
                 self.prev_inst[i] = Some(device.create_buffer(&wgpu::BufferDescriptor {
@@ -280,9 +292,11 @@ impl Motion {
                 self.primed = false;
             }
         }
-        // no last frame yet: it is this one (zero motion)
-        if !self.primed {
-            self.copy_prev(enc, bones, meshes, &dyns);
+        // no last frame yet: it is this one (zero motion) - the bones copied
+        // now, and every mesh's instances stand in for its previous rows
+        let primed = self.primed;
+        if !primed {
+            enc.copy_buffer_to_buffer(bones, 0, &self.prev_bones, 0, self.prev_bones.size().min(bones.size()));
         }
         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("motion bg"),
@@ -314,12 +328,26 @@ impl Motion {
             let mut n_draw = 0u64;
             static MERGE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
             let merge = *MERGE.get_or_init(|| crate::envc::var("EVOVIEW_MOTION_MERGE").map_or(true, |v| v != "0"));
-            for &i in &dyns {
+            // the instance buffers bound (the shared ones stay bound from
+            // one mesh to the next)
+            let mut bound: (*const wgpu::Buffer, *const wgpu::Buffer) = (std::ptr::null(), std::ptr::null());
+            for (&i, f) in dyns.iter().zip(&fed) {
                 let m = &meshes[i];
-                let Some(prev) = self.prev_inst[i].as_ref() else { continue };
+                // (not primed: no last frame - this frame's rows are it)
+                let (cur, prev, first) = match *f {
+                    Some((cur, prev, first)) => (cur, prev.filter(|_| primed).unwrap_or(cur), first),
+                    None => match self.prev_inst[i].as_ref().filter(|_| primed) {
+                        Some(p) => (&m.instances, p, 0),
+                        None => (&m.instances, &m.instances, 0),
+                    },
+                };
+                let inst = first..first + m.instance_count;
                 pass.set_vertex_buffer(0, m.vertices.slice(..));
-                pass.set_vertex_buffer(1, m.instances.slice(..));
-                pass.set_vertex_buffer(2, prev.slice(..));
+                if !std::ptr::eq(bound.0, cur) || !std::ptr::eq(bound.1, prev) {
+                    pass.set_vertex_buffer(1, cur.slice(..));
+                    pass.set_vertex_buffer(2, prev.slice(..));
+                    bound = (cur, prev);
+                }
                 pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
                 // (no material here: batches that follow each other in the
                 // index buffer are one draw, the triangles in the same order.
@@ -332,7 +360,7 @@ impl Motion {
                     run = match run {
                         Some((a, b)) if b == start && merge => Some((a, start + count)),
                         Some((a, b)) => {
-                            pass.draw_indexed(a..b, 0, 0..m.instance_count);
+                            pass.draw_indexed(a..b, 0, inst.clone());
                             n_draw += 1;
                             Some((start, start + count))
                         }
@@ -340,22 +368,27 @@ impl Motion {
                     };
                 }
                 if let Some((a, b)) = run {
-                    pass.draw_indexed(a..b, 0, 0..m.instance_count);
+                    pass.draw_indexed(a..b, 0, inst);
                     n_draw += 1;
                 }
             }
             crate::bench::count("motion meshes", dyns.len() as u64);
             crate::bench::count("motion draws", n_draw);
         }
-        self.copy_prev(enc, bones, meshes, &dyns);
+        // next frame's "last frame": the bones, and the instances of the
+        // meshes that keep their own copy
+        self.copy_prev(enc, bones, meshes, &own);
         self.primed = true;
         self.prev_vp = Some(vp);
     }
 
-    /// Last frame's instance rows for mesh `i`, from the caller: carcull.rs
-    /// compacts a moving car mesh's instances to the visible cars, so this
-    /// frame's row k need not be last frame's row k (a GPU copy would pair
-    /// one car's matrix with another's). Written before this frame's `run`.
+    /// Last frame's instance rows for mesh `i`, from the caller, into the
+    /// mesh's own previous-rows buffer (carcull.rs with
+    /// EVOVIEW_CAR_ROWS_SHARED=0; otherwise its rows reach `run` through
+    /// `shared`). carcull.rs compacts a moving car mesh's instances to the
+    /// visible cars, so this frame's row k need not be last frame's row k (a
+    /// GPU copy would pair one car's matrix with another's). Written before
+    /// this frame's `run`.
     pub fn set_prev(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, meshes: &[crate::render::GpuMesh],
                     i: usize, rows: &[f32]) {
         if self.prev_inst.len() < meshes.len() {
