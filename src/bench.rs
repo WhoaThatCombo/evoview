@@ -33,19 +33,56 @@ struct Slot {
     pending: Option<std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>>,
     /// timestamps written into it
     n: usize,
-    /// the label of each mark written into it (segment k ends at mark k)
-    labels: Vec<&'static str>,
+    /// each mark written into it, in the order the GPU runs them: (its
+    /// timestamp's index in the slot, label). A segment runs from the mark
+    /// before it (or the frame's start, index 0) to its own.
+    labels: Vec<(usize, &'static str)>,
 }
 
 struct Gpu {
-    set: wgpu::QuerySet,
+    set: std::sync::Arc<wgpu::QuerySet>,
     resolve: wgpu::Buffer,
     slots: Vec<Slot>,
     period_ns: f32,
     /// slot written this frame, if any
     current: Option<usize>,
-    /// timestamps written this frame so far
-    written: usize,
+}
+
+/// The frame being encoded, for `mark` on any thread: the passes are
+/// recorded on several threads, each into its own encoder (render.rs), so a
+/// mark takes the next free timestamp wherever it is called and remembers
+/// it per thread; the render thread strings the threads' marks together in
+/// the order their command buffers are submitted (`marks_take` /
+/// `marks_append`).
+static TS: std::sync::Mutex<Option<(std::sync::Arc<wgpu::QuerySet>, usize)>> = std::sync::Mutex::new(None);
+/// timestamps written this frame so far
+static WRITTEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// this frame's marks in GPU order (see `Slot::labels`)
+static ORDER: std::sync::Mutex<Vec<(usize, &'static str)>> = std::sync::Mutex::new(Vec::new());
+
+thread_local! {
+    /// marks this thread wrote and has not handed over yet
+    static PENDING: std::cell::RefCell<Vec<(usize, &'static str)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The marks this thread wrote since its last take, in order: a worker
+/// returns them with its command buffer.
+pub fn marks_take() -> Vec<(usize, &'static str)> {
+    PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()))
+}
+
+/// Marks of a command buffer submitted after everything appended so far.
+pub fn marks_append(m: Vec<(usize, &'static str)>) {
+    if !m.is_empty() {
+        if let Ok(mut o) = ORDER.lock() {
+            o.extend(m);
+        }
+    }
+}
+
+/// This thread's marks so far go before whatever is appended next.
+pub fn marks_flush() {
+    marks_append(marks_take());
 }
 
 thread_local! {
@@ -60,11 +97,24 @@ thread_local! {
 static DRAWS: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 static TRIS: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
-pub fn count_draw(view: usize, tris: u64) {
+pub fn count_draws(view: usize, draws: u64, tris: u64) {
     use std::sync::atomic::Ordering::Relaxed;
     if let (Some(d), Some(t)) = (DRAWS.get(view), TRIS.get(view)) {
-        d.fetch_add(1, Relaxed);
+        d.fetch_add(draws, Relaxed);
         t.fetch_add(tris, Relaxed);
+    }
+}
+
+/// Things counted per frame under a name (`count("car draws main", n)`,
+/// once per pass - not per draw), printed per frame.
+static COUNTS: std::sync::Mutex<Vec<(&'static str, u64)>> = std::sync::Mutex::new(Vec::new());
+
+pub fn count(label: &'static str, n: u64) {
+    if let Ok(mut v) = COUNTS.lock() {
+        match v.iter_mut().find(|e| e.0 == label) {
+            Some(e) => e.1 += n,
+            None => v.push((label, n)),
+        }
     }
 }
 
@@ -94,17 +144,16 @@ impl Drop for CpuScope {
 /// `label`. A no-op outside --bench or without timestamp queries. Labels
 /// are matched by name, so a mark may be skipped on some frames.
 pub fn mark(enc: &mut wgpu::CommandEncoder, label: &'static str) {
-    GPU.with(|g| {
-        let mut g = g.borrow_mut();
-        let Some(g) = g.as_mut() else { return };
-        let Some(i) = g.current else { return };
-        if g.written >= MARKS - 1 {
-            return;
-        }
-        enc.write_timestamp(&g.set, (i * MARKS + g.written) as u32);
-        g.slots[i].labels.push(label);
-        g.written += 1;
-    });
+    use std::sync::atomic::Ordering::Relaxed;
+    let Ok(ts) = TS.lock() else { return };
+    let Some((set, i)) = ts.as_ref() else { return };
+    let k = WRITTEN.fetch_add(1, Relaxed);
+    if k >= MARKS - 1 {
+        WRITTEN.fetch_sub(1, Relaxed);
+        return;
+    }
+    enc.write_timestamp(set, (i * MARKS + k) as u32);
+    PENDING.with(|p| p.borrow_mut().push((k, label)));
 }
 
 /// Drop the timestamp queries and readback buffers while the device is
@@ -112,6 +161,9 @@ pub fn mark(enc: &mut wgpu::CommandEncoder, label: &'static str) {
 /// process exit, after the Vulkan driver is gone (segfault, exit code 139).
 pub fn release() {
     let _ = GPU.try_with(|g| g.borrow_mut().take());
+    if let Ok(mut ts) = TS.lock() {
+        *ts = None;
+    }
 }
 
 impl Drop for Bench {
@@ -166,11 +218,11 @@ impl Bench {
             .then(|| {
                 let size = SLOTS as u64 * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
                 Gpu {
-                    set: device.create_query_set(&wgpu::QuerySetDescriptor {
+                    set: std::sync::Arc::new(device.create_query_set(&wgpu::QuerySetDescriptor {
                         label: Some("bench ts"),
                         ty: wgpu::QueryType::Timestamp,
                         count: (SLOTS * MARKS) as u32,
-                    }),
+                    })),
                     resolve: device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("bench resolve"),
                         size,
@@ -192,7 +244,6 @@ impl Bench {
                         .collect(),
                     period_ns: queue.get_timestamp_period(),
                     current: None,
-                    written: 0,
                 }
             });
         println!(
@@ -257,10 +308,17 @@ impl Bench {
             let mut g = g.borrow_mut();
             let Some(g) = g.as_mut() else { return };
             g.current = g.slots.iter().position(|s| s.pending.is_none());
+            let _ = marks_take();
+            if let Ok(mut o) = ORDER.lock() {
+                o.clear();
+            }
             if let Some(i) = g.current {
                 enc.write_timestamp(&g.set, (i * MARKS) as u32);
                 g.slots[i].labels.clear();
-                g.written = 1;
+                WRITTEN.store(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if let Ok(mut ts) = TS.lock() {
+                *ts = g.current.map(|i| (g.set.clone(), i));
             }
         });
     }
@@ -313,7 +371,15 @@ impl Bench {
             let mut g = g.borrow_mut();
             let Some(g) = g.as_mut() else { return };
             let Some(i) = g.current else { return };
-            let n = g.written;
+            // no mark after this one: the frame's timestamps are counted
+            if let Ok(mut ts) = TS.lock() {
+                *ts = None;
+            }
+            marks_flush();
+            if let Ok(mut o) = ORDER.lock() {
+                g.slots[i].labels = std::mem::take(&mut *o);
+            }
+            let n = WRITTEN.load(std::sync::atomic::Ordering::Relaxed);
             enc.write_timestamp(&g.set, (i * MARKS + n) as u32);
             let q = (i * MARKS) as u32;
             let off = i as u64 * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
@@ -406,10 +472,14 @@ impl Bench {
                         s.readback.unmap();
                         let ms = |a: u64, b: u64| b.saturating_sub(a) as f64 * period / 1e6;
                         if warm && ts.len() >= 2 && ts[ts.len() - 1] > ts[0] {
-                            // segment k ends at mark k; the last runs to the end ("rest")
-                            let segs = (1..ts.len())
-                                .map(|k| (s.labels.get(k - 1).copied().unwrap_or("rest"), ms(ts[k - 1], ts[k])))
-                                .collect();
+                            // each segment ends at its mark; the last runs to the end ("rest")
+                            let mut segs = Vec::with_capacity(s.labels.len() + 1);
+                            let mut at = 0;
+                            for &(k, l) in s.labels.iter().filter(|m| m.0 < ts.len()) {
+                                segs.push((l, ms(ts[at], ts[k])));
+                                at = k;
+                            }
+                            segs.push(("rest", ms(ts[at], ts[ts.len() - 1])));
                             done_frames.push((ms(ts[0], ts[ts.len() - 1]), segs));
                         }
                     }
@@ -500,6 +570,12 @@ impl Bench {
                 if d > 0.0 {
                     println!("  track draws {name:>9}: {d:8.0} draws/frame  {:8.2} Mtri/frame", t / 1e6);
                 }
+            }
+        }
+        if let Ok(v) = COUNTS.lock() {
+            let frames = self.frame.max(1) as f64;
+            for (l, n) in v.iter() {
+                println!("  count {l:>18}: per frame {:.1}", *n as f64 / frames);
             }
         }
         println!("vram: {:.0} MB   peak RAM: {:.0} MB working set, {:.0} MB commit; {:.0} MB working set while rendering",

@@ -956,8 +956,29 @@ pub struct SkyPano {
     cloud_view: wgpu::TextureView,
     pub sky_hist: wgpu::TextureView,
     pub cloud_hist: wgpu::TextureView,
-    sun: std::cell::Cell<glam::Vec3>,
-    frames: std::cell::Cell<u32>,
+    sun: Shared<glam::Vec3>,
+    frames: Shared<u32>,
+}
+
+/// A `Cell` the threads recording the frame's passes can share (render.rs
+/// records the shadow, mirror, probe, car and motion passes on workers while
+/// the main pass is recorded on the render thread; all of them read the
+/// track's state through `&TrackRender`).
+struct Shared<T: Copy>(std::sync::Mutex<T>);
+
+impl<T: Copy> Shared<T> {
+    fn new(v: T) -> Self {
+        Shared(std::sync::Mutex::new(v))
+    }
+    fn get(&self) -> T {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    fn set(&self, v: T) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = v;
+    }
+    fn replace(&self, v: T) -> T {
+        std::mem::replace(&mut *self.0.lock().unwrap_or_else(|e| e.into_inner()), v)
+    }
 }
 
 pub const PANO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -1002,8 +1023,8 @@ impl SkyPano {
             cloud,
             sky_hist_tex,
             cloud_hist_tex,
-            sun: std::cell::Cell::new(glam::Vec3::ZERO),
-            frames: std::cell::Cell::new(0),
+            sun: Shared::new(glam::Vec3::ZERO),
+            frames: Shared::new(0),
         }
     }
 }
@@ -1629,7 +1650,7 @@ pub struct TrackRender {
     anim: Option<std::sync::Arc<TrackAnim>>,
     /// the clip frames last written (TrackAnim::frame_key): the clips step
     /// at their own ~30 fps, so most frames have nothing new to pose
-    anim_key: std::cell::RefCell<(Vec<u32>, Vec<[f32; 16]>)>,
+    anim_key: std::sync::Mutex<(Vec<u32>, Vec<[f32; 16]>)>,
     bone_buf: wgpu::Buffer,
     /// motion vectors for the animated props and wind-swayed vegetation
     /// (draw_motion): last frame's bone sets, the pipelines (plain, with
@@ -1640,7 +1661,7 @@ pub struct TrackRender {
     mv_buf: wgpu::Buffer,
     anim_src: std::collections::HashSet<usize>,
     /// last frame's clock, once a frame has been drawn since a reset
-    mv_prev_t: std::cell::Cell<Option<f32>>,
+    mv_prev_t: Shared<Option<f32>>,
     /// mirror views: their own frame uniform, built from the main one
     mirror_buf: wgpu::Buffer,
     mirror_bg: wgpu::BindGroup,
@@ -1650,10 +1671,10 @@ pub struct TrackRender {
     /// the rear-view camera screen, likewise
     rear_buf: wgpu::Buffer,
     rear_bg: wgpu::BindGroup,
-    last_frame: std::cell::Cell<Option<FrameUniform>>,
+    last_frame: Shared<Option<FrameUniform>>,
     /// the dry line (rain::dry_map), and whether it has been written yet
     dry_tex: wgpu::Texture,
-    dry_on: std::cell::Cell<bool>,
+    dry_on: Shared<bool>,
     /// the main view's texture LOD bias (taa.rs mip_bias)
     mip_bias: f32,
 }
@@ -1671,7 +1692,7 @@ struct CarpetLevel {
     extra: wgpu::Buffer,
     instances: wgpu::Buffer,
     cap: u32,
-    count: std::cell::Cell<u32>,
+    count: Shared<u32>,
     draws: Vec<(u32, u32, usize)>,
     /// switch-in distance, metres
     near: f32,
@@ -1688,9 +1709,9 @@ struct CarpetSet {
     /// mean ground height of each cell, for a true 3D distance test
     cell_y: HashMap<(i32, i32), f32>,
     rows: Vec<[f32; 20]>,
-    last_eye: std::cell::Cell<Option<glam::Vec3>>,
+    last_eye: Shared<Option<glam::Vec3>>,
     /// the lodDistanceScale of the last upload
-    last_scale: std::cell::Cell<f32>,
+    last_scale: Shared<f32>,
     /// beyond this nothing is drawn (the shader has faded it by then)
     reach: f32,
 }
@@ -1749,7 +1770,7 @@ impl CarpetLevel {
                 mapped_at_creation: false,
             }),
             cap,
-            count: std::cell::Cell::new(0),
+            count: Shared::new(0),
             draws,
             near,
             dlt,
@@ -1803,8 +1824,8 @@ impl CarpetSet {
             cells,
             cell_y,
             rows,
-            last_eye: std::cell::Cell::new(None),
-            last_scale: std::cell::Cell::new(0.0),
+            last_eye: Shared::new(None),
+            last_scale: Shared::new(0.0),
             reach: last * 1.75,
         })
     }
@@ -3163,16 +3184,16 @@ impl TrackRender {
             mv_bgl,
             mv_buf,
             anim_src,
-            mv_prev_t: std::cell::Cell::new(None),
+            mv_prev_t: Shared::new(None),
             mirror_buf,
             mirror_bg,
             probe_buf,
             probe_bg,
             rear_buf,
             rear_bg,
-            last_frame: std::cell::Cell::new(None),
+            last_frame: Shared::new(None),
             dry_tex,
-            dry_on: std::cell::Cell::new(false),
+            dry_on: Shared::new(false),
             mip_bias: crate::taa::mip_bias(),
         })
     }
@@ -3180,7 +3201,7 @@ impl TrackRender {
     /// Advance the animated props to `t` seconds.
     pub fn animate(&self, queue: &wgpu::Queue, t: f32) {
         if let Some(a) = self.anim.as_ref() {
-            let mut c = self.anim_key.borrow_mut();
+            let mut c = self.anim_key.lock().unwrap_or_else(|e| e.into_inner());
             let (keys, out) = &mut *c;
             if a.pose_into(t, keys, out) {
                 queue.write_buffer(&self.bone_buf, 0, bytemuck::cast_slice(out));
@@ -3527,6 +3548,8 @@ impl TrackRender {
         };
         let mut set = false;
         let mut last_group = usize::MAX;
+        // (counted here and added once: several threads record views at once)
+        let (mut n_draws, mut n_tris) = (0u64, 0u64);
         for (gi, m) in meshes.iter().enumerate() {
             let Some(extra) = m.extra.as_ref() else { continue };
             let n = count(gi, m.instance_count);
@@ -3556,7 +3579,8 @@ impl TrackRender {
                     last_group = mi;
                 }
                 pass.draw_indexed(start..start + cnt, 0, 0..n);
-                crate::bench::count_draw(view, cnt as u64 / 3 * n as u64);
+                n_draws += 1;
+                n_tris += cnt as u64 / 3 * n as u64;
             }
         }
         for l in self.carpet.iter().flat_map(|c| c.levels.iter()).filter(|_| view == 0) {
@@ -3584,9 +3608,11 @@ impl TrackRender {
                 }
                 pass.set_bind_group(1, &tm.group, &[]);
                 pass.draw_indexed(start..start + cnt, 0, 0..n);
-                crate::bench::count_draw(view, cnt as u64 / 3 * n as u64);
+                n_draws += 1;
+                n_tris += cnt as u64 / 3 * n as u64;
             }
         }
+        crate::bench::count_draws(view, n_draws, n_tris);
     }
 
     /// The sky, after the opaque pass: fills every pixel nothing covered.

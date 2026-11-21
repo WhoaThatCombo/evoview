@@ -937,6 +937,20 @@ pub fn build_scene(
             .count();
         println!("scene: {} mesh(es), {} triangles, {} fallback batch(es)",
                  meshes.len(), tris, fb);
+        // EVOVIEW_DRAW_STATS=1: how many of the car meshes' batches follow a
+        // batch of the same material (they could be one draw)
+        if crate::envc::var_os("EVOVIEW_DRAW_STATS").is_some() {
+            let (mut n, mut adj, mut same) = (0, 0, 0);
+            for x in meshes.iter().filter(|x| x.extra.is_none()) {
+                n += x.draws.len();
+                adj += x.draws.windows(2).filter(|w| w[0].2 == w[1].2 && w[0].0 + w[0].1 == w[1].0).count();
+                let mut mats: Vec<usize> = x.draws.iter().map(|d| d.2).collect();
+                mats.sort();
+                mats.dedup();
+                same += x.draws.len() - mats.len();
+            }
+            println!("draw stats: {n} car batches, {adj} adjacent to one of the same material, {same} sharing a material in their mesh");
+        }
         if fb > 0 {
             // name what failed to bind, not just how many: "4 fallback
             // batches" is not actionable, "EXT_GLASS.material" is
@@ -4390,6 +4404,8 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             }
                         }
                         let hist_reset = taa_hist_off || cut;
+                        // the track's animated props still to pose this frame, and the clock to pose them at
+                        let mut anim_time: Option<f32> = None;
                         // The shadow map follows the camera target, so both
                         // buffers are rewritten every frame. On a track that
                         // is the view itself (view_focus), not the orbit
@@ -4549,8 +4565,16 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 let _t = crate::bench::cpu("track update");
                                 t.update(&queue, vp_draw, eye, lit, &cam_u);
                             }
-                            let _t = crate::bench::cpu("track anim");
-                            t.animate(&queue, crate::clouds::time());
+                            // the animated props are posed while the passes are
+                            // recorded, on a thread of their own, when those are
+                            // (`par` below): the pose only has to be written
+                            // before the frame is submitted
+                            if par_enc_workers() > 0 {
+                                anim_time = Some(crate::clouds::time());
+                            } else {
+                                let _t = crate::bench::cpu("track anim");
+                                t.animate(&queue, crate::clouds::time());
+                            }
                         }
                         // The sun and the scenery are static, so the shadow map
                         // only needs redrawing when its box moves - or every
@@ -4829,12 +4853,22 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         };
                         let view = target.create_view(&Default::default());
                         let mut enc = device.create_command_encoder(&Default::default());
+                        // command buffers finished before `enc`'s, in submit order
+                        let mut cmd_bufs: Vec<wgpu::CommandBuffer> = Vec::new();
+                        let mut motion_recorded: Option<(wgpu::CommandBuffer, Vec<(usize, &'static str)>)> = None;
+                        // records the motion vectors (set up with the passes below)
+                        let rec_motion;
                         let encode_t = crate::bench::cpu("encode");
                         if let Some(b) = bench.as_mut() {
                             b.begin(&mut enc);
                         }
-                        fxg.update(&device, &queue, &mut enc, car_fx.as_deref(), &fxst, dt, [eye.x, eye.y, eye.z]);
-                        if let Some(b) = bench.as_mut() { b.mark(&mut enc, "fx"); }
+                        // (the effects and the dash screens: on a worker beside the
+                        // passes when those are recorded on threads - see `par`)
+                        let fx_par = track.is_some() && par_job(0);
+                        if !fx_par {
+                            fxg.update(&device, &queue, &mut enc, car_fx.as_deref(), &fxst, dt, [eye.x, eye.y, eye.z]);
+                            if let Some(b) = bench.as_mut() { b.mark(&mut enc, "fx"); }
+                        }
                         if let Some(t) = track.as_ref() {
                             t.cloud_map_pass(&mut enc);
                             crate::bench::mark(&mut enc, "cloudmap");
@@ -4903,8 +4937,102 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             if cache_dirty && shadow_dirty {
                                 shadow_cache_vp = Some(light_vp);
                             }
-                            let mut enc_sec = crate::bench::cpu("enc shadow");
-                            for (layer, target, clear_it, what) in jobs {
+                            // The frame's passes are recorded by several threads, each
+                            // into its own command encoder, and submitted in the order
+                            // they were recorded one after the other before: the same
+                            // commands in the same order, in a fraction of the wall
+                            // time (the recording was 7.6 ms of a 23-car lobby's frame
+                            // and 12 ms with 69 different cars, all on this thread).
+                            // What a pass changes (culled views, uniforms, the mirrors'
+                            // and the probe's turn) is done here first; the recording
+                            // itself only reads. EVOVIEW_PAR_ENC=0: one thread, one
+                            // encoder, as before; =N: at most N worker threads.
+                            let par_workers = par_enc_workers();
+                            let par = track.is_some() && par_workers > 0;
+                            // the main camera's focal length in pixels (mirror / probe LODs)
+                            let main_focal = view_proj.row(1).truncate().length() * rh as f32 * 0.5;
+                            // one glass mirror a frame in turn, and the rear-view
+                            // camera screen every frame: the track behind, through
+                            // the track pipelines with each one's camera (its own
+                            // track view and cull set, as both draw this frame)
+                            let mut mirror_jobs: Vec<(usize, usize, usize)> = Vec::new();
+                            if let (Some(mr), Some(t), Some(td)) = (mirrors.as_mut(), track.as_ref(), opts.track_drive.as_ref()) {
+                                let _t = crate::bench::cpu("enc mirror");
+                                let body = if drive_mode == 4 { td.body_flat() } else { td.matrices().0 };
+                                // Only what the main camera can see: a mirror facing away
+                                // or off screen is skipped (each one's camera, its cull and
+                                // the whole track again: ~1 ms each at 3440x1440). Seen
+                                // from outside the car, the centre mirror and the rear-view
+                                // screen sit behind the roof and tinted glass: every 4th
+                                // frame. EVOVIEW_MIRROR_SEEN=0: always drawn.
+                                // (watching another player: outside our car)
+                                let watching = view_ai.and_then(|k| opts.race.as_ref().and_then(|r| r.ai.get(k)))
+                                    .map_or(false, |a| a.td.pos.y > -1000.0);
+                                let inside = follow != crate::camera::Follow::Free && !watching
+                                    && car_cams.get(cam_sel).map_or(false, |c| c.mode == 1 || c.mode == 4);
+                                let all = crate::envc::var("EVOVIEW_MIRROR_SEEN").map_or(false, |v| v == "0");
+                                let seen = |mr: &crate::mirrors::Mirrors, i: usize| all || mr.seen(i, body, vp_draw, eye);
+                                // ⚠ the centre mirror's outside cadence counts its
+                                // OWN turns: on the global frame tick, with 2 or 4
+                                // glass mirrors the two counters never lined up
+                                // and it was never refreshed from outside
+                                let glass = mr.due().filter(|&i| seen(mr, i)
+                                    && (all || inside || mr.list[i].def.kind != 0 || {
+                                        centre_tick = centre_tick.wrapping_add(1);
+                                        centre_tick % 4 == 1
+                                    }));
+                                let cam = mr.camera().filter(|&i| seen(mr, i) && (all || inside || mirror_tick % 4 == 0));
+                                mirror_tick = mirror_tick.wrapping_add(1);
+                                let due = [glass.map(|i| (i, 2usize, 1usize)), cam.map(|i| (i, 4, 3))];
+                                for (i, slot, view) in due.into_iter().flatten() {
+                                    // sized to the glass on screen; off screen, not drawn
+                                    if !mr.fit(&device, i, body, view_proj, config.height) {
+                                        continue;
+                                    }
+                                    let (mvp, meye) = mr.view(&queue, i, body);
+                                    if let Some(c) = culler.as_mut() {
+                                        // a mirror is ~200 px tall: whatever covers under
+                                        // ~1.5 of its pixels is only draw calls
+                                        let focal = mvp.row(1).truncate().length() * mr.list[i].height as f32 * 0.5;
+                                        let tiny = (focal > 0.0).then(|| (meye, 1.5 / focal));
+                                        c.update_view(&device, &queue, slot, mvp, meye, 0.0, tiny, view_lod_scale(main_focal, focal));
+                                    }
+                                    t.update_mirror(&queue, mvp, meye, view == 3);
+                                    mirror_jobs.push((i, slot, view));
+                                }
+                            }
+                            // one reflection-probe face a frame, from the middle
+                            // of the car, through the track pipelines again
+                            let mut probe_job: Option<usize> = None;
+                            if let (Some(pr), Some(t), Some(td)) = (probe.as_mut(), track.as_ref(), opts.track_drive.as_ref()) {
+                                let _t = crate::bench::cpu("enc probe");
+                                let face = pr.due();
+                                let body = if drive_mode == 4 { td.body_flat() } else { td.matrices().0 };
+                                // above the roof: from 0.7 m a kerb under the car
+                                // filled the whole lower face and the windows
+                                // flashed red and white over every kerb
+                                let pos = body.w_axis.truncate() + Vec3::Y * 1.6;
+                                let (pvp, peye) = crate::probe::Probe::view(face, pos);
+                                if let Some(c) = culler.as_mut() {
+                                    // whatever covers under ~2 face pixels is only draw calls
+                                    let focal = pr.size as f32 * 0.5;
+                                    c.update_view(&device, &queue, 3, pvp, peye, 0.0, Some((peye, 2.0 / focal)), view_lod_scale(main_focal, focal));
+                                }
+                                t.update_probe(&queue, pvp, peye);
+                                probe_job = Some(face);
+                            }
+                            // (plain views of what the recording reads: the texture
+                            // cache inside `materials` is the render thread's alone)
+                            let mat_groups: &[wgpu::BindGroup] = &materials.groups;
+                            let mat_blend: &[Blend] = &materials.blend;
+                            let no_shadow: Vec<bool> = if jobs.is_empty() { Vec::new() }
+                                else { (0..mat_groups.len()).map(|mi| materials.casts_no_shadow(mi)).collect() };
+                            let (meshes_r, carcull_r, culler_r, track_r, mirrors_r, probe_r, ssr_r) =
+                                (&meshes[..], &carcull, culler.as_ref(), track.as_ref(), mirrors.as_ref(), probe.as_ref(), ssr.as_ref());
+                            let rec_shadow = |enc: &mut wgpu::CommandEncoder| {
+                            let _t = crate::bench::cpu("enc shadow");
+                            let (meshes, carcull, culler, track) = (meshes_r, carcull_r, culler_r, track_r);
+                            for &(layer, target, clear_it, what) in &jobs {
                                 if what == 2 || what == 3 {
                                     // the cached scenery into the live cascade
                                     if let Some((ct, _)) = shadow_cache.as_ref() {
@@ -4953,6 +5081,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     _ => hero_vp,
                                 };
                                 sp.set_bind_group(2, bone_bg, &[]);
+                                let (mut n_mesh, mut n_draw) = (0u64, 0u64);
                                 for (mi_mesh, m) in meshes.iter().enumerate() {
                                     if Some(mi_mesh) == ground_mesh {
                                         continue;
@@ -4971,7 +5100,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     }
                                     // culled to the light's box; casters
                                     // off camera still cast
-                                    let (inst_buf, n) = match culler.as_ref().filter(|_| layer != LAYER_HERO as usize)
+                                    let (inst_buf, n) = match culler.filter(|_| layer != LAYER_HERO as usize)
                                         .and_then(|c| c.shadow(cslot, mi_mesh)) {
                                         Some((b, n)) => (b.unwrap_or(&m.instances), n),
                                         None => (&m.instances, m.instance_count),
@@ -4985,161 +5114,347 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     sp.set_vertex_buffer(1, inst_buf.slice(..));
                                     sp.set_index_buffer(m.indices.slice(..),
                                                         wgpu::IndexFormat::Uint32);
+                                    n_mesh += 1;
                                     for &(start, count, mi) in &m.draws {
-                                        if materials.blend.get(mi).copied()
+                                        if mat_blend.get(mi).copied()
                                             .unwrap_or(Blend::Opaque).transparent()
-                                            || materials.casts_no_shadow(mi)
+                                            || no_shadow.get(mi).copied().unwrap_or(false)
                                             // track cutouts: alpha-tested below
-                                            || track.as_ref().map_or(false, |t| t.casts_cutout(mi)) {
+                                            || track.map_or(false, |t| t.casts_cutout(mi)) {
                                             continue;
                                         }
-                                        sp.set_bind_group(1, &materials.groups[mi], &[]);
+                                        sp.set_bind_group(1, &mat_groups[mi], &[]);
                                         sp.draw_indexed(start..start + count, 0, 0..n);
+                                        n_draw += 1;
                                     }
                                 }
-                                if let Some(t) = track.as_ref().filter(|_| what < 2) {
-                                    let cul = culler.as_ref();
-                                    t.draw_shadow_cutouts(&mut sp, layer, &meshes, &|gi| {
+                                crate::bench::count("shadow meshes", n_mesh);
+                                crate::bench::count("shadow draws", n_draw);
+                                if let Some(t) = track.filter(|_| what < 2) {
+                                    t.draw_shadow_cutouts(&mut sp, layer, meshes, &|gi| {
                                         let m = &meshes[gi];
-                                        match cul.and_then(|c| c.shadow(cslot, gi)) {
+                                        match culler.and_then(|c| c.shadow(cslot, gi)) {
                                             Some((b, n)) => (b.unwrap_or(&m.instances), n),
                                             None => (&m.instances, m.instance_count),
                                         }
                                     });
                                 }
                                 drop(sp);
-                                crate::bench::mark(&mut enc, ["shadow near", "shadow far", "shadow mid", "shadow hero"][layer.min(3)]);
+                                crate::bench::mark(enc, ["shadow near", "shadow far", "shadow mid", "shadow hero"][layer.min(3)]);
                             }
-                            if let Some(b) = bench.as_mut() { b.mark(&mut enc, "shadow"); }
-                            drop(enc_sec);
-                            enc_sec = crate::bench::cpu("enc mirror");
-                            // the main camera's focal length in pixels (mirror / probe LODs)
-                            let main_focal = view_proj.row(1).truncate().length() * rh as f32 * 0.5;
-                            // one glass mirror a frame in turn, and the rear-view
-                            // camera screen every frame: the track behind, through
-                            // the track pipelines with each one's camera (its own
-                            // track view and cull set, as both draw this frame)
-                            if let (Some(mr), Some(t), Some(td)) = (mirrors.as_mut(), track.as_ref(), opts.track_drive.as_ref()) {
-                                let body = if drive_mode == 4 { td.body_flat() } else { td.matrices().0 };
-                                // Only what the main camera can see: a mirror facing away
-                                // or off screen is skipped (each one's camera, its cull and
-                                // the whole track again: ~1 ms each at 3440x1440). Seen
-                                // from outside the car, the centre mirror and the rear-view
-                                // screen sit behind the roof and tinted glass: every 4th
-                                // frame. EVOVIEW_MIRROR_SEEN=0: always drawn.
-                                // (watching another player: outside our car)
-                                let watching = view_ai.and_then(|k| opts.race.as_ref().and_then(|r| r.ai.get(k)))
-                                    .map_or(false, |a| a.td.pos.y > -1000.0);
-                                let inside = follow != crate::camera::Follow::Free && !watching
-                                    && car_cams.get(cam_sel).map_or(false, |c| c.mode == 1 || c.mode == 4);
-                                let all = crate::envc::var("EVOVIEW_MIRROR_SEEN").map_or(false, |v| v == "0");
-                                let seen = |mr: &crate::mirrors::Mirrors, i: usize| all || mr.seen(i, body, vp_draw, eye);
-                                // ⚠ the centre mirror's outside cadence counts its
-                                // OWN turns: on the global frame tick, with 2 or 4
-                                // glass mirrors the two counters never lined up
-                                // and it was never refreshed from outside
-                                let glass = mr.due().filter(|&i| seen(mr, i)
-                                    && (all || inside || mr.list[i].def.kind != 0 || {
-                                        centre_tick = centre_tick.wrapping_add(1);
-                                        centre_tick % 4 == 1
-                                    }));
-                                let cam = mr.camera().filter(|&i| seen(mr, i) && (all || inside || mirror_tick % 4 == 0));
-                                mirror_tick = mirror_tick.wrapping_add(1);
-                                let due = [glass.map(|i| (i, 2usize, 1usize)), cam.map(|i| (i, 4, 3))];
-                                for (i, slot, view) in due.into_iter().flatten() {
-                                    // sized to the glass on screen; off screen, not drawn
-                                    if !mr.fit(&device, i, body, view_proj, config.height) {
+                            crate::bench::mark(enc, "shadow");
+                            };
+                            let rec_mirror = |enc: &mut wgpu::CommandEncoder| {
+                                let _t = crate::bench::cpu("enc mirror");
+                                if let (Some(mr), Some(t)) = (mirrors_r, track_r) {
+                                    for &(i, slot, view) in &mirror_jobs {
+                                        let m = &mr.list[i];
+                                        let mut mp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                            label: Some("mirror"),
+                                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                                view: if mr.samples() > 1 { &m.msaa } else { &m.resolve },
+                                                resolve_target: (mr.samples() > 1).then_some(&m.resolve),
+                                                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(clear), store: wgpu::StoreOp::Store },
+                                            })],
+                                            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                                                view: &m.depth,
+                                                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                                                stencil_ops: None,
+                                            }),
+                                            ..Default::default()
+                                        });
+                                        let cul = culler_r;
+                                        for phase in [Blend::Opaque, Blend::Cutout, Blend::Alpha] {
+                                            if phase == Blend::Alpha {
+                                                t.draw_sky_view(&mut mp, view);
+                                            }
+                                            t.draw_phase_view(&mut mp, meshes_r, phase,
+                                                &|gi, n| cul.and_then(|c| c.shadow(slot, gi)).map_or(n, |s| s.1),
+                                                &|gi| cul.and_then(|c| c.shadow(slot, gi)).and_then(|s| s.0),
+                                                view);
+                                        }
+                                        drop(mp);
+                                        mr.mips(enc, i);
+                                        crate::bench::mark(enc, if view == 3 { "mirror cam" } else { "mirror glass" });
+                                    }
+                                }
+                                crate::bench::mark(enc, "mirror");
+                            };
+                            let rec_probe = |enc: &mut wgpu::CommandEncoder| {
+                                let _t = crate::bench::cpu("enc probe");
+                                if let (Some(pr), Some(t), Some(face)) = (probe_r, track_r, probe_job) {
+                                    {
+                                        let mut pp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                            label: Some("reflection probe"),
+                                            color_attachments: &[Some(pr.attachment(face, clear))],
+                                            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                                                view: pr.depth(),
+                                                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                                                stencil_ops: None,
+                                            }),
+                                            ..Default::default()
+                                        });
+                                        let cul = culler_r;
+                                        for phase in [Blend::Opaque, Blend::Cutout, Blend::Alpha] {
+                                            if phase == Blend::Alpha {
+                                                t.draw_sky_view(&mut pp, 2);
+                                            }
+                                            t.draw_phase_view(&mut pp, meshes_r, phase,
+                                                &|gi, n| cul.and_then(|c| c.shadow(3, gi)).map_or(n, |s| s.1),
+                                                &|gi| cul.and_then(|c| c.shadow(3, gi)).and_then(|s| s.0),
+                                                2);
+                                        }
+                                    }
+                                    pr.filter(enc, face);
+                                    crate::bench::mark(enc, "probe");
+                                }
+                            };
+                            // EVOVIEW_BENCH_SPLIT=1 (--bench, no MSAA): the main pass
+                            // broken at each phase so each gets its own GPU time
+                            let split = bench.is_some() && samples == 1 && crate::envc::var_os("EVOVIEW_BENCH_SPLIT").is_some();
+                            let car_first_on = crate::envc::var("EVOVIEW_CAR_FIRST").map_or(true, |v| v != "0");
+                            // every non-track mesh in load order (the cars on a track)
+                            macro_rules! generic_draws {
+                                ($pass:ident, $phase:expr) => {{
+                                let (mut n_mesh, mut n_draw) = (0u64, 0u64);
+                                for (mi_mesh, m) in meshes_r.iter().enumerate() {
+                                    if Some(mi_mesh) == ground_mesh && !ground_on {
                                         continue;
                                     }
-                                    let (mvp, meye) = mr.view(&queue, i, body);
-                                    if let Some(c) = culler.as_mut() {
-                                        // a mirror is ~200 px tall: whatever covers under
-                                        // ~1.5 of its pixels is only draw calls
-                                        let focal = mvp.row(1).truncate().length() * mr.list[i].height as f32 * 0.5;
-                                        let tiny = (focal > 0.0).then(|| (meye, 1.5 / focal));
-                                        c.update_view(&device, &queue, slot, mvp, meye, 0.0, tiny, view_lod_scale(main_focal, focal));
+                                    let instances = culler_r.map_or(m.instance_count, |c| c.count(mi_mesh, m.instance_count));
+                                    if instances == 0 {
+                                        continue;
                                     }
-                                    t.update_mirror(&queue, mvp, meye, view == 3);
-                                    let m = &mr.list[i];
-                                    let mut mp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                        label: Some("mirror"),
-                                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                            view: if mr.samples() > 1 { &m.msaa } else { &m.resolve },
-                                            resolve_target: (mr.samples() > 1).then_some(&m.resolve),
-                                            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(clear), store: wgpu::StoreOp::Store },
-                                        })],
-                                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                                            view: &m.depth,
-                                            depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
-                                            stencil_ops: None,
-                                        }),
-                                        ..Default::default()
-                                    });
-                                    let cul = culler.as_ref();
-                                    for phase in [Blend::Opaque, Blend::Cutout, Blend::Alpha] {
-                                        if phase == Blend::Alpha {
-                                            t.draw_sky_view(&mut mp, view);
+                                    if track_r.map_or(false, |t| t.owns_mesh(m)) {
+                                        continue;
+                                    }
+                                    $pass.set_vertex_buffer(0, m.vertices.slice(..));
+                                    $pass.set_vertex_buffer(1, m.instances.slice(..));
+                                    $pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+                                    n_mesh += 1;
+                                    for &(start, count, mi) in &m.draws {
+                                        if m.extra.is_some() && track_r.map_or(false, |t| t.owns(mi)) {
+                                            continue;
                                         }
-                                        t.draw_phase_view(&mut mp, &meshes, phase,
-                                            &|gi, n| cul.and_then(|c| c.shadow(slot, gi)).map_or(n, |s| s.1),
-                                            &|gi| cul.and_then(|c| c.shadow(slot, gi)).and_then(|s| s.0),
-                                            view);
+                                        if mat_blend.get(mi).copied().unwrap_or(Blend::Opaque) != $phase {
+                                            continue;
+                                        }
+                                        if mirrors_r.map_or(false, |mr| mr.is_glass(mi_mesh, start)) {
+                                            continue;
+                                        }
+                                        $pass.set_bind_group(1, &mat_groups[mi], &[]);
+                                        if $phase == Blend::Glass {
+                                            $pass.set_pipeline(&pipes_all.glass_tint);
+                                            $pass.draw_indexed(start..start + count, 0, 0..instances);
+                                            $pass.set_pipeline(&pipes_all.glass_add);
+                                        }
+                                        $pass.draw_indexed(start..start + count, 0, 0..instances);
+                                        n_draw += 1;
                                     }
-                                    drop(mp);
-                                    mr.mips(&mut enc, i);
-                                    crate::bench::mark(&mut enc, if view == 3 { "mirror cam" } else { "mirror glass" });
                                 }
+                                if $phase == Blend::Opaque {
+                                    crate::bench::count("car meshes opaque", n_mesh);
+                                    crate::bench::count("car draws opaque", n_draw);
+                                }
+                                }};
                             }
-                            if let Some(b) = bench.as_mut() { b.mark(&mut enc, "mirror"); }
-                            drop(enc_sec);
-                            enc_sec = crate::bench::cpu("enc probe");
-                            // one reflection-probe face a frame, from the middle
-                            // of the car, through the track pipelines again
-                            if let (Some(pr), Some(t), Some(td)) = (probe.as_mut(), track.as_ref(), opts.track_drive.as_ref()) {
-                                let face = pr.due();
-                                let body = if drive_mode == 4 { td.body_flat() } else { td.matrices().0 };
-                                // above the roof: from 0.7 m a kerb under the car
-                                // filled the whole lower face and the windows
-                                // flashed red and white over every kerb
-                                let pos = body.w_axis.truncate() + Vec3::Y * 1.6;
-                                let (pvp, peye) = crate::probe::Probe::view(face, pos);
-                                if let Some(c) = culler.as_mut() {
-                                    // whatever covers under ~2 face pixels is only draw calls
-                                    let focal = pr.size as f32 * 0.5;
-                                    c.update_view(&device, &queue, 3, pvp, peye, 0.0, Some((peye, 2.0 / focal)), view_lod_scale(main_focal, focal));
+                            // The cars' opaque parts open the main pass (see CAR_FIRST
+                            // below); recorded beside the track's, they are a render
+                            // pass of their own that the track's then loads.
+                            let par_cars = par && par_job(4) && samples == 1 && car_first_on && draw_order.is_none();
+                            let rec_cars = |enc: &mut wgpu::CommandEncoder| {
+                                let _t = crate::bench::cpu("enc cars");
+                                let mut atts = vec![Some(color.clone())];
+                                if let Some(s) = ssr_r {
+                                    atts.extend(s.attachments(true));
                                 }
-                                t.update_probe(&queue, pvp, peye);
                                 {
-                                    let mut pp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                        label: Some("reflection probe"),
-                                        color_attachments: &[Some(pr.attachment(face, clear))],
+                                    let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                        label: Some("main (cars)"),
+                                        color_attachments: &atts,
                                         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                                            view: pr.depth(),
-                                            depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                                            view: &targets.depth,
+                                            depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
                                             stencil_ops: None,
                                         }),
                                         ..Default::default()
                                     });
-                                    let cul = culler.as_ref();
-                                    for phase in [Blend::Opaque, Blend::Cutout, Blend::Alpha] {
-                                        if phase == Blend::Alpha {
-                                            t.draw_sky_view(&mut pp, 2);
-                                        }
-                                        t.draw_phase_view(&mut pp, &meshes, phase,
-                                            &|gi, n| cul.and_then(|c| c.shadow(3, gi)).map_or(n, |s| s.1),
-                                            &|gi| cul.and_then(|c| c.shadow(3, gi)).and_then(|s| s.0),
-                                            2);
+                                    pass.set_bind_group(0, bind_group, &[]);
+                                    pass.set_bind_group(2, bone_bg, &[]);
+                                    pass.set_pipeline(pipeline);
+                                    generic_draws!(pass, Blend::Opaque);
+                                }
+                                if split {
+                                    crate::bench::mark(enc, "car opaque");
+                                }
+                            };
+                            // motion vectors: the scenery through the camera,
+                            // the cars (everything not track geometry) drawn again
+                            let taa_live = taa.as_ref().map_or(false, |t| t.on);
+                            let (slot_gpu_r, bone_buf_r, device_r, queue_r, depth_r) = (&slot_gpu, &bone_buf, &device, &queue, &targets.depth);
+                            rec_motion = move |mo: &mut crate::motion::Motion, enc: &mut wgpu::CommandEncoder| {
+                                let _t = crate::bench::cpu("enc motion");
+                                if hist_reset {
+                                    mo.reset();
+                                }
+                                // the cars: the driven one's / each replay slot's
+                                // body and wheel meshes
+                                let mut dyn_mesh = vec![false; meshes_r.len()];
+                                for gi in carcull_r.lod_meshes() {
+                                    if let Some(d) = dyn_mesh.get_mut(gi) {
+                                        *d = true;
                                     }
                                 }
-                                pr.filter(&mut enc, face);
-                                if let Some(b) = bench.as_mut() { b.mark(&mut enc, "probe"); }
+                                for (b, w) in slot_gpu_r {
+                                    for &gi in b.iter().chain(w.iter().flatten()) {
+                                        if let Some(d) = dyn_mesh.get_mut(gi) {
+                                            *d = true;
+                                        }
+                                    }
+                                }
+                                // (the camera it reprojects through, before run moves it on)
+                                let pvp = mo.prev_vp().unwrap_or(view_proj);
+                                mo.run(device_r, queue_r, enc, depth_r, bone_buf_r, meshes_r,
+                                       &|i| dyn_mesh[i],
+                                       &|mi| !mat_blend.get(mi).copied().unwrap_or(Blend::Opaque).transparent(),
+                                       vp_draw, view_proj, eye);
+                                // the track's animated props and swaying vegetation
+                                if let Some(tr) = track_r {
+                                    tr.draw_motion(device_r, queue_r, enc, (&mo.view, mo.rg.as_ref().map(|r| &r.1)),
+                                                   depth_r, mo.size(), view_proj, pvp, hist_reset, meshes_r,
+                                                   &|i, n| culler_r.map_or(n, |c| c.count(i, n)));
+                                }
+                                crate::bench::mark(enc, "motion");
+                            };
+                            // The track's opaque batches follow the cars' as one more
+                            // pass of the main view, recorded beside the rest of it
+                            // (cutouts, sky, alpha, glass: this thread).
+                            // EVOVIEW_PAR_TRACK=0: with the rest, on this thread.
+                            static PAR_TRACK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                            let par_track = par_cars && par_job(5) && *PAR_TRACK.get_or_init(|| crate::envc::var("EVOVIEW_PAR_TRACK").map_or(true, |v| v != "0"));
+                            let rec_track = |enc: &mut wgpu::CommandEncoder| {
+                                let _t = crate::bench::cpu("enc track");
+                                let Some(t) = track_r else { return };
+                                let mut atts = vec![Some(wgpu::RenderPassColorAttachment {
+                                    view: main_out,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                                })];
+                                if let Some(s) = ssr_r {
+                                    atts.extend(s.attachments(false));
+                                }
+                                {
+                                    let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                        label: Some("main (track opaque)"),
+                                        color_attachments: &atts,
+                                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                                            view: &targets.depth,
+                                            depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                                            stencil_ops: None,
+                                        }),
+                                        ..Default::default()
+                                    });
+                                    pass.set_bind_group(0, bind_group, &[]);
+                                    pass.set_bind_group(2, bone_bg, &[]);
+                                    t.draw_phase(&mut pass, meshes_r, Blend::Opaque, &|i, n| culler_r.map_or(n, |c| c.count(i, n)));
+                                }
+                                if split {
+                                    crate::bench::mark(enc, "track opaque");
+                                }
+                            };
+                            // a worker's command buffers in submit order (0 effects
+                            // and dash, 1 shadows, 2 mirrors, 3 probe, 4 cars, 5 the
+                            // track's opaque batches, 6 motion vectors), each with
+                            // the bench marks written into it
+                            type Recorded = (usize, wgpu::CommandBuffer, Vec<(usize, &'static str)>);
+                            type Job<'j> = (usize, Box<dyn FnOnce(&mut wgpu::CommandEncoder) + Send + 'j>);
+                            let rec_motion_r = &rec_motion;
+                            let mut jobs_par: Vec<Job> = Vec::new();
+                            if par {
+                                if fx_par {
+                                    let (fxg, car_fx, fxst, eye3) = (&mut fxg, car_fx.as_deref(), &fxst, [eye.x, eye.y, eye.z]);
+                                    jobs_par.push((0, Box::new(move |e| {
+                                        fxg.update(device_r, queue_r, e, car_fx, fxst, dt, eye3);
+                                        crate::bench::mark(e, "fx");
+                                    })));
+                                }
+                                // (a pass kept on this thread is recorded now, ahead
+                                // of the workers' in the frame as it has to be)
+                                if par_job(1) {
+                                    jobs_par.push((1, Box::new(|e| rec_shadow(e))));
+                                } else {
+                                    rec_shadow(&mut enc);
+                                }
+                                if par_job(2) {
+                                    jobs_par.push((2, Box::new(|e| rec_mirror(e))));
+                                } else {
+                                    rec_mirror(&mut enc);
+                                }
+                                if par_job(3) {
+                                    jobs_par.push((3, Box::new(|e| rec_probe(e))));
+                                } else {
+                                    rec_probe(&mut enc);
+                                }
+                                if par_cars {
+                                    jobs_par.push((4, Box::new(|e| rec_cars(e))));
+                                }
+                                if par_track {
+                                    jobs_par.push((5, Box::new(|e| rec_track(e))));
+                                }
+                                if let Some(mo) = motion.as_mut().filter(|_| taa_live && par_job(6)) {
+                                    jobs_par.push((6, Box::new(move |e| rec_motion_r(mo, e))));
+                                }
+                                // what this thread recorded so far goes first
+                                crate::bench::marks_flush();
+                                let pre = std::mem::replace(&mut enc, device.create_command_encoder(&Default::default()));
+                                cmd_bufs.push(pre.finish());
                             }
-                            drop(enc_sec);
+                            let mut recorded: Vec<Recorded> = Vec::new();
+                            std::thread::scope(|s| {
+                            let mut workers = Vec::new();
+                            let anim_worker = anim_time.take().and_then(|tm| track_r.map(|t| s.spawn(move || {
+                                let _t = crate::bench::cpu("track anim");
+                                t.animate(queue_r, tm);
+                            })));
+                            if par {
+                                // shared out by their usual cost (ms of recording,
+                                // roughly), the biggest first, each to the worker
+                                // with the least so far
+                                const COST: [f32; 7] = [1.5, 1.0, 1.7, 1.6, 3.0, 2.5, 1.2];
+                                jobs_par.sort_by(|a, b| COST[b.0].total_cmp(&COST[a.0]));
+                                let n = par_workers.min(jobs_par.len()).max(1);
+                                let mut groups: Vec<(f32, Vec<Job>)> = (0..n).map(|_| (0.0, Vec::new())).collect();
+                                for j in jobs_par.drain(..) {
+                                    let g = groups.iter_mut().min_by(|a, b| a.0.total_cmp(&b.0)).expect("a worker");
+                                    g.0 += COST[j.0];
+                                    g.1.push(j);
+                                }
+                                for (_, g) in groups {
+                                    workers.push(s.spawn(move || g.into_iter().map(|(slot, f)| {
+                                        let mut e = device_r.create_command_encoder(&Default::default());
+                                        f(&mut e);
+                                        (slot, e.finish(), crate::bench::marks_take())
+                                    }).collect::<Vec<Recorded>>()));
+                                }
+                            } else {
+                                rec_shadow(&mut enc);
+                                rec_mirror(&mut enc);
+                                rec_probe(&mut enc);
+                            }
                             let _enc_main = crate::bench::cpu("enc main");
                             // + the SSR targets (ssr.rs), cleared: nothing reflects
-                            let mut atts = vec![Some(color)];
+                            // (loaded, like the depth, after the cars' own pass)
+                            let mut atts = vec![Some(if par_cars {
+                                wgpu::RenderPassColorAttachment {
+                                    view: main_out,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                                }
+                            } else {
+                                color.clone()
+                            })];
                             if let Some(s) = ssr.as_ref() {
-                                atts.extend(s.attachments(true));
+                                atts.extend(s.attachments(!par_cars));
                             }
                             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                                 label: Some("main"),
@@ -5148,7 +5463,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     wgpu::RenderPassDepthStencilAttachment {
                                         view: &targets.depth,
                                         depth_ops: Some(wgpu::Operations {
-                                            load: wgpu::LoadOp::Clear(1.0),
+                                            load: if par_cars { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(1.0) },
                                             store: wgpu::StoreOp::Store,
                                         }),
                                         stencil_ops: None,
@@ -5165,9 +5480,6 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                     // far is copied out first (rain.rs SceneCopy)
                     let refract = fxst.rain > 0.0 && samples == 1 && scene_copy.as_ref().map_or(false, |c| copy_fits(c, rw, rh)) && !no_refract
                         && taa.as_ref().map_or(false, |t| t.on && taa_on);
-                    // EVOVIEW_BENCH_SPLIT=1 (--bench, no MSAA): the main pass
-                    // broken at each phase so each gets its own GPU time
-                    let split = bench.is_some() && samples == 1 && crate::envc::var_os("EVOVIEW_BENCH_SPLIT").is_some();
                     macro_rules! resume_main {
                         ($label:expr) => {{
                             drop(pass);
@@ -5194,7 +5506,6 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             pass.set_bind_group(2, bone_bg, &[]);
                         }};
                     }
-                    let car_first_on = crate::envc::var("EVOVIEW_CAR_FIRST").map_or(true, |v| v != "0");
                     macro_rules! cars_ordered {
                         ($order:expr, $phase:expr) => {{
                             let mut bound = usize::MAX;
@@ -5221,47 +5532,11 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             }
                         }};
                     }
-                    // every non-track mesh in load order (the cars on a track)
-                    macro_rules! generic_draws {
-                        ($phase:expr) => {{
-                        for (mi_mesh, m) in meshes.iter().enumerate() {
-                            if Some(mi_mesh) == ground_mesh && !ground_on {
-                                continue;
-                            }
-                            let instances = culler
-                                .as_ref()
-                                .map_or(m.instance_count, |c| c.count(mi_mesh, m.instance_count));
-                            if instances == 0 {
-                                continue;
-                            }
-                            if track.as_ref().map_or(false, |t| t.owns_mesh(m)) {
-                                continue;
-                            }
-                            pass.set_vertex_buffer(0, m.vertices.slice(..));
-                            pass.set_vertex_buffer(1, m.instances.slice(..));
-                            pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
-                            for &(start, count, mi) in &m.draws {
-                                if m.extra.is_some() && track.as_ref().map_or(false, |t| t.owns(mi)) {
-                                    continue;
-                                }
-                                if materials.blend.get(mi).copied().unwrap_or(Blend::Opaque) != $phase {
-                                    continue;
-                                }
-                                if mirrors.as_ref().map_or(false, |mr| mr.is_glass(mi_mesh, start)) {
-                                    continue;
-                                }
-                                pass.set_bind_group(1, &materials.groups[mi], &[]);
-                                if $phase == Blend::Glass {
-                                    pass.set_pipeline(&pipes_all.glass_tint);
-                                    pass.draw_indexed(start..start + count, 0, 0..instances);
-                                    pass.set_pipeline(&pipes_all.glass_add);
-                                }
-                                pass.draw_indexed(start..start + count, 0, 0..instances);
-                            }
-                        }
-                        }};
-                    }
                     for (idx, phase) in [Blend::Opaque, Blend::Cutout, Blend::Alpha, Blend::Glass].iter().enumerate() {
+                        // (workers recorded the opaque phase: the cars' pass, then the track's)
+                        if par_track && *phase == Blend::Opaque {
+                            continue;
+                        }
                         if split && idx > 0 {
                             resume_main!(["main opaque", "main cutout", "main alpha"][idx - 1]);
                         }
@@ -5297,11 +5572,12 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         // (2-3 ms at 3440x1440). Depth-tested opaque draws: the
                         // same picture. EVOVIEW_CAR_FIRST=0: the old order.
                         let car_first = *phase == Blend::Opaque && track.is_some() && car_first_on;
-                        if car_first {
+                        // (par_cars: a worker recorded them, in the pass before this one)
+                        if car_first && !par_cars {
                             pass.set_pipeline(pipeline);
                             match draw_order.as_mut() {
                                 Some(order) => cars_ordered!(order, *phase),
-                                None => generic_draws!(*phase),
+                                None => generic_draws!(pass, *phase),
                             }
                             if split {
                                 resume_main!("car opaque");
@@ -5337,13 +5613,36 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             continue;
                         }
                         if !car_first {
-                            generic_draws!(*phase);
+                            generic_draws!(pass, *phase);
                         }
                     }
                             if let Some(mr) = mirrors.as_ref() {
                                 mr.draw_glass(&queue, &mut pass, &meshes, vp_draw);
                             }
                             drop(pass);
+                            drop(_enc_main);
+                            {
+                                let _t = crate::bench::cpu("enc join");
+                                for w in workers {
+                                    recorded.extend(w.join().expect("pass recording thread"));
+                                }
+                                if let Some(w) = anim_worker {
+                                    w.join().expect("track animation thread");
+                                }
+                            }
+                            });
+                            drop(jobs_par);
+                            // the workers' passes come before this thread's main pass
+                            // (the motion vectors after it: see `enc post`)
+                            recorded.sort_by_key(|r| r.0);
+                            for (slot, cb, marks) in recorded {
+                                if slot == 6 {
+                                    motion_recorded = Some((cb, marks));
+                                } else {
+                                    cmd_bufs.push(cb);
+                                    crate::bench::marks_append(marks);
+                                }
+                            }
                             // particles after the main pass, soft against its depth
                             // (after TAA when it can: smoke has no motion vectors
                             // and its history turned it into trailing blocks)
@@ -5419,46 +5718,24 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 s.run(&device, &queue, &mut enc, &targets.depth, &t.cur, vp_draw, eye);
                                 if let Some(b) = bench.as_mut() { b.mark(&mut enc, "ssr"); }
                             }
-                            // motion vectors: the scenery through the camera,
-                            // the cars (everything not track geometry) drawn again
                             let _enc_post = crate::bench::cpu("enc post");
-                            let mv_on = match motion.as_mut() {
-                                Some(mo) => {
-                                    if hist_reset {
-                                        mo.reset();
-                                    }
-                                    // the cars: the driven one's / each replay slot's
-                                    // body and wheel meshes
-                                    let mut dyn_mesh = vec![false; meshes.len()];
-                                    for gi in carcull.lod_meshes() {
-                                        if let Some(d) = dyn_mesh.get_mut(gi) {
-                                            *d = true;
-                                        }
-                                    }
-                                    for (b, w) in &slot_gpu {
-                                        for &gi in b.iter().chain(w.iter().flatten()) {
-                                            if let Some(d) = dyn_mesh.get_mut(gi) {
-                                                *d = true;
-                                            }
-                                        }
-                                    }
-                                    let mats = &materials;
-                                    // (the camera it reprojects through, before run moves it on)
-                                    let pvp = mo.prev_vp().unwrap_or(view_proj);
-                                    mo.run(&device, &queue, &mut enc, &targets.depth, &bone_buf, &meshes,
-                                           &|i| dyn_mesh[i],
-                                           &|mi| !mats.blend.get(mi).copied().unwrap_or(Blend::Opaque).transparent(),
-                                           vp_draw, view_proj, eye);
-                                    // the track's animated props and swaying vegetation
-                                    if let Some(tr) = track.as_ref() {
-                                        tr.draw_motion(&device, &queue, &mut enc, (&mo.view, mo.rg.as_ref().map(|r| &r.1)),
-                                                       &targets.depth, mo.size(), view_proj, pvp, hist_reset, &meshes,
-                                                       &|i, n| culler.as_ref().map_or(n, |c| c.count(i, n)));
-                                    }
-                                    if let Some(b) = bench.as_mut() { b.mark(&mut enc, "motion"); }
+                            // the motion vectors (rec_motion): a worker's command
+                            // buffer goes between what this thread recorded before
+                            // and after it, or they are recorded here
+                            let mv_on = match (motion_recorded.take(), motion.as_mut()) {
+                                (Some((cb, marks)), _) => {
+                                    crate::bench::marks_flush();
+                                    let before = std::mem::replace(&mut enc, device.create_command_encoder(&Default::default()));
+                                    cmd_bufs.push(before.finish());
+                                    cmd_bufs.push(cb);
+                                    crate::bench::marks_append(marks);
                                     true
                                 }
-                                None => false,
+                                (None, Some(mo)) => {
+                                    rec_motion(mo, &mut enc);
+                                    true
+                                }
+                                (None, None) => false,
                             };
                             let mv = motion.as_ref().filter(|_| mv_on).map(|m| &m.view);
                             // DLSS: the jittered scene + depth + motion vectors ->
@@ -5599,7 +5876,8 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         drop(encode_t);
                         let submitted = {
                             let _t = crate::bench::cpu("submit");
-                            queue.submit([enc.finish()])
+                            cmd_bufs.push(enc.finish());
+                            queue.submit(cmd_bufs)
                         };
                         if let Some(p) = post.as_ref() {
                             p.after_submit();
@@ -5722,6 +6000,35 @@ fn make_targets(device: &wgpu::Device, w: u32, h: u32, format: wgpu::TextureForm
 /// Device limits: wgpu's defaults, but with as many sampled textures per
 /// stage as the adapter offers (up to 32). The car shader binds 18, one more
 /// than the default 16 allows on a strict adapter.
+/// Worker threads for recording the frame's passes (see `par` in `run`):
+/// 4 by default, 0 (all on the render thread) with fewer than 4 cores.
+/// EVOVIEW_PAR_ENC=N: at most N; 0: none.
+fn par_enc_workers() -> usize {
+    static PAR_ENC: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *PAR_ENC.get_or_init(|| {
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let want = crate::envc::var("EVOVIEW_PAR_ENC").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(4);
+        // (never more than half the cores: the simulation has threads too)
+        let want = want.min(cores / 2);
+        if cores >= 4 { want.min(cores - 1) } else { 0 }
+    })
+}
+
+/// Whether pass `slot` (0 effects and dash, 1 shadows, 2 mirrors, 3 probe,
+/// 4 cars, 5 the track's opaque batches, 6 motion vectors) is recorded on a
+/// worker when there are any. Each one is a command buffer of its own, and
+/// a command buffer costs the submit a walk over everything it uses.
+/// EVOVIEW_PAR_JOBS=<bit mask>: which ones (the rest on the render thread).
+fn par_job(slot: usize) -> bool {
+    static JOBS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    par_enc_workers() > 0 && *JOBS.get_or_init(|| {
+        crate::envc::var("EVOVIEW_PAR_JOBS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(PAR_JOBS)
+    }) & (1 << slot) != 0
+}
+
+/// The passes recorded on workers by default (see `par_job`).
+const PAR_JOBS: u32 = 0b111_1111;
+
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)

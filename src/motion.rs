@@ -311,6 +311,7 @@ impl Motion {
             pass.set_pipeline(&self.cam_pipe);
             pass.draw(0..3, 0..1);
             pass.set_pipeline(&self.obj_pipe);
+            let mut n_draw = 0u64;
             for &i in &dyns {
                 let m = &meshes[i];
                 let Some(prev) = self.prev_inst[i].as_ref() else { continue };
@@ -321,9 +322,12 @@ impl Motion {
                 for &(start, count, mi) in &m.draws {
                     if opaque(mi) {
                         pass.draw_indexed(start..start + count, 0, 0..m.instance_count);
+                        n_draw += 1;
                     }
                 }
             }
+            crate::bench::count("motion meshes", dyns.len() as u64);
+            crate::bench::count("motion draws", n_draw);
         }
         self.copy_prev(enc, bones, meshes, &dyns);
         self.primed = true;
