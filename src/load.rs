@@ -4463,6 +4463,8 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
     let mut car = Car::from_parts(meshes, textures, materials, blob);
     car.world_uv_scale = world_uv_scale;
     car.track_env = Some(Box::new(env));
+    // EVOVIEW_STRESS: the track tiled / copied (limit finding)
+    crate::stress::track(&mut car);
     // ⚠ No studio here. This is the TRACK loader, and the studio cube is the
     // showroom the game paints cars in - an outdoor scene wants its own
     // reflection captures, which are a separate asset.

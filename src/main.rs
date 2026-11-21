@@ -64,6 +64,7 @@
 
 mod asset;
 mod race;
+mod stress;
 mod cluster;
 mod motion;
 mod carcull;
@@ -1197,7 +1198,7 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
                   flag: &dyn Fn(&str) -> Option<String>) {
     let t0 = std::time::Instant::now();
     // --ai N / EVOVIEW_AI=N: opponents (race.rs), one model slot each
-    let n_ai = flag("--ai").and_then(|v| v.parse::<usize>().ok()).map_or_else(race::env_count, |n| n.min(race::NAMES.len()));
+    let n_ai = stress::cars().unwrap_or_else(|| flag("--ai").and_then(|v| v.parse::<usize>().ok()).map_or_else(race::env_count, |n| n.min(race::NAMES.len())));
     // EVOVIEW_MP=host:port: online (mp.rs); the other players are drawn in
     // EVOVIEW_MP_CARS render slots (4) of EVOVIEW_AI_CARS or this car's model
     let mp_addr = crate::envc::var("EVOVIEW_MP").ok().filter(|v| !v.is_empty());
