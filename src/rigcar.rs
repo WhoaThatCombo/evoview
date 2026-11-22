@@ -165,6 +165,8 @@ pub struct RigCar {
     air_t: f32,
     road_t: f32,
     therm_model: bool,
+    /// EVOVIEW_SCTM_GRIP_OUT: grip 1 into SCTM, the forces scaled after
+    sctm_grip_out: bool,
     /// EVOVIEW_NO_RR=1: no rolling resistance on the wheels
     no_rr: bool,
     /// the tyres' relaxation lengths in use (EVOVIEW_NO_RELAX=1: instant slip)
@@ -227,6 +229,14 @@ pub struct RigCar {
     limiter: f32,
     engine_inertia: f32,
     pub aero: [f32; 3],
+    /// the body aero maps, sampled at the live ride heights (lapsim::AeroMaps;
+    /// only with EVOVIEW_RIG_AERO_LIVE=1, see aero_static)
+    pub aero_maps: Option<std::sync::Arc<crate::lapsim::AeroMaps>>,
+    /// per axle, mean (hub gap - suspension compression) with the car at
+    /// rest: the ride height the setup's figure belongs to (m)
+    ride_ref: [f32; 2],
+    /// the last live (front, rear) ride heights, mm (diagnostics)
+    pub aero_dbg: [f32; 2],
     pub max_steer: f32,
     /// steering-wheel degrees per road-wheel degree (setup steer_ratio)
     pub steer_ratio: f32,
@@ -405,7 +415,14 @@ impl RigCar {
             })),
             air_t: env_t("EVOVIEW_AIR_T", 25.0),
             road_t: env_t("EVOVIEW_ROAD_T", f32::NAN),
-            therm_model: crate::envc::var_os("EVOVIEW_TYRE_T_MODEL").is_some(),
+            // EVOVIEW_TYRE_T_MODEL=1: the falloff runs on the thermal model's
+            // tread temperature (the game's p[14]). Safe for slicks now (their
+            // muTSensitivity is 0 in the game - no temperature effect); road
+            // tyres (0.025 / 70 C) lose sliding grip when cold, and the MX-5
+            // NA on a pad-cool set spins at the limit with it. Off until it
+            // is judged on the wheel.
+            therm_model: crate::envc::var("EVOVIEW_TYRE_T_MODEL").map_or(false, |v| v != "0"),
+            sctm_grip_out: crate::envc::var_os("EVOVIEW_SCTM_GRIP_OUT").is_some(),
             no_rr: crate::envc::var_os("EVOVIEW_NO_RR").is_some(),
             relax: crate::envc::var_os("EVOVIEW_NO_RELAX").is_none(),
             last_wall_log: -1.0,
@@ -449,6 +466,9 @@ impl RigCar {
             limiter: p.limiter_rpm.max(3000.0),
             engine_inertia: if p.engine_inertia > 0.0 { p.engine_inertia } else { 0.15 },
             aero,
+            aero_maps: None,
+            ride_ref: [f32::NAN; 2],
+            aero_dbg: [f32::NAN; 2],
             max_steer,
             steer_ratio: if p.steer_ratio.abs() > 1.0 { p.steer_ratio.abs() } else { 15.0 },
             rc_height: crate::envc::var("EVOVIEW_RIG_RC").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0),
@@ -1160,9 +1180,10 @@ impl RigCar {
         let zf = (self.anchor[0].z + self.anchor[1].z) * 0.5;
         let zr = (self.anchor[2].z + self.anchor[3].z) * 0.5;
         let o = self.cg - r * self.cg_local;
-        apply(&mut f_body, &mut t_body, -up * self.aero[0] * vsq, o + fw * zf, self.cg);
-        apply(&mut f_body, &mut t_body, -up * self.aero[1] * vsq, o + fw * zr, self.cg);
-        f_body -= self.v.normalize_or_zero() * self.aero[2] * vsq;
+        let ka = self.live_aero();
+        apply(&mut f_body, &mut t_body, -up * ka[0] * vsq, o + fw * zf, self.cg);
+        apply(&mut f_body, &mut t_body, -up * ka[1] * vsq, o + fw * zr, self.cg);
+        f_body -= self.v.normalize_or_zero() * ka[2] * vsq;
 
         let mut brakes = self.brakes.torques(brake_in, self.hb);
         if let Some(abs) = self.abs.as_ref().filter(|_| self.abs_on) {
@@ -1340,6 +1361,7 @@ impl RigCar {
                     let camber = if k % 2 == 1 { cb } else { -cb } - roll;
                     // the compound's thermal performance curve
                     let mut temp = f32::NAN;
+                    let mut core_temp = f32::NAN;
                     let grain = self.therm[k].as_ref().map_or(0.0, |th| th.grain);
                     let pressure = match (self.therm_data[ax].as_ref(), self.therm[k].as_ref()) {
                         (Some(d), Some(th)) => th.pressure_ratio(d),
@@ -1350,16 +1372,27 @@ impl RigCar {
                         if self.therm_model {
                             temp = th.model_temp(d);
                         }
+                        core_temp = th.core as f32;
                     }
-                    // SCTM's grip input is the tyre's own chain (thermal / wear,
-                    // ~1): its slip stiffness divides by gripSlipFactor x
-                    // (grip - 1) + 1, which goes negative on a low-grip surface
-                    // (M4: factor 5). The surface scales the forces instead.
+                    // SCTM's grip input p[5] is the whole chain, as the tyre
+                    // step builds it (FUN_14236b450: thermal / pressure / wear
+                    // x surface grip tyre+0xa78 x the dynamic track's rubber
+                    // term): it scales the peak AND the slip stiffness divides
+                    // by gripSlipFactor x (grip - 1) + 1 - a tyre below its
+                    // grip peaks at a smaller slip angle; on grass (M4: factor
+                    // 5, grip 0.55) that goes negative and the tyre is past
+                    // its peak from the first degree, as in the game.
+                    // EVOVIEW_SCTM_GRIP_OUT=1: the old way (grip 1 into the
+                    // model, the forces scaled after).
+                    let grip_out = self.sctm_grip_out;
                     let solve = |sr: f32| {
-                        let mut o = t.solve(&Input { fz, alpha, sr, camber, speed: vc.length(), grip: 1.0, wet, temp, grain, pressure, ..Default::default() });
-                        o.fx *= grip;
-                        o.fy *= grip;
-                        o.mz *= grip;
+                        let g_in = if grip_out { 1.0 } else { grip };
+                        let mut o = t.solve(&Input { fz, alpha, sr, camber, speed: vc.length(), grip: g_in, wet, temp, core_temp, grain, pressure, ..Default::default() });
+                        if grip_out {
+                            o.fx *= grip;
+                            o.fy *= grip;
+                            o.mz *= grip;
+                        }
                         o
                     };
                     let sr = relaxed.map_or(((self.c[k].omega * re - vl) / den).clamp(-3.0, 3.0), |r| r.1);
@@ -1917,6 +1950,56 @@ pub fn flat_pad() -> Ground {
     Ground::new(&c, &[])
 }
 
+impl RigCar {
+    /// The aero for this step: the static figures plus the body maps'
+    /// change at the live ride heights. The game samples the maps at each
+    /// downforce point's height over the tyre contacts every step
+    /// (FUN_1422da770 / FUN_142403910); here the height is the setup's
+    /// figure moved by the axle's body drop since the car was at rest
+    /// (hub gap - suspension compression; both wheels' mean).
+    fn live_aero(&mut self) -> [f32; 3] {
+        let Some(m) = self.aero_maps.clone() else { return self.aero };
+        if aero_static() {
+            return self.aero;
+        }
+        let mut h = [0.0f32; 2];
+        for ax in 0..2 {
+            let (a, b) = (&self.c[ax * 2], &self.c[ax * 2 + 1]);
+            if !(a.on_ground && b.on_ground) {
+                return self.aero;
+            }
+            h[ax] = 0.5 * ((a.gap - a.x) + (b.gap - b.x));
+        }
+        // the rest reference: settles while the car is slow (none yet: the
+        // static figures)
+        if self.v.length() < 3.0 {
+            for ax in 0..2 {
+                self.ride_ref[ax] = if self.ride_ref[ax].is_nan() { h[ax] } else { self.ride_ref[ax] + (h[ax] - self.ride_ref[ax]) * 0.02 };
+            }
+        }
+        if self.ride_ref[0].is_nan() {
+            return self.aero;
+        }
+        let fh = m.h0[0] + (h[0] - self.ride_ref[0]) * 1000.0;
+        let rh = m.h0[1] + (h[1] - self.ride_ref[1]) * 1000.0;
+        let d = m.delta(fh, rh);
+        self.aero_dbg = [fh, rh];
+        [(self.aero[0] + d[0]).max(0.0), (self.aero[1] + d[1]).max(0.0), (self.aero[2] + d[2]).max(0.0)]
+    }
+}
+
+/// The body maps at the setup's ride heights only, unless
+/// EVOVIEW_RIG_AERO_LIVE=1. The game samples them at the live heights (code
+/// above), but the height here is a proxy (hub gap - compression, not the
+/// game's downforce-point-over-contact-planes height) that reads the M4's
+/// front ~6 mm HIGH in a steady corner, and with it the Ferrari 296 GT3
+/// spins in the pad skidpad at 160 km/h - opt-in until the proxy is
+/// replaced by the point heights (DownForceData f1 position y is unread).
+fn aero_static() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| crate::envc::var("EVOVIEW_RIG_AERO_LIVE").map_or(true, |v| v == "0"))
+}
+
 /// `EVOVIEW_RIG_PAD=1 --drive-test N`: the car's numbers on a flat pad -
 /// static loads, 0-100 / 0-200, 200-0 braking, steady-state cornering.
 pub fn pad_test(rc: &mut RigCar) {
@@ -1964,12 +2047,20 @@ pub fn pad_test(rc: &mut RigCar) {
     let brake = Controls { brake: 1.0, ..Default::default() };
     let mut tb = 0.0;
     let mut peak = 0.0f32;
+    // mean deceleration per 40 km/h band (to set against replay data)
+    let mut bands = [(0.0f32, 0u32); 6];
     while rc.speed() > 0.5 && tb < 20.0 {
         let v = rc.speed();
         run(rc, &mut acc, brake, 0.05);
-        peak = peak.max((v - rc.speed()) / 0.05 / G);
+        let dec = (v - rc.speed()) / 0.05 / G;
+        peak = peak.max(dec);
+        let b = ((v * 3.6 / 40.0) as usize).min(5);
+        bands[b].0 += dec;
+        bands[b].1 += 1;
         tb += 0.05;
     }
+    println!("PAD braking bands (km/h: mean g): {}", bands.iter().enumerate().filter(|(_, b)| b.1 > 0)
+        .map(|(i, b)| format!("{}-{}: {:.2}", i * 40, i * 40 + 40, b.0 / b.1 as f32)).collect::<Vec<_>>().join(", "));
     println!("PAD braking: {:.0} km/h -> 0 in {:.1} m, {:.2} s, peak {:.2} g ({})", v0, (rc.origin() - p0).length(), tb, peak,
         rc.abs.as_ref().map_or("no ABS".to_string(), |a| format!("ABS level {} of {}", a.level, a.levels.len())));
     // skidpad: hold a speed with throttle, fixed steer
@@ -2345,6 +2436,10 @@ pub fn steady_test(rc: &mut RigCar) {
     let set: Vec<(f32, f32)> = crate::envc::var("EVOVIEW_STEADY_SET").ok().map(|s| s.split(',').filter_map(|p| { let (a, b) = p.split_once(':')?; Some((a.trim().parse().ok()?, b.trim().parse().ok()?)) }).collect()).unwrap_or_else(|| vec![(60.0, 4.0), (80.0, 3.0), (80.0, 5.0), (100.0, 2.5)]);
     for (kmh, deg) in set {
         rc.place(Vec3::new(0.0, 0.0, -1800.0), 0.0);
+        // settle at rest first (the live aero's ride reference)
+        for _ in 0..(1.0 / DT) as usize {
+            rc.step(&Controls { brake: 1.0, ..Default::default() }, DT, &g, &mut acc);
+        }
         rc.roll(kmh / 3.6);
         let n = (10.0 / DT) as usize;
         let mut sum = [0.0f64; 21];
@@ -2402,7 +2497,8 @@ pub fn steady_test(rc: &mut RigCar) {
                 let dy = rc.tyre[k / 2].as_ref().map_or(f32::NAN, |t| t.d_y(c.fz));
                 format!("k{k} fz {:.0} fy {:.0} fx {:.0} D {:.3} grip {:.3} alpha {:.2} camber? util {:.2}", c.fz, c.fy, c.fx, dy, c.grip, c.alpha.to_degrees(), (c.fy * c.fy + c.fx * c.fx).sqrt() / (dy * c.fz * c.grip).max(1.0))
             }).collect();
-            println!("STEADYUTIL {}", u.join(" | "));
+            let ka = rc.live_aero();
+            println!("STEADYUTIL {} | aero F {:.0} R {:.0} N at ride {:.1} / {:.1} mm", u.join(" | "), ka[0] * rc.v.length_squared(), ka[1] * rc.v.length_squared(), rc.aero_dbg[0], rc.aero_dbg[1]);
         }
         // full throttle for 1.5 s from there
         let mut peak = (0.0f32, 0.0f32, 0.0f32);

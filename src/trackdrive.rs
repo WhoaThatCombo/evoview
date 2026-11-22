@@ -788,6 +788,14 @@ impl TrackDrive {
         }
     }
 
+    /// The body aero maps for the rigid-body car's live-ride-height aero
+    /// (lapsim::AeroMaps).
+    pub fn set_aero_maps(&mut self, m: Option<std::sync::Arc<crate::lapsim::AeroMaps>>) {
+        if let Some((rc, _)) = self.rig.as_mut() {
+            rc.aero_maps = m;
+        }
+    }
+
     /// Put the car at `at` (any height: it is dropped onto the surface below
     /// a point 50 m above), facing `yaw`, at rest.
     pub fn place(&mut self, at: Vec3, yaw: f32) -> bool {

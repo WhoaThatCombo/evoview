@@ -1277,6 +1277,7 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
     let phys = carphys::Physics::read(&mut car_vfs);
     let phys_pits = phys.clone();
     let aero = phys.as_ref().map(|p| lapsim::aero(&mut car_vfs, p)).unwrap_or_default();
+    let aero_maps = phys.as_ref().and_then(|p| lapsim::aero_maps(&mut car_vfs, p)).map(std::sync::Arc::new);
     let env = scene.car.track_env.as_deref();
     let Some(coll) = env.and_then(|e| e.collision.as_ref()) else {
         eprintln!("{track}: no collision surfaces found");
@@ -1294,20 +1295,23 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
     let phys_ai: Vec<_> = ai_vfs.into_iter().map(|(_, mut vfs)| {
         let ph = carphys::Physics::read(&mut vfs);
         let aero = ph.as_ref().map(|p| lapsim::aero(&mut vfs, p)).unwrap_or_default();
-        (ph, aero)
+        let maps = ph.as_ref().and_then(|p| lapsim::aero_maps(&mut vfs, p)).map(std::sync::Arc::new);
+        (ph, (aero, maps))
     }).collect();
     let mut ai_cars = Vec::new();
     for &(mi, si, inst) in &ai_place {
         let (ph, aero) = &phys_ai[mi];
         let mut t = trackdrive::TrackDrive::with_model(ground.clone(), scene.slots[si].clone(), ph.clone(), ai_rig, false);
         if let Some((rc, _)) = t.rig.as_mut() {
-            rc.aero = *aero;
+            rc.aero = aero.0;
+            rc.aero_maps = aero.1.clone();
             rc.water_flow = false;
         }
         ai_cars.push((t, si, inst));
     }
     let mut td = trackdrive::TrackDrive::with_model(ground, slot, phys, crate::envc::var_os("EVOVIEW_RIGCAR").is_some(), true);
     td.set_aero(aero);
+    td.set_aero_maps(aero_maps);
     let (at, yaw) = trackdrive::spawn_point(pkg, track).unwrap_or((glam::Vec3::ZERO, 0.0));
     if !td.place(at, yaw) {
         eprintln!("no drivable surface at the spawn point ({:.0}, {:.0}, {:.0})", at.x, at.y, at.z);

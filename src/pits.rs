@@ -726,6 +726,7 @@ pub fn apply(td: &mut TrackDrive, car: &mut PitCar, ch: &Change) -> String {
             }
             let k = crate::lapsim::aero(vfs, ph);
             td.set_aero(k);
+            td.set_aero_maps(crate::lapsim::aero_maps(vfs, ph).map(std::sync::Arc::new));
             format!("{what} {value:.1} {unit}")
         }
         Change::RepairBody => {

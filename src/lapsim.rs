@@ -43,6 +43,7 @@ struct Wing {
 
 /// Math.proto Surface3dData: 1 sizeX, 2 sizeY, 3/4 min/max X, 5/6 min/max
 /// Y, 7 values (X fastest). Bilinear, clamped at the edges.
+#[derive(Clone, Debug)]
 struct Surface {
     nx: usize,
     ny: usize,
@@ -167,6 +168,75 @@ pub fn aero(vfs: &mut crate::load::Vfs, p: &Physics) -> [f32; 3] {
     k
 }
 
+/// The body aero maps (GT cars) for a ride-height-live lookup: the game
+/// samples AeroData front_lift / rear_lift / drag at every DownForceData
+/// point's CURRENT height each step (aero step FUN_1422da770: height =
+/// the point over the planes through the tyre contacts, FUN_142403910, in
+/// mm; per point lift 0.5 x map(front h, rear h) x cl_gain, FUN_1423f8c50),
+/// not at the setup's static ride heights. `aero()` keeps the static
+/// figures; this gives the change from them.
+#[derive(Clone, Debug)]
+pub struct AeroMaps {
+    maps: [Option<Surface>; 3],
+    /// 1/2 rho
+    q: f32,
+    /// share of the front / rear map's load on the front axle
+    sf: f32,
+    sr: f32,
+    /// the setup's ride heights, mm (where `aero()` sampled the maps)
+    pub h0: [f32; 2],
+}
+
+impl AeroMaps {
+    /// (front lift, rear lift, drag) per (m/s)^2 to ADD to the static
+    /// figures with the ride at (front, rear) mm
+    pub fn delta(&self, fh: f32, rh: f32) -> [f32; 3] {
+        let d = |j: usize| self.maps[j].as_ref().map_or(0.0, |s| s.at(fh, rh) - s.at(self.h0[0], self.h0[1])) * self.q;
+        let (f, r, c) = (d(0), d(1), d(2));
+        [f * self.sf + r * self.sr, f * (1.0 - self.sf) + r * (1.0 - self.sr), c]
+    }
+}
+
+pub fn aero_maps(vfs: &mut crate::load::Vfs, p: &Physics) -> Option<AeroMaps> {
+    const RHO: f32 = 1.22;
+    let (_, _, fh, rh) = setup(vfs, p);
+    let to_rear = p.wheelbase * p.cg_front;
+    let cd_bytes = vfs.read(&p.source);
+    let mut paths: [String; 3] = Default::default();
+    let mut points: Vec<f32> = Vec::new();
+    fields(&cd_bytes, 0, cd_bytes.len(), |f, v| {
+        let (12, Some((a, b))) = (f, v.range()) else { return };
+        fields(&cd_bytes, a, b, |g, x| match (g, x.range()) {
+            (5, Some((c, e))) => points.push(sub_range(&cd_bytes, c, e, 1).and_then(|(i, j)| f32_at(&cd_bytes, i, j, 3)).unwrap_or(f32::NAN)),
+            (7, Some(r)) => paths[0] = text(&cd_bytes, r),
+            (8, Some(r)) => paths[1] = text(&cd_bytes, r),
+            (9, Some(r)) => paths[2] = text(&cd_bytes, r),
+            _ => {}
+        });
+    });
+    let mut maps: [Option<Surface>; 3] = Default::default();
+    for (j, path) in paths.iter().enumerate() {
+        if path.is_empty() {
+            continue;
+        }
+        let Some(k) = vfs.find(path, None) else { continue };
+        maps[j] = Surface::read(&vfs.read(&k));
+    }
+    if maps.iter().all(|m| m.is_none()) {
+        return None;
+    }
+    let share = |pts: &[f32], axle: f32| -> f32 {
+        let pts: Vec<_> = pts.iter().filter(|z| z.is_finite()).collect();
+        if pts.is_empty() {
+            return axle;
+        }
+        let z = pts.iter().copied().sum::<f32>() / pts.len() as f32;
+        ((z + to_rear) / p.wheelbase.max(0.5)).clamp(-0.5, 1.5)
+    };
+    let (pf, pr) = points.split_at(points.len().min(2));
+    Some(AeroMaps { maps, q: 0.5 * RHO, sf: share(pf, 1.0), sr: share(pr, 0.0), h0: [fh * 1000.0, rh * 1000.0] })
+}
+
 fn wings(vfs: &mut crate::load::Vfs, p: &Physics) -> Vec<Wing> {
     const RHO: f32 = 1.22;
     let (fa, ra, fh, rh) = setup(vfs, p);
@@ -196,6 +266,11 @@ fn wings(vfs: &mut crate::load::Vfs, p: &Physics) -> Vec<Wing> {
                 let z = sub_range(&cd_bytes, c, e, 1).and_then(|(i, j)| f32_at(&cd_bytes, i, j, 3)).unwrap_or(f32::NAN);
                 let gain = f32_at(&cd_bytes, c, e, 2).unwrap_or(1.0);
                 points.push((z, gain));
+                if crate::envc::var_os("EVOVIEW_AERO_DUMP").is_some() {
+                    let mut s = String::new();
+                    fields(&cd_bytes, c, e, |f, v| if f != 1 && f != 9 { s += &format!(" f{f}={}", v.f32()) });
+                    println!("AERODUMP downforce point z {z}:{s}");
+                }
             }
             (7, Some(r)) => maps[0] = text(&cd_bytes, r),
             (8, Some(r)) => maps[1] = text(&cd_bytes, r),
@@ -214,6 +289,13 @@ fn wings(vfs: &mut crate::load::Vfs, p: &Physics) -> Vec<Wing> {
         let Some(k) = vfs.find(path, None) else { continue };
         if let Some(s) = Surface::read(&vfs.read(&k)) {
             body[j] = s.at(fh * 1000.0, rh * 1000.0);
+            if crate::envc::var_os("EVOVIEW_AERO_DUMP").is_some() {
+                println!("AERODUMP map {j} {path}: front h {:?} rear h {:?} ({}x{})", s.x, s.y, s.nx, s.ny);
+                for rhm in [30.0f32, 45.0, 55.0, 65.0, 80.0] {
+                    let row: Vec<String> = [25.0f32, 35.0, 45.0, 55.0, 65.0].iter().map(|f| format!("{:.3}", s.at(*f, rhm))).collect();
+                    println!("AERODUMP   rear {rhm:.0} mm: front 25/35/45/55/65 mm -> {}", row.join(" "));
+                }
+            }
         }
     }
     if body.iter().any(|&b| b != 0.0) {
