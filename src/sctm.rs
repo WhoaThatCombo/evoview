@@ -105,6 +105,17 @@ pub struct Sctm {
     pub groove: f32,
     pub groove_sa: f32,
     pub groove_sr: f32,
+    /// TyresCamberData f8 dcamber0_x / f9 dcamber1_x: the camber term on the
+    /// longitudinal peak, Dx / (1 + d0x g - d1x g^2) (SCTM +0x38 / +0x3c in
+    /// the 20260907 build; 0 / 0 = none, there is no default)
+    pub dcamber0_x: f32,
+    pub dcamber1_x: f32,
+    /// TyresThermalPatchData f27 TrefFrictionLimitAngle / f28
+    /// frictionLimitAngleTSensitivity (SCTM +0xa0 / +0xa4): the slip
+    /// stiffness x exp((1 - core T / tref) x sens). Slicks -50 / -0.1
+    /// (x0.80 at 50 C), road tyres 75 / 0.06. 0 tref = off.
+    pub fla_t_ref: f32,
+    pub fla_t_sens: f32,
 }
 
 /// The water film's grip loss per (1 - groove) x wetness x m/s of patch
@@ -126,13 +137,17 @@ pub struct Input {
     pub speed: f32,
     /// grip multiplier (the runtime's thermal / pressure / wear chain)
     pub grip: f32,
-    /// tread temperature, deg C (the falloff's: a blend of tread surface and
-    /// core). NaN = each falloff's own TrefMuT. Slick data puts TrefMuT at
-    /// 120 with muTSensitivity 0.4, so below ~114 C the slip-speed scale
-    /// clamps to 0 and a sliding slick drops to mu0T (0.25). In the game a
-    /// sliding tread flashes hot fast; without a thermal model, TrefMuT is
-    /// the honest constant.
+    /// tread temperature, deg C (p[14], the falloff's: lerp(mean tread
+    /// surface, core, practicalTempSource)). NaN = each falloff's own
+    /// TrefMuT. ⚠ The game copies TyresSpeedSensitivityData as proto3 reads
+    /// it: an absent muTSensitivity is 0, not the SCTM ctor's 0.4 - slicks
+    /// have none, so their falloff does not move with temperature at all
+    /// (the old "slick collapses to mu0T below ~114 C" came from evoview's
+    /// own 0.4 default).
     pub temp: f32,
+    /// p[15], the carcass (core) temperature, deg C, for the slip stiffness
+    /// term (fla_t_ref / fla_t_sens). NaN = term off.
+    pub core_temp: f32,
     /// p[7], the contact patch length in metres: the game passes the chord
     /// 2 sqrt(R^2 - (R - deflection)^2) (fn 0x1425c1960). NaN = from this
     /// tyre's radius and vertical rate at `fz`.
@@ -151,7 +166,7 @@ pub struct Input {
 
 impl Default for Input {
     fn default() -> Self {
-        Input { fz: 0.0, alpha: 0.0, sr: 0.0, camber: 0.0, speed: 0.0, grip: 1.0, temp: f32::NAN, trail_base: f32::NAN, wear: 0.0, wet: 0.0, grain: 0.0, pressure: 0.0 }
+        Input { fz: 0.0, alpha: 0.0, sr: 0.0, camber: 0.0, speed: 0.0, grip: 1.0, temp: f32::NAN, core_temp: f32::NAN, trail_base: f32::NAN, wear: 0.0, wet: 0.0, grain: 0.0, pressure: 0.0 }
     }
 }
 
@@ -214,14 +229,26 @@ impl Sctm {
         if dc0 == 0.0 || dc1 == 0.0 {
             (dc0, dc1) = (0.1, -0.8);
         }
-        let sg = |f: u32, d: f32| spd.and_then(|(c, e)| f32_at(td, c, e, f)).filter(|v| *v != 0.0).unwrap_or(d);
+        // TyresSpeedSensitivityData is copied field by field with no
+        // defaults (compound init FUN_142369bd0 -> tyre -> SCTM +0x6c..+0x90
+        // in FUN_142370760): an absent field is proto3's 0, and the _x set is
+        // always the longitudinal one. (The SCTM ctor's 0.9 / 0.01 / 0.4 /
+        // 70 / 2 are overwritten.) EVOVIEW_SCTM_OLDSPEED=1: the old
+        // defaults and y fallback.
+        let old_speed = crate::envc::var_os("EVOVIEW_SCTM_OLDSPEED").is_some();
+        let sg = |f: u32, d: f32| {
+            let v = spd.and_then(|(c, e)| f32_at(td, c, e, f));
+            if old_speed { v.filter(|v| *v != 0.0).unwrap_or(d) } else { v.unwrap_or(0.0) }
+        };
         let fy = Falloff { mu0t: sg(11, 0.9), sens: sg(9, 0.01), t_sens: sg(12, 0.4), t_ref: sg(13, 70.0), ref_speed: sg(8, 2.0) };
-        // the _x set only when given (mu0T_x > 0), else the same as y
-        let fx = if sg(112, 0.0) > 0.0 {
+        let fx = if !old_speed || sg(112, 0.0) > 0.0 {
             Falloff { mu0t: sg(112, 0.9), sens: sg(114, 0.01), t_sens: sg(115, 0.4), t_ref: sg(116, 70.0), ref_speed: sg(113, 2.0) }
         } else {
             fy
         };
+        // the post-peak fall (f80..85) is read only when use_slip_falloff
+        // (f79) is set (FUN_142369bd0: model pb byte +0x79 gates them)
+        let post = g(79) != 0.0;
         let nz = |v: f32, d: f32| if v != 0.0 { v } else { d };
         let td_f = |m: u32, f: u32| sub(td, m).and_then(|(c, e)| f32_at(td, c, e, f));
         Some(Sctm {
@@ -253,8 +280,8 @@ impl Sctm {
             fx_scale_sa: g(75),
             fy_shift_sr: g(76),
             fy_scale_sr: g(77),
-            post_y: [g(80), g(81), g(82)],
-            post_x: [g(83), g(84), g(85)],
+            post_y: if post { [g(80), g(81), g(82)] } else { [0.0; 3] },
+            post_x: if post { [g(83), g(84), g(85)] } else { [0.0; 3] },
             relax_y: g(18),
             relax_x: g(19),
             grain_factor: g(16),
@@ -268,6 +295,10 @@ impl Sctm {
             groove: td_f(10, 1).unwrap_or(0.0),
             groove_sa: td_f(10, 2).unwrap_or(0.0),
             groove_sr: td_f(10, 3).unwrap_or(0.0),
+            dcamber0_x: cg(8),
+            dcamber1_x: cg(9),
+            fla_t_ref: td_f(5, 27).unwrap_or(0.0),
+            fla_t_sens: td_f(5, 28).unwrap_or(0.0),
         })
     }
 
@@ -334,7 +365,18 @@ impl Sctm {
             c = -0.9;
         }
         let mut dy = i.grip * dy0 / (c + 1.0);
-        let v_slip = ((i.speed * alpha.sin()).powi(2) + (alpha.cos() * i.speed * i.sr).powi(2)).sqrt();
+        // the longitudinal peak's own camber term (SCTM +0x38 / +0x3c, same
+        // g; slicks d1x -5: -1.8 % Dx at 3.5 deg)
+        if self.dcamber0_x != 0.0 || self.dcamber1_x != 0.0 {
+            let mut cx = self.dcamber0_x * g - g * g * self.dcamber1_x;
+            if cx <= -1.0 {
+                cx = -0.9;
+            }
+            dx /= cx + 1.0;
+        }
+        // slip speed: sin of the cambered angle, cos of the plain one (as
+        // the game: sin(p1 + gain p3), cos(p1))
+        let v_slip = ((i.speed * alpha.sin()).powi(2) + (i.alpha.cos() * i.speed * i.sr).powi(2)).sqrt();
         let t = |f: &Falloff| if i.temp.is_nan() { f.t_ref } else { i.temp };
         dy = self.falloff_y.apply(v_slip, dy, t(&self.falloff_y));
         dx = self.falloff_x.apply(v_slip, dx, t(&self.falloff_x));
@@ -351,8 +393,15 @@ impl Sctm {
         let dl = (fz - self.fz0) / self.fz0;
         let gs = self.grip_slip_factor * (i.grip - 1.0) + 1.0;
         let pk = (1.0 + self.pressure_gain * i.pressure).max(0.1);
+        // the carcass temperature's stiffness term (p[15] core T,
+        // exp((1 - T / TrefFrictionLimitAngle) x frictionLimitAngleTSensitivity))
+        let st = if self.fla_t_ref != 0.0 && !i.core_temp.is_nan() && !sctm_dbg().2 {
+            ((1.0 - i.core_temp / self.fla_t_ref) * self.fla_t_sens).exp()
+        } else {
+            1.0
+        };
         let ky = 1.0 / (((self.tan_peak_loaded - self.tan_peak) * dl + self.tan_peak) * gs)
-            * pk / (self.grain_factor * i.grain + 1.0);
+            * pk * st / (self.grain_factor * i.grain + 1.0);
         let kx = if self.sr_peak > 0.0 {
             1.0 / (((self.sr_peak_loaded - self.sr_peak) * dl + self.sr_peak) * gs) * pk
         } else {
@@ -420,10 +469,12 @@ impl Sctm {
 }
 
 /// Debug switches, read once: EVOVIEW_SCTM_NOPOST=1 (flat past the peak),
-/// EVOVIEW_SCTM_OLDNC=1 (the earlier new-combined reading).
-fn sctm_dbg() -> (bool, bool) {
-    static D: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
-    *D.get_or_init(|| (crate::envc::var_os("EVOVIEW_SCTM_NOPOST").is_some(), crate::envc::var_os("EVOVIEW_SCTM_OLDNC").is_some()))
+/// EVOVIEW_SCTM_OLDNC=1 (the earlier new-combined reading),
+/// EVOVIEW_SCTM_NO_TSTIFF=1 (no carcass-temperature stiffness term).
+fn sctm_dbg() -> (bool, bool, bool) {
+    static D: std::sync::OnceLock<(bool, bool, bool)> = std::sync::OnceLock::new();
+    *D.get_or_init(|| (crate::envc::var_os("EVOVIEW_SCTM_NOPOST").is_some(), crate::envc::var_os("EVOVIEW_SCTM_OLDNC").is_some(),
+        crate::envc::var_os("EVOVIEW_SCTM_NO_TSTIFF").is_some()))
 }
 
 #[cfg(test)]
@@ -442,6 +493,7 @@ mod tests {
             post_y: [0.0; 3], post_x: [0.0; 3], relax_y: 0.0, relax_x: 0.0, grain_factor: 0.0, pressure_gain: 0.1,
             radius: 0.33, rate: 250_000.0, rate_prog: 0.0, inertia: 1.5, damping: 500.0, mass: 12.0,
             groove: 0.0, groove_sa: 0.45, groove_sr: 0.45,
+            dcamber0_x: 0.0, dcamber1_x: 0.0, fla_t_ref: 0.0, fla_t_sens: 0.0,
         }
     }
 
@@ -518,7 +570,7 @@ pub fn dump(pkg: &std::path::Path) {
             }
         }
         if crate::envc::var("EVOVIEW_SCTM_SUBS").is_ok() {
-            for sf in [3u32, 4, 5, 6, 8, 12] {
+            for sf in [3u32, 4, 5, 6, 7, 8, 10, 12] {
                 let Some((a, b)) = sub(&td, sf) else { continue };
                 let mut out = String::new();
                 fields(&td, a, b, |f, v| out += &format!(" {f}={}", v.f32()));
