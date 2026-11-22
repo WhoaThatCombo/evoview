@@ -144,6 +144,7 @@ mod groundode;
 mod collide;
 mod mp;
 mod simprof;
+mod simpool;
 mod ode;
 
 use std::path::PathBuf;

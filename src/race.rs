@@ -186,6 +186,8 @@ pub struct Ai {
     /// seconds more than 20 m off the line (a gravel trap, a field)
     far: f32,
     ctl: Controls,
+    /// EVOVIEW_AI_FAR_M: the time of a skipped step, owed to the next one
+    owed: f32,
     /// tyre smoke 0..1, eased toward TrackDrive::smoke_target
     pub smoke: f32,
 }
@@ -222,6 +224,14 @@ pub struct Race {
     pub stats: Stats,
     log: bool,
     threads: usize,
+    /// the workers of `threads` (EVOVIEW_AI_POOL=0: None - threads spawned
+    /// per step and the traffic on one thread, as before)
+    pool: Option<crate::simpool::Pool>,
+    /// EVOVIEW_AI_FAR_M=<m> (off unless set: it changes what the far cars
+    /// do): an opponent further than that from the player drives and steps
+    /// every other frame, over both frames' time
+    far_m: Option<f32>,
+    tick: u32,
     /// contacts already logged, per pair, until this time
     quiet: std::collections::HashMap<(usize, usize), f32>,
     /// the radar: None = automatic (a car near), Some(on) forced
@@ -268,7 +278,7 @@ impl Race {
             let base_off = (hash01(i, 3) - 0.5) * 1.2 * vary;
             drv.offset = base_off;
             drv.offset_target = base_off;
-            Ai { td, drv, name: NAMES[i % NAMES.len()], slot, inst, base_off, pass: None, slow: 0.0, best: f32::MIN, far: 0.0, ctl: Controls::default(), smoke: 0.0 }
+            Ai { td, drv, name: NAMES[i % NAMES.len()], slot, inst, base_off, pass: None, slow: 0.0, best: f32::MIN, far: 0.0, ctl: Controls::default(), owed: 0.0, smoke: 0.0 }
         }).collect();
         // the player's slot on the grid, 0-based (default: the middle)
         let pp = crate::envc::var("EVOVIEW_AI_GRID_POS").ok().and_then(|v| v.parse::<usize>().ok())
@@ -325,6 +335,9 @@ impl Race {
             stats: Stats::default(),
             log: crate::envc::var_os("EVOVIEW_AI_LOG").is_some(),
             threads,
+            pool: (threads > 1 && crate::envc::var("EVOVIEW_AI_POOL").map_or(true, |v| v != "0")).then(|| crate::simpool::Pool::new(threads)),
+            far_m: crate::envc::var("EVOVIEW_AI_FAR_M").ok().and_then(|v| v.parse::<f32>().ok()).filter(|m| *m > 0.0),
+            tick: 0,
             quiet: Default::default(),
             radar: None,
             net: false,
@@ -365,7 +378,7 @@ impl Race {
         let p = Progress::start(&self.line, td.pos);
         let drv = LineDriver::new(self.line.pts.clone());
         self.ai.push(Ai { td, drv, name: NAMES[i % NAMES.len()], slot, inst, base_off: 0.0, pass: None, slow: 0.0,
-                          best: f32::MIN, far: 0.0, ctl: Controls::default(), smoke: 0.0 });
+                          best: f32::MIN, far: 0.0, ctl: Controls::default(), owed: 0.0, smoke: 0.0 });
         self.prog.push(p);
         i
     }
@@ -466,7 +479,15 @@ impl Race {
         }
         // controls and physics: each car alone, so in parallel
         let held = self.held();
-        let work = |a: &mut Ai| {
+        self.tick = self.tick.wrapping_add(1);
+        let (far2, tick, ppos) = (self.far_m.map(|m| m * m), self.tick as usize, player.pos);
+        let work = |k: usize, a: &mut Ai| {
+            // a far car's off frame (half of them each frame)
+            let dt = dt + std::mem::take(&mut a.owed);
+            if far2.map_or(false, |f| (k + tick) % 2 == 1 && a.td.pos.distance_squared(ppos) > f) {
+                a.owed = dt;
+                return;
+            }
             let t = scope(Id::Controls);
             a.ctl = if held {
                 a.drv.rest();
@@ -484,12 +505,35 @@ impl Race {
         let _t = crate::bench::cpu("ai physics");
         let _td = scope(Id::Drive);
         if self.threads <= 1 || self.ai.len() < 2 {
-            self.ai.iter_mut().for_each(work);
+            self.ai.iter_mut().enumerate().for_each(|(k, a)| work(k, a));
+        } else if let Some(p) = self.pool.as_ref() {
+            // ⚠ The ODE port's random numbers (quickstep's constraint order)
+            // are per thread (ode/math.rs SEED). A thread spawned for the
+            // step began at seed 0 and stepped its share of the cars in
+            // order, so a rig car's result depends on the cars before it
+            // in its share, and the player's car (this thread) on nobody.
+            // The pool's threads live on and this thread joins in: rig cars
+            // go round in the same shares, each from seed 0, and this
+            // thread's seed is put back. (A simple-model car draws none:
+            // those are handed out one by one.)
+            let seed = crate::ode::math::rand_get_seed();
+            if self.ai.iter().any(|a| a.td.rig.is_some()) {
+                let per = self.ai.len().div_ceil(self.threads);
+                let mut shares: Vec<&mut [Ai]> = self.ai.chunks_mut(per).collect();
+                p.for_each_mut(&mut shares, |c, share| {
+                    crate::ode::math::rand_set_seed(0);
+                    share.iter_mut().enumerate().for_each(|(k, a)| work(c * per + k, a));
+                });
+            } else {
+                p.for_each_mut(&mut self.ai, work);
+            }
+            crate::ode::math::rand_set_seed(seed);
         } else {
             let per = self.ai.len().div_ceil(self.threads);
             std::thread::scope(|s| {
-                for chunk in self.ai.chunks_mut(per) {
-                    s.spawn(move || chunk.iter_mut().for_each(work));
+                let work = &work;
+                for (c, chunk) in self.ai.chunks_mut(per).enumerate() {
+                    s.spawn(move || chunk.iter_mut().enumerate().for_each(|(k, a)| work(c * per + k, a)));
                 }
             });
         }
@@ -524,79 +568,12 @@ impl Race {
             })
             .collect();
         let rolling = self.go.is_none() && self.start == Start::Rolling;
-        let len = self.line.len;
-        for k in 0..self.ai.len() {
-            let me = k + 1;
-            let (pos, vel, s, _) = cars[me];
-            let v = vel.length();
-            let mut cap = if rolling { 25.0 } else { f32::INFINITY };
-            let (cur, at, td) = (self.ai[k].drv.offset, self.ai[k].drv.progress(), &self.ai[k].td);
-            let mut pass = self.ai[k].pass;
-            if let Some((_, t)) = pass.as_mut() {
-                *t -= dt;
-            }
-            if pass.map_or(false, |(_, t)| t <= 0.0) {
-                pass = None;
-            }
-            let mut want = pass.map_or(self.ai[k].base_off, |p| p.0);
-            let look = 10.0 + v * 1.4;
-            for (b, &(bp, bv, bs, boff)) in cars.iter().enumerate() {
-                if b == me || bp.distance_squared(pos) > (look + 20.0).powi(2) {
-                    continue;
-                }
-                // gap along the line, wrapped to the near side
-                let mut ds = bs - s;
-                ds -= (ds / len).round() * len;
-                let vb = bv.dot(vel.normalize_or_zero());
-                if ds.abs() < 5.5 {
-                    // alongside: keep a car's width of air between us
-                    let dl = boff - cur;
-                    if dl.abs() < 2.9 {
-                        want = boff - dl.signum() * 3.0;
-                    }
-                } else if ds > 0.0 && ds < look {
-                    // ahead and in the way of where we are heading
-                    if (boff - want).abs() < 2.4 {
-                        let faster = v > vb + 1.0;
-                        let side = faster.then(|| {
-                            let ahead = self.line.walk(at, ds + 10.0);
-                            [boff + 3.2, boff - 3.2].into_iter()
-                                .filter(|o| o.abs() < 4.5)
-                                .filter(|o| room(&self.line, td, ahead, *o) && room(&self.line, td, at, *o))
-                                .min_by(|x, y| (x - want).abs().total_cmp(&(y - want).abs()))
-                        }).flatten();
-                        match side {
-                            // room to move over before reaching it
-                            Some(o) if ds > 7.0 || (o - cur).abs() < 1.0 => {
-                                want = o;
-                                pass = Some((o, 2.0));
-                            }
-                            _ => {
-                                // follow: close to a safe gap at its speed
-                                let safe = 7.0 + v * 0.35;
-                                cap = cap.min((vb + (ds - safe) * 0.5).max(0.0));
-                            }
-                        }
-                    }
-                }
-            }
-            // never off the asphalt to make room (a chicane's kerbs and
-            // bollards): halve back toward the driver's own line until there
-            // is road there, here and a little ahead
-            let base = self.ai[k].base_off;
-            let ahead = self.line.walk(at, 8.0 + v * 0.6);
-            let lim = self.line.room_ahead(at, 15.0 + v * 1.2);
-            let mut want = want.clamp(-lim, lim);
-            for _ in 0..4 {
-                if (want - base).abs() < 0.3 || (room(&self.line, td, at, want) && room(&self.line, td, ahead, want)) {
-                    break;
-                }
-                want = base + (want - base) * 0.5;
-            }
-            let a = &mut self.ai[k];
-            a.pass = pass;
-            a.drv.offset_target = want;
-            a.drv.vcap = cap;
+        let line = &self.line;
+        // each car reads the snapshot and writes its own driver: in parallel
+        let one = |k: usize, a: &mut Ai| traffic_one(line, &cars, k, a, rolling, dt);
+        match self.pool.as_ref() {
+            Some(p) => p.for_each_mut(&mut self.ai, one),
+            None => self.ai.iter_mut().enumerate().for_each(|(k, a)| one(k, a)),
         }
     }
 
@@ -754,6 +731,82 @@ impl Race {
 pub fn lateral(line: &Line, p: Vec3) -> f32 {
     let j = line.nearest(p, 0);
     (p - line.pts[j]).dot(line.left(j))
+}
+
+/// One AI's speed cap and line offset from the cars round it (`cars`:
+/// everyone's position, velocity, progress and offset; this one is k + 1).
+fn traffic_one(line: &Line, cars: &[(Vec3, Vec3, f32, f32)], k: usize, a: &mut Ai, rolling: bool, dt: f32) {
+    let len = line.len;
+    let me = k + 1;
+    let (pos, vel, s, _) = cars[me];
+    let v = vel.length();
+    let mut cap = if rolling { 25.0 } else { f32::INFINITY };
+    let (cur, at, td) = (a.drv.offset, a.drv.progress(), &a.td);
+    let mut pass = a.pass;
+    if let Some((_, t)) = pass.as_mut() {
+        *t -= dt;
+    }
+    if pass.map_or(false, |(_, t)| t <= 0.0) {
+        pass = None;
+    }
+    let mut want = pass.map_or(a.base_off, |p| p.0);
+    let look = 10.0 + v * 1.4;
+    for (b, &(bp, bv, bs, boff)) in cars.iter().enumerate() {
+        if b == me || bp.distance_squared(pos) > (look + 20.0).powi(2) {
+            continue;
+        }
+        // gap along the line, wrapped to the near side
+        let mut ds = bs - s;
+        ds -= (ds / len).round() * len;
+        let vb = bv.dot(vel.normalize_or_zero());
+        if ds.abs() < 5.5 {
+            // alongside: keep a car's width of air between us
+            let dl = boff - cur;
+            if dl.abs() < 2.9 {
+                want = boff - dl.signum() * 3.0;
+            }
+        } else if ds > 0.0 && ds < look {
+            // ahead and in the way of where we are heading
+            if (boff - want).abs() < 2.4 {
+                let faster = v > vb + 1.0;
+                let side = faster.then(|| {
+                    let ahead = line.walk(at, ds + 10.0);
+                    [boff + 3.2, boff - 3.2].into_iter()
+                        .filter(|o| o.abs() < 4.5)
+                        .filter(|o| room(line, td, ahead, *o) && room(line, td, at, *o))
+                        .min_by(|x, y| (x - want).abs().total_cmp(&(y - want).abs()))
+                }).flatten();
+                match side {
+                    // room to move over before reaching it
+                    Some(o) if ds > 7.0 || (o - cur).abs() < 1.0 => {
+                        want = o;
+                        pass = Some((o, 2.0));
+                    }
+                    _ => {
+                        // follow: close to a safe gap at its speed
+                        let safe = 7.0 + v * 0.35;
+                        cap = cap.min((vb + (ds - safe) * 0.5).max(0.0));
+                    }
+                }
+            }
+        }
+    }
+    // never off the asphalt to make room (a chicane's kerbs and
+    // bollards): halve back toward the driver's own line until there
+    // is road there, here and a little ahead
+    let base = a.base_off;
+    let ahead = line.walk(at, 8.0 + v * 0.6);
+    let lim = line.room_ahead(at, 15.0 + v * 1.2);
+    let mut want = want.clamp(-lim, lim);
+    for _ in 0..4 {
+        if (want - base).abs() < 0.3 || (room(line, td, at, want) && room(line, td, ahead, want)) {
+            break;
+        }
+        want = base + (want - base) * 0.5;
+    }
+    a.pass = pass;
+    a.drv.offset_target = want;
+    a.drv.vcap = cap;
 }
 
 /// Asphalt (or kerb) at `off` m beside line point `j`, under the car's level.
