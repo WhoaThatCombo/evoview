@@ -1583,8 +1583,8 @@ pub fn build_pipeline(
         // built-in copy, so shading can be tuned without a rebuild.
         source: wgpu::ShaderSource::Wgsl(
             match crate::envc::var("EVOVIEW_SHADER").ok().and_then(|p| std::fs::read_to_string(p).ok()) {
-                Some(src) => car_wgsl(&src).into(),
-                None => car_wgsl(include_str!("shader.wgsl")).into(),
+                Some(src) => prepass_invariant(&car_wgsl(&src)).into(),
+                None => prepass_invariant(&car_wgsl(include_str!("shader.wgsl"))).into(),
             }),
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1677,6 +1677,41 @@ pub fn build_pipeline(
     };
     let make = |label, entry, blend, depth_write| make_f(label, entry, blend, depth_write, format, wgpu::CompareFunction::Less, Some(false));
     let pipeline = make_f("opaque", "fs_main", None, true, format, wgpu::CompareFunction::Less, Some(true));
+    // The driven car from its cockpit (car_prepass): its opaque parts'
+    // depth first, then shaded only where they are the nearest surface.
+    let opaque_eq = make_f("opaque (depth equal)", "fs_main", None, false, format, wgpu::CompareFunction::Equal, Some(true));
+    let depth_pre = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("car depth prepass"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            compilation_options: Default::default(),
+            buffers: &[
+                wgpu::VertexBufferLayout { array_stride: (FLOATS_PER_VERTEX * 4) as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &VERTEX_FULL },
+                wgpu::VertexBufferLayout { array_stride: 80, step_mode: wgpu::VertexStepMode::Instance, attributes: &VERTEX_INSTANCE },
+            ],
+        },
+        // (it runs inside the main pass: the pass's targets, none written)
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_depth",
+            compilation_options: Default::default(),
+            targets: &std::iter::once(Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::empty() }))
+                .chain(crate::ssr::extra_targets(false)).collect::<Vec<_>>(),
+        }),
+        primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Less,
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        multisample: wgpu::MultisampleState { count: samples, ..Default::default() },
+        multiview: None,
+        cache: None,
+    });
     // Bloom source (fxgpu.rs): emission only, HDR, on the main pass's depth.
     let glow = make_f("glow", "fs_glow", Some(wgpu::BlendState {
         color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
@@ -1759,7 +1794,7 @@ pub fn build_pipeline(
     // was left, ~15 cm off the road - inside the bias - so cars cast nothing.
     let shadow_car = shadow_with("shadow (cars)", None, false);
     Pipelines { pipeline, blended, glass_tint, glass_add, shadow: shadow_pipeline, shadow_car, shadow_split, bind_group,
-                light_bind_group, light_buf_far, light_bind_group_far, light_x, bone_bg, glow }
+                light_bind_group, light_buf_far, light_bind_group_far, light_x, bone_bg, glow, opaque_eq, depth_pre }
 }
 
 /// What `build_pipeline` hands back. Grew past what a tuple should carry once
@@ -1785,6 +1820,37 @@ pub struct Pipelines {
     pub bone_bg: wgpu::BindGroup,
     /// emissive-only pass into the bloom buffer (fxgpu.rs)
     pub glow: wgpu::RenderPipeline,
+    /// the opaque pipeline at depth Equal, no depth write, and the depth-only
+    /// pass before it (`car_prepass`)
+    pub opaque_eq: wgpu::RenderPipeline,
+    pub depth_pre: wgpu::RenderPipeline,
+}
+
+/// The depth prepasses (car_prepass, track.rs cut_prepass) shade at depth
+/// Equal: both passes must give a vertex the same depth to the bit. They
+/// run the same vertex shader, and on the GPUs tried that is enough.
+/// EVOVIEW_PREPASS_INVARIANT=1 marks the position `@invariant` for a
+/// driver that compiles the two differently (speckled holes in the cabin
+/// or the foliage would be the sign). Not the default: it also stops the
+/// compiler fusing the multiply-adds of world -> clip, and 16 km from the
+/// origin that moved every edge of the Nordschleife by a fraction of a
+/// pixel (mean 1.0 of 255 against the build before).
+pub fn prepass_invariant(src: &str) -> String {
+    if crate::envc::var("EVOVIEW_PREPASS_INVARIANT").map_or(false, |v| v == "1") {
+        src.replace("    @builtin(position) clip: vec4<f32>,", "    @invariant @builtin(position) clip: vec4<f32>,")
+    } else {
+        src.to_string()
+    }
+}
+
+/// The driven car's opaque parts get a depth-only pass before they are
+/// shaded, from the cockpit cameras: the cabin is layer over layer of
+/// two-sided panels in load order, and every one was shaded in full
+/// (car opaque 3.6 ms at 3440x1440 against 0.8 from the chase camera).
+/// EVOVIEW_CAR_PREPASS=0 off, 2 from every camera.
+fn car_prepass() -> u8 {
+    static ON: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::envc::var("EVOVIEW_CAR_PREPASS").ok().and_then(|v| v.parse().ok()).unwrap_or(1))
 }
 
 /// Everything needed to animate a replay: the motion data, and which merged
@@ -5645,6 +5711,25 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             // broken at each phase so each gets its own GPU time
                             let split = bench.is_some() && samples == 1 && crate::envc::var_os("EVOVIEW_BENCH_SPLIT").is_some();
                             let car_first_on = crate::envc::var("EVOVIEW_CAR_FIRST").map_or(true, |v| v != "0");
+                            let par_cars = par && par_job(4) && samples == 1 && car_first_on && draw_order.is_none();
+                            // the driven car's opaque meshes that get a depth
+                            // prepass (car_prepass): from its cockpit; none with
+                            // a batch the shader dithers away (the blurred rims)
+                            let mut pre_mesh = vec![false; if par_cars && car_prepass() != 0 { meshes_r.len() } else { 0 }];
+                            if !pre_mesh.is_empty() {
+                                let watching = view_ai.and_then(|k| opts.race.as_ref().and_then(|r| r.ai.get(k)))
+                                    .map_or(false, |a| a.td.pos.y > -1000.0);
+                                let inside = follow != crate::camera::Follow::Free && !watching
+                                    && car_cams.get(cam_sel).map_or(false, |c| c.mode == 1 || c.mode == 4);
+                                if inside || car_prepass() == 2 {
+                                    for &gi in slot_gpu.first().map_or(&[][..], |(b, _)| &b[..]) {
+                                        let m = &meshes_r[gi];
+                                        pre_mesh[gi] = m.extra.is_none() && m.draws.iter().all(|&(_, _, mi)|
+                                            materials.uniforms.get(mi).map_or(false, |u| u.fx_m[2] < 0.5));
+                                    }
+                                }
+                            }
+                            let pre_mesh = &pre_mesh[..];
                             // every non-track mesh in load order (the cars on a track)
                             macro_rules! generic_draws {
                                 ($pass:ident, $phase:expr) => {{
@@ -5652,6 +5737,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 // (the moving cars' rows are in carcull's one
                                 // buffer: bound once for all their meshes)
                                 let mut inst_bound: *const wgpu::Buffer = std::ptr::null();
+                                let mut pipe_eq = false;
                                 for (mi_mesh, m) in meshes_r.iter().enumerate() {
                                     if Some(mi_mesh) == ground_mesh && !ground_on {
                                         continue;
@@ -5668,6 +5754,15 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                         None => (&m.instances, 0),
                                     };
                                     let inst = first..first + instances;
+                                    if $phase == Blend::Opaque && !pre_mesh.is_empty() {
+                                        // (prepassed meshes: shaded where they are
+                                        // the depth already there)
+                                        let eq = pre_mesh[mi_mesh];
+                                        if eq != pipe_eq {
+                                            $pass.set_pipeline(if eq { &pipes_all.opaque_eq } else { pipeline });
+                                            pipe_eq = eq;
+                                        }
+                                    }
                                     $pass.set_vertex_buffer(0, m.vertices.slice(..));
                                     if !std::ptr::eq(inst_bound, inst_buf) {
                                         $pass.set_vertex_buffer(1, inst_buf.slice(..));
@@ -5704,7 +5799,6 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             // The cars' opaque parts open the main pass (see CAR_FIRST
                             // below); recorded beside the track's, they are a render
                             // pass of their own that the track's then loads.
-                            let par_cars = par && par_job(4) && samples == 1 && car_first_on && draw_order.is_none();
                             let rec_cars = |enc: &mut wgpu::CommandEncoder| {
                                 let _t = crate::bench::cpu("enc cars");
                                 let mut atts = vec![Some(color.clone())];
@@ -5724,6 +5818,31 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     });
                                     pass.set_bind_group(0, bind_group, &[]);
                                     pass.set_bind_group(2, bone_bg, &[]);
+                                    if pre_mesh.iter().any(|&p| p) {
+                                        // (the same batches generic_draws! shades)
+                                        pass.set_pipeline(&pipes_all.depth_pre);
+                                        pass.set_bind_group(1, &mat_groups[0], &[]);
+                                        for (gi, m) in meshes_r.iter().enumerate().filter(|&(gi, _)| pre_mesh[gi]) {
+                                            let instances = culler_r.map_or(m.instance_count, |c| c.count(gi, m.instance_count));
+                                            if instances == 0 {
+                                                continue;
+                                            }
+                                            let (inst_buf, first) = match carcull_r.rows(gi) {
+                                                Some((b, _, first)) => (b, first),
+                                                None => (&m.instances, 0),
+                                            };
+                                            pass.set_vertex_buffer(0, m.vertices.slice(..));
+                                            pass.set_vertex_buffer(1, inst_buf.slice(..));
+                                            pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+                                            for &(start, count, mi) in &m.draws {
+                                                if mat_blend.get(mi).copied().unwrap_or(Blend::Opaque) != Blend::Opaque
+                                                    || mirrors_r.map_or(false, |mr| mr.is_glass(gi, start)) {
+                                                    continue;
+                                                }
+                                                pass.draw_indexed(start..start + count, 0, first..first + instances);
+                                            }
+                                        }
+                                    }
                                     pass.set_pipeline(pipeline);
                                     generic_draws!(pass, Blend::Opaque);
                                 }

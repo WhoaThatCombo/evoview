@@ -225,6 +225,7 @@ struct VsIn {
 };
 
 struct VsOut {
+    // (render.rs prepass_invariant puts @invariant here on request)
     @builtin(position) clip: vec4<f32>,
     @location(0) world: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -1776,6 +1777,11 @@ fn ssr_oct(n: vec3<f32>) -> vec2<f32> {
         e = (vec2<f32>(1.0) - abs(a.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), a.xy >= vec2<f32>(0.0));
     }
     return e * 0.5 + 0.5;
+}
+
+/// Depth only (render.rs car_prepass): opaque batches, which drop nothing.
+@fragment
+fn fs_depth() {
 }
 
 @fragment
