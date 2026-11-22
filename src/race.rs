@@ -14,7 +14,8 @@
 //! - Start: the grid (spawnpoints_grid.scene, else slots off the racing
 //!   line), a standing start with five red lights (EVOVIEW_AI_START=standing,
 //!   the default), or rolling (=rolling: a formation 200 m back, capped to
-//!   90 km/h until the leader crosses the line).
+//!   90 km/h until the leader crosses the line), or flying (=flying: the
+//!   formation at 180 km/h and 20 m apart with the green flag at once).
 //! - Order: every car's laps + fraction along the racing line (race_order);
 //!   lap timing / the leaderboard live elsewhere (branch gfx-laps).
 //!
@@ -196,6 +197,8 @@ pub struct Ai {
 pub enum Start {
     Standing,
     Rolling,
+    /// a formation at 180 km/h, 20 m apart, green at once: flat out from the start
+    Flying,
 }
 
 /// One contact or stuck event, for the drive-test log.
@@ -259,6 +262,7 @@ impl Race {
         let line = Line::new(line);
         let start = match crate::envc::var("EVOVIEW_AI_START").as_deref() {
             Ok("rolling") => Start::Rolling,
+            Ok("flying") => Start::Flying,
             _ => Start::Standing,
         };
         let (lo, hi) = crate::envc::var("EVOVIEW_AI_PACE").ok()
@@ -287,7 +291,7 @@ impl Race {
         let mut k = 0;
         for (s, &(p, yaw)) in spots.iter().enumerate() {
             // a rolling start rolls: the formation at 80 km/h
-            let roll = if start == Start::Rolling { 22.0 } else { 0.0 };
+            let roll = match start { Start::Rolling => 22.0, Start::Flying => 50.0, Start::Standing => 0.0 };
             if s == pp {
                 player.place_from(p, yaw, 2.0);
                 if roll > 0.0 {
@@ -331,7 +335,7 @@ impl Race {
             t: 0.0,
             start,
             lights_out,
-            go: None,
+            go: if start == Start::Flying { Some(0.0) } else { None },
             stats: Stats::default(),
             log: crate::envc::var_os("EVOVIEW_AI_LOG").is_some(),
             threads,
@@ -361,9 +365,10 @@ impl Race {
             println!("race: the track's grid is {worst:.0} m off the racing line - slots off the line instead");
         }
         let np = line.pts.len();
-        let back = if start == Start::Rolling { 200.0 } else { 12.0 };
+        let back = if start == Start::Standing { 12.0 } else { 200.0 };
+        let gap = if start == Start::Flying { 20.0 } else { 8.0 };
         (0..n).map(|k| {
-            let j = line.walk(0, -(back + 8.0 * k as f32));
+            let j = line.walk(0, -(back + gap * k as f32));
             let side = if k % 2 == 0 { 2.2 } else { -2.2 };
             let p = line.pts[j] + line.left(j) * side;
             let d = line.pts[(j + 3) % np] - line.pts[j];
