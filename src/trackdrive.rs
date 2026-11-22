@@ -346,15 +346,25 @@ impl Ground {
         let _t = crate::simprof::scope(crate::simprof::Id::Walls);
         out.clear();
         let cc = |v: f32| (v / CELL).floor() as i32;
+        // the walls already tried (one lies in several cells): the first 48
+        // on the stack - a heap list per call was 12 allocations a car a
+        // frame. EVOVIEW_WALLS_STACK=0: all of them on the heap, as before
+        let cap = if walls_stack() { 48 } else { 0 };
+        let (mut first, mut n) = ([0u32; 48], 0usize);
         let mut seen: Vec<u32> = Vec::new();
         for gz in cc(p.z - r)..=cc(p.z + r) {
             for gx in cc(p.x - r)..=cc(p.x + r) {
                 let Some(list) = self.wall_grid.get(&(gx, gz)) else { continue };
                 for &wi in list {
-                    if seen.contains(&wi) {
+                    if first[..n].contains(&wi) || seen.contains(&wi) {
                         continue;
                     }
-                    seen.push(wi);
+                    if n < cap {
+                        first[n] = wi;
+                        n += 1;
+                    } else {
+                        seen.push(wi);
+                    }
                     let w = self.walls[wi as usize];
                     if w[5] < y0 || w[4] > y1 {
                         continue;
@@ -1349,7 +1359,11 @@ impl TrackDrive {
         let half_w = self.slot.centres.iter().map(|c| c.x.abs()).fold(0.6f32, f32::max) + 0.12;
         let zf = self.slot.centres.iter().map(|c| c.z).fold(f32::MIN, f32::max) + 0.55;
         let zr = self.slot.centres.iter().map(|c| c.z).fold(f32::MAX, f32::min) - 0.55;
-        let mut hits = Vec::new();
+        // the hit list is each thread's own, kept from call to call
+        thread_local! {
+            static HITS: std::cell::RefCell<Vec<(Vec3, f32, u32)>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let mut hits = if walls_stack() { HITS.with(|h| std::mem::take(&mut *h.borrow_mut())) } else { Vec::new() };
         let mut any = false;
         for z in [zf - half_w, 0.5 * (zf + zr), zr + half_w] {
             let c = self.pos + f * z;
@@ -1374,6 +1388,9 @@ impl TrackDrive {
                     any = true;
                 }
             }
+        }
+        if walls_stack() {
+            HITS.with(|h| *h.borrow_mut() = hits);
         }
         if any && crate::envc::var_os("EVOVIEW_DRIVE_LOG").is_some() {
             eprintln!("wall at ({:.1} {:.1} {:.1}) v {:.1}", self.pos.x, self.pos.y, self.pos.z, self.vx);
