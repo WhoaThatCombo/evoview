@@ -6304,6 +6304,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             if b.after_submit(&device, submitted) {
                                 b.report();
                                 crate::bench::release();
+                                crate::material::release();
                                 elwt.exit();
                                 return;
                             }
@@ -6325,6 +6326,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                 },
                 // NGX's feature goes before the device it was made on
                 Event::LoopExiting => {
+                    crate::material::release();
                     if let Some(d) = dlss.take() {
                         d.shutdown(&device);
                     }

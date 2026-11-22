@@ -840,29 +840,39 @@ fn paint_splat_constant(m: &MaterialEntry, slot_taken: bool) -> Option<[u8; 4]> 
     Some([q(c[0]), q(c[1]), q(c[2]), 255])
 }
 
-thread_local! {
-    /// `solid`'s 1x1 textures by colour: materials without a map bound a
-    /// fresh one each (several per material - a late joiner's car made
-    /// hundreds on the render thread, ~5 ms).
-    static SOLIDS: std::cell::RefCell<HashMap<(wgpu::Id<wgpu::Device>, [u8; 4]), wgpu::Texture>> = std::cell::RefCell::new(HashMap::new());
-}
+/// `solid`'s 1x1 textures by device and colour: materials without a map
+/// bound a fresh one each (several per material - a late joiner's car made
+/// hundreds on the render thread, ~5 ms). Process-wide (the "mp cars"
+/// worker builds materials too) and emptied by `release`.
+#[allow(clippy::type_complexity)]
+static SOLIDS: std::sync::Mutex<Option<HashMap<(wgpu::Id<wgpu::Device>, [u8; 4]), wgpu::Texture>>> = std::sync::Mutex::new(None);
+/// `solid_view`'s views, by device and colour
+#[allow(clippy::type_complexity)]
+static SOLID_VIEWS: std::sync::Mutex<Option<HashMap<(wgpu::Id<wgpu::Device>, [u8; 4]), std::sync::Arc<wgpu::TextureView>>>> = std::sync::Mutex::new(None);
 
-thread_local! {
-    /// `solid_view`'s views, by device and colour
-    static SOLID_VIEWS: std::cell::RefCell<HashMap<(wgpu::Id<wgpu::Device>, [u8; 4]), std::sync::Arc<wgpu::TextureView>>> = std::cell::RefCell::new(HashMap::new());
+/// Drop the cached solids before the device goes. Held in thread-locals
+/// they kept the device alive until the TLS destructors ran at process
+/// exit, after the Vulkan driver had unloaded (the crash bench::release
+/// works around for its own buffers). Call where the renderer ends.
+pub fn release() {
+    SOLID_VIEWS.lock().unwrap_or_else(|e| e.into_inner()).take();
+    SOLIDS.lock().unwrap_or_else(|e| e.into_inner()).take();
 }
 
 /// `solid`, one shared view per colour (see `upload_view`).
 fn solid_view(device: &wgpu::Device, queue: &wgpu::Queue, rgba: [u8; 4]) -> std::sync::Arc<wgpu::TextureView> {
-    SOLID_VIEWS.with(|c| {
-        c.borrow_mut().entry((device.global_id(), rgba)).or_insert_with(|| std::sync::Arc::new(solid(device, queue, rgba))).clone()
-    })
+    let key = (device.global_id(), rgba);
+    if let Some(v) = SOLID_VIEWS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&key)) {
+        return v.clone();
+    }
+    let v = std::sync::Arc::new(solid(device, queue, rgba));
+    SOLID_VIEWS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).entry(key).or_insert(v).clone()
 }
 
 pub(crate) fn solid(device: &wgpu::Device, queue: &wgpu::Queue, rgba: [u8; 4]) -> wgpu::TextureView {
-    SOLIDS.with(|c| {
-        c.borrow_mut().entry((device.global_id(), rgba)).or_insert_with(|| solid_texture(device, queue, rgba)).create_view(&Default::default())
-    })
+    let mut g = SOLIDS.lock().unwrap_or_else(|e| e.into_inner());
+    g.get_or_insert_with(HashMap::new).entry((device.global_id(), rgba))
+        .or_insert_with(|| solid_texture(device, queue, rgba)).create_view(&Default::default())
 }
 
 fn solid_texture(device: &wgpu::Device, queue: &wgpu::Queue, rgba: [u8; 4]) -> wgpu::Texture {
