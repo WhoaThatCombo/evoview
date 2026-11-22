@@ -1219,7 +1219,7 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
             .unwrap_or_else(|| "evoview driver".into());
         println!("mp: joining {addr} as {name:?}");
         Some(mp::Mp::start(addr, user, name, fs, mech))
-    }).or_else(|| stress::joins().map(|(n, at, gap)| mp::Mp::fake(pkg, &stress::join_models(), n, at, gap)));
+    }).or_else(|| stress::joins().map(|(n, at, gap)| mp::Mp::fake(pkg, &stress::join_models(), n, at, gap, stress::join_swap())));
     // EVOVIEW_STRESS join=N: the stand-in session has no roster at start
     let real_mp = mp.as_ref().filter(|m| !m.is_fake());
     let (ai_models, ai_own) = match real_mp {

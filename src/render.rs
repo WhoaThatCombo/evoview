@@ -2403,8 +2403,9 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     // (replayscene::load_net_car) and appended to the scene when done
     // (with its meshes already uploaded, materials unresolved: build_scene_deferred)
     // and its materials, when built there too
-    type NetCar = (u16, String, Result<(crate::asset::Car, crate::replayscene::Slot, Option<Vec<GpuMesh>>, Option<Materials>), String>);
-    let (net_job_tx, net_job_rx) = std::sync::mpsc::channel::<(u16, String, Option<Vec<u8>>)>();
+    // (number, model, its generation in mp, the result)
+    type NetCar = (u16, String, u32, Result<(crate::asset::Car, crate::replayscene::Slot, Option<Vec<GpuMesh>>, Option<Materials>), String>);
+    let (net_job_tx, net_job_rx) = std::sync::mpsc::channel::<(u16, String, Option<Vec<u8>>, u32)>();
     let (net_done_tx, net_done_rx) = std::sync::mpsc::channel::<NetCar>();
     if let (Some(_), Some(pkg)) = (opts.mp.as_ref(), opts.pkg.clone()) {
         // EVOVIEW_JOIN_PACK=0: the joiner's vertices packed and uploaded on
@@ -2417,7 +2418,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
         let tex_cache = materials.textures.clone();
         let (device, queue) = (device.clone(), queue.clone());
         std::thread::Builder::new().name("mp cars".into()).spawn(move || {
-            for (n, car, fs) in net_job_rx {
+            for (n, car, fs, gen) in net_job_rx {
                 let t = std::time::Instant::now();
                 let r = crate::replayscene::load_net_car(&pkg, None, &car, fs.as_deref(), &format!("n{n}"))
                     .map(|(c, slot)| {
@@ -2429,7 +2430,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         (c, slot, g, mm)
                     });
                 println!("mp: car #{n} ({car}) loaded in {:.1}s", t.elapsed().as_secs_f32());
-                if net_done_tx.send((n, car, r)).is_err() {
+                if net_done_tx.send((n, car, gen, r)).is_err() {
                     break;
                 }
             }
@@ -4035,12 +4036,18 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     // one joiner a frame: each append is tens of ms
                                     // (EVOVIEW_JOIN_ONE=0: every one that is ready)
                                     let join_n = if crate::envc::var("EVOVIEW_JOIN_ONE").map_or(true, |v| v != "0") { 1 } else { usize::MAX };
-                                    for (n, model, res) in std::iter::from_fn(|| net_done_rx.try_recv().ok()).take(join_n) {
+                                    for (n, model, gen, res) in std::iter::from_fn(|| net_done_rx.try_recv().ok()).take(join_n) {
+                                        // the number's car changed while this one loaded: not
+                                        // its car any more (the current one is asked for anew)
+                                        if !m.is_current(n, gen) {
+                                            println!("mp: car #{n} ({model}) is stale (its car changed while loading), dropped");
+                                            continue;
+                                        }
                                         let (mini, slot, packed, built) = match res {
                                             Ok(x) => x,
                                             Err(e) => {
                                                 eprintln!("mp: car #{n}: {e}");
-                                                m.load_failed(n);
+                                                m.load_failed(n, gen);
                                                 continue;
                                             }
                                         };
@@ -4107,7 +4114,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                         let si = opts.ai_slots.len();
                                         let car_td = crate::trackdrive::TrackDrive::with_model(td.ground.clone(), slot, None, false, false);
                                         r.add_net(car_td, si, 0);
-                                        m.add_ai(&model, n);
+                                        m.add_ai(&model, n, gen);
                                         shadow_invalid = true;
                                         println!("mp: car #{n} ({model}) joined the scene in {:.0} ms", t0.elapsed().as_secs_f32() * 1000.0);
                                     }

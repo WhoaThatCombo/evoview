@@ -22,6 +22,8 @@
 //!   `join_gap` s (default 2.5): the late-join load and its frame hitch,
 //!   repeatable. Their models: EVOVIEW_JOIN_CARS, else EVOVIEW_AI_CARS,
 //!   each model's presets in turn. The opponents become net cars too.
+//!   `join_swap=s`: the first joiner changes to the second's car s seconds
+//!   after the first join (a number re-announced while its car loads).
 //! Collision, the racing line, lamps and the irradiance volumes are not
 //! tiled: cars drive on the real track in the middle.
 
@@ -40,6 +42,7 @@ pub struct Opts {
     pub join: usize,
     pub join_at: f32,
     pub join_gap: f32,
+    pub join_swap: Option<f32>,
 }
 
 pub fn opts() -> Option<Opts> {
@@ -60,6 +63,7 @@ pub fn opts() -> Option<Opts> {
                 "join" => o.join = n as usize,
                 "join_at" => o.join_at = n as f32,
                 "join_gap" => o.join_gap = n as f32,
+                "join_swap" => o.join_swap = Some(n as f32),
                 k => eprintln!("EVOVIEW_STRESS: unknown key {k:?}"),
             }
         }
@@ -79,6 +83,11 @@ pub fn cars() -> Option<usize> {
 /// `join=N`: (N, first join s, gap s), when asked for.
 pub fn joins() -> Option<(usize, f32, f32)> {
     opts().filter(|o| o.join > 0).map(|o| (o.join, o.join_at, o.join_gap))
+}
+
+/// `join_swap=s`: the first joiner changes car s seconds after the first join.
+pub fn join_swap() -> Option<f32> {
+    opts().and_then(|o| o.join_swap)
 }
 
 /// The stress joins' models: EVOVIEW_JOIN_CARS, else EVOVIEW_AI_CARS.

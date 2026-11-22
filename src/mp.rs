@@ -247,6 +247,10 @@ struct Shared {
     /// loaded for (late joiners)
     loaded: std::collections::HashSet<u16>,
     loading: std::collections::HashSet<u16>,
+    /// per number: bumped whenever its car changes (`set_car`). A load job
+    /// carries the value it was handed out with; a completion whose number
+    /// has moved on since is stale (the departed player's car)
+    gen: HashMap<u16, u32>,
     /// roster numbers that came from another evoview's tag (a netcar for
     /// the number replaces them)
     tagged: std::collections::HashSet<u16>,
@@ -267,6 +271,9 @@ struct Fake {
     joins: Vec<(String, Option<Vec<u8>>)>,
     start: Option<Instant>,
     added: usize,
+    /// `join_swap=s`: the first joiner changes to the second's car s seconds
+    /// after the first join (while its first car is still loading), once
+    swap: Option<f32>,
 }
 
 impl Shared {
@@ -281,6 +288,14 @@ impl Shared {
             let (car, fs) = f.joins[f.added].clone();
             joined.push((1000 + f.added as u16, car, fs));
             f.added += 1;
+        }
+        if let (Some(s), true) = (f.swap, f.added > 0 && f.joins.len() > 1) {
+            if t >= f.at + s {
+                f.swap = None;
+                let (car, fs) = f.joins[1].clone();
+                println!("stress: #1000 changes car");
+                joined.push((1000, car, fs));
+            }
         }
         for (n, car, fs) in joined {
             println!("stress: #{n} joins in {car} at {t:.1} s");
@@ -310,9 +325,17 @@ impl Shared {
         if changed {
             self.loaded.remove(&n);
             self.loading.remove(&n);
+            *self.gen.entry(n).or_default() += 1;
         }
         self.roster.insert(n, (car, who));
         self.states.insert(n, fs);
+    }
+
+    /// Whether a load job handed out at generation `gen` is still for `n`'s
+    /// current car. EVOVIEW_JOIN_GEN=0: every completion counts, as before.
+    fn current(&self, n: u16, gen: u32) -> bool {
+        self.gen.get(&n).copied().unwrap_or(0) == gen
+            || crate::envc::var("EVOVIEW_JOIN_GEN").map_or(false, |v| v == "0")
     }
 
     /// Whether packets for number `n` are kept: the ones the server listed
@@ -513,7 +536,7 @@ impl Mp {
 
     /// EVOVIEW_STRESS join=N (see `Fake`): `models` are cycled, each model's
     /// presets in turn (a second join of a model wears its next look).
-    pub fn fake(pkg: &std::path::Path, models: &[String], n: usize, at: f32, gap: f32) -> Mp {
+    pub fn fake(pkg: &std::path::Path, models: &[String], n: usize, at: f32, gap: f32, swap: Option<f32>) -> Mp {
         let mut presets: HashMap<String, Vec<Vec<u8>>> = HashMap::new();
         let joins = (0..n).filter(|_| !models.is_empty()).map(|k| {
             let car = models[k % models.len()].clone();
@@ -522,7 +545,7 @@ impl Mp {
             (car, fs)
         }).collect::<Vec<_>>();
         println!("stress: {} join(s) from {at:.1} s, every {gap:.1} s", joins.len());
-        let fake = Fake { at, gap, joins, start: None, added: 0 };
+        let fake = Fake { at, gap, joins, start: None, added: 0, swap };
         Mp { sh: Arc::new(Mutex::new(Shared { status: "driving (stress joins)".into(), epoch: Some(Instant::now()),
             fake: Some(fake), ..Default::default() })) }
     }
@@ -631,7 +654,8 @@ impl Mp {
     /// Players whose car has no slot of its own yet (joined after us, or a
     /// model we had no slot for): (number, car folder, final state). Each is
     /// handed out once; `add_ai` gives it its slot when loaded.
-    pub fn new_cars(&self) -> Vec<(u16, String, Option<Vec<u8>>)> {
+    /// The last value is the number's generation (see `is_current`).
+    pub fn new_cars(&self) -> Vec<(u16, String, Option<Vec<u8>>, u32)> {
         let mut g = self.sh.lock().unwrap();
         if crate::envc::var_os("EVOVIEW_MP_LOG").is_some() {
             static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
@@ -659,7 +683,7 @@ impl Mp {
             }
             g.late = (g.late.0 + 1, Some(Instant::now()));
             g.loading.insert(n);
-            out.push((n, car, g.states.get(&n).cloned()));
+            out.push((n, car, g.states.get(&n).cloned(), g.gen.get(&n).copied().unwrap_or(0)));
         }
         if crate::envc::var_os("EVOVIEW_MP_LOG").is_some() && !out.is_empty() {
             println!("mp: {} car(s) to load; roster {}, heard {}, loaded {}", out.len(), g.roster.len(), g.remotes.len(), g.loaded.len());
@@ -667,16 +691,31 @@ impl Mp {
         // printed unlocked: a console selection (QuickEdit) blocks stdout,
         // and with the lock held the mp thread and the next frame with it
         drop(g);
-        for (n, car, _) in &out {
+        for (n, car, ..) in &out {
             println!("mp: loading #{n}'s car ({car})");
         }
         out
     }
 
+    /// Whether a `new_cars` job (number `n`, generation `gen`) is still for
+    /// the number's current car: if not, its result is dropped.
+    pub fn is_current(&self, n: u16, gen: u32) -> bool {
+        self.sh.lock().unwrap().current(n, gen)
+    }
+
     /// A late joiner's car is loaded at a new opponent index: it is drawn
     /// there from now on (off any spare it was borrowing).
-    pub fn add_ai(&self, model: &str, n: u16) {
+    ///
+    /// A stale job (`gen` is no longer the number's: its car changed while
+    /// it loaded) still takes its index, as a free slot of its model, so the
+    /// indices stay in step with the race's; the number keeps waiting for
+    /// (or loading) its current car.
+    pub fn add_ai(&self, model: &str, n: u16, gen: u32) {
         let mut g = self.sh.lock().unwrap();
+        if !g.current(n, gen) {
+            g.ai.push((model.to_string(), None));
+            return;
+        }
         for a in g.ai.iter_mut() {
             if a.1 == Some(n) {
                 a.1 = None;
@@ -690,8 +729,11 @@ impl Mp {
     /// A late joiner's car could not be loaded (content missing, a broken
     /// mod): not asked for again - it borrows a spare slot. A new car on the
     /// same number clears this (number reuse resets `loaded`).
-    pub fn load_failed(&self, n: u16) {
+    pub fn load_failed(&self, n: u16, gen: u32) {
         let mut g = self.sh.lock().unwrap();
+        if !g.current(n, gen) {
+            return;
+        }
         g.loading.remove(&n);
         g.loaded.insert(n);
     }
