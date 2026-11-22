@@ -75,7 +75,8 @@ const CAR_HEIGHT: f32 = 2.5;
 pub enum Detail {
     /// drawn wherever the car is drawn
     No,
-    /// an AI car's cabin: within `detail_m` of the eye (race.rs)
+    /// an AI car's cabin: within `detail_m` of the eye (race.rs), further
+    /// through a lens narrower than 60 degrees
     Near,
     /// a replay car's cabin: within `detail_m` at a 60-degree view, scaled
     /// by the camera's zoom (a TV camera's long lens keeps it)
@@ -461,7 +462,9 @@ impl CarCull {
                 let hk = if m.last_keep[k] { 1.0 + HYST } else { 1.0 - HYST };
                 let keep = match m.detail {
                     Detail::No => true,
-                    Detail::Near => d < detail_m * hk,
+                    // a long lens (TV cameras) fills the screen with a car far
+                    // past detail_m: keep its cabin as far as the zoom reaches
+                    Detail::Near => d < detail_m * zoom.max(1.0) * hk,
                     Detail::Seen => d < detail_m * zoom * hk,
                 };
                 m.last_keep[k] = keep;
