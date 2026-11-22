@@ -6442,7 +6442,12 @@ pub fn limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
         max_sampled_textures_per_shader_stage: have.min(32).max(16),
         // (the default stops a buffer at 256 MiB: a mesh with more than
         // 3.36 M instance rows - ten Nordschleife-sized tiles - panicked)
-        max_buffer_size: adapter.limits().max_buffer_size,
+        // At most 2 GiB: Vulkan on Windows reports u64::MAX, which left
+        // cull.rs's row clamp and wgpu's own size check doing nothing, and a
+        // buffer past what the driver allocates is a device error (panic).
+        // EVOVIEW_MAX_BUFFER_MB: another cap.
+        max_buffer_size: adapter.limits().max_buffer_size.min(
+            crate::envc::var("EVOVIEW_MAX_BUFFER_MB").ok().and_then(|v| v.parse::<u64>().ok()).map_or(1 << 31, |mb| mb << 20)),
         ..wgpu::Limits::default()
     }
 }
