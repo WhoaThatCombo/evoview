@@ -209,7 +209,13 @@ impl Motion {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            // ⚠ COPY_SRC is not used by anything, and must stay: without it
+            // the vectors TAA and the motion blur sample were not the same
+            // from one run to the next (same commands, same data; ±1 level
+            // of noise over the driven car from a frame that moved with the
+            // machine's load). Why the flag matters is not known - see
+            // DETERMINISM.md in the stress notes.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let view = tex.create_view(&Default::default());
