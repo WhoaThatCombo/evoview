@@ -1589,6 +1589,26 @@ pub struct Vfs {
     reads: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
+/// A material's texture slots by slot name. ⚠ The map's own order differs
+/// on every launch, and the loaders hand out texture indices as they walk
+/// it: the scene's texture list (and so the upload order) was never the
+/// same twice.
+fn slots_in_order(slots: &HashMap<String, String>) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = slots.iter().map(|(k, r)| (k.clone(), r.clone())).collect();
+    v.sort();
+    v
+}
+
+/// An archive's entries in key order. ⚠ `Package::by_path` is a HashMap:
+/// walked as it comes, the order the keys reached `Vfs::by_base` changed
+/// from run to run, and with it which file `find` picked for a name that
+/// several folders hold (its last resort is the first hit) - a track or a
+/// car bound a different texture on different launches.
+fn sorted_by_key(mut v: Vec<(String, crate::pkg::Entry)>) -> Vec<(String, crate::pkg::Entry)> {
+    v.sort_by(|a, b| a.0.cmp(&b.0));
+    v
+}
+
 impl Vfs {
     fn insert(&mut self, key: String, src: Src) {
         // (an override of a key already present keeps its one index entry)
@@ -1656,6 +1676,7 @@ impl Vfs {
             .filter(|(k, _)| prefixes.iter().any(|p| k.starts_with(p)))
             .filter(|(k, _)| !self.entries.contains_key(k))
             .collect();
+        let add = sorted_by_key(add);
         let owner = self.extra.len() + 1;
         for (k, e) in add {
             self.insert(k, Src::Pkg(e, owner));
@@ -1699,6 +1720,7 @@ impl Vfs {
             .map(|(k, e)| (k.replace('\\', "/").to_lowercase(), *e))
             .filter(|(k, _)| !self.entries.contains_key(k))
             .collect();
+        let add = sorted_by_key(add);
         let owner = self.extra.len() + 1;
         for (k, e) in add {
             self.insert(k, Src::Pkg(e, owner));
@@ -1737,8 +1759,9 @@ impl Vfs {
             listed: Default::default(),
             reads: Default::default(),
         };
-        for (path, e) in &pkg.by_path {
-            v.insert(path.replace('\\', "/"), Src::Pkg(*e, 0));
+        let own: Vec<(String, crate::pkg::Entry)> = pkg.by_path.iter().map(|(path, e)| (path.replace('\\', "/"), *e)).collect();
+        for (path, e) in sorted_by_key(own) {
+            v.insert(path, Src::Pkg(e, 0));
         }
         v.pkg = Some(pkg);
         v
@@ -4150,7 +4173,7 @@ pub fn load_track_opts(vfs: &mut Vfs, include_world: bool) -> Result<Loaded, Str
         let mb = vfs.read(path);
         let Some(m) = read_material_vfs(vfs, &mb, &base_of(path)) else { return };
         let mut resolved: HashMap<String, usize> = HashMap::new();
-        for (slot, reference) in &m.slots {
+        for (slot, reference) in &slots_in_order(&m.slots) {
             let low = reference.replace('\\', "/").to_lowercase();
             if low.contains("default_material") || low.starts_with("editor/")
                 || low.contains("/null.texture") || low.ends_with("null.texture") {
@@ -5059,7 +5082,11 @@ pub fn load(vfs: &mut Vfs) -> Result<Loaded, String> {
         ))
     };
     if let Some((front, rear)) = chosen_tyres {
-        for (corner, pos) in wheel_pos.iter() {
+        // (in corner order: wheel_pos is a HashMap, and walked as it comes
+        // the four tyre meshes changed places in the mesh list run to run)
+        let mut corners: Vec<(&String, &[f32; 3])> = wheel_pos.iter().collect();
+        corners.sort_by(|a, b| a.0.cmp(b.0));
+        for (corner, pos) in corners {
             let src = if corner.ends_with('R') { &rear } else { &front };
             let Some(src) = src.clone() else { continue };
             let tb = vfs.read(&src);
@@ -5214,7 +5241,7 @@ pub fn load(vfs: &mut Vfs) -> Result<Loaded, String> {
             }
         }
         let mut resolved: HashMap<String, usize> = HashMap::new();
-        for (slot, reference) in &m.slots.clone() {
+        for (slot, reference) in &slots_in_order(&m.slots) {
             // ⚠ Never bind the EDITOR's placeholder textures. Materials whose
             // real map is supplied at runtime - mirrors, instrument clusters,
             // displays - still list an `editor/textures/default_material/...`
@@ -5321,7 +5348,7 @@ pub fn load(vfs: &mut Vfs) -> Result<Loaded, String> {
         let mb = vfs.read(&key);
         let Some(m) = read_material_vfs(vfs, &mb, &base_of(&key)) else { continue };
         let mut resolved: HashMap<String, usize> = HashMap::new();
-        for (slot, reference) in &m.slots {
+        for (slot, reference) in &slots_in_order(&m.slots) {
             let near = parent_of(&key).to_string();
             let Some(found) = vfs.find(reference, Some(&near)) else { continue };
             let idx = if let Some(&i) = tex_index.get(&found) {
