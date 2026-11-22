@@ -203,6 +203,39 @@ impl Fmod {
         Ok(b)
     }
 
+    /// `load_extra` without waiting: FMOD loads the bank on its own thread
+    /// (FMOD_STUDIO_LOAD_BANK_NONBLOCKING); `bank_events` says when it is in.
+    /// A blocking load of an opponent's engine bank was 25-50 ms of the
+    /// render thread when an online player joined in a model not yet heard.
+    pub fn load_extra_async(&mut self, data: &[u8]) -> Result<Bank, String> {
+        let f = sym!(self.studio, b"FMOD_Studio_System_LoadBankMemory",
+                     unsafe extern "C" fn(Sys, *const u8, c_int, c_int, c_uint, *mut Bank) -> c_int);
+        let mut b: Bank = std::ptr::null_mut();
+        // mode 0 = FMOD_STUDIO_LOAD_MEMORY (copied), flags 1 = NONBLOCKING
+        ck(unsafe { f(self.system, data.as_ptr(), data.len() as c_int, 0, 1, &mut b) },
+           "LoadBankMemory")?;
+        Ok(b)
+    }
+
+    /// A `load_extra_async` bank's event paths once it has loaded; None while
+    /// it is still loading.
+    pub fn bank_events(&self, bank: Bank) -> Option<Result<Vec<String>, String>> {
+        let state = (|| Ok::<_, String>(sym!(self.studio, b"FMOD_Studio_Bank_GetLoadingState",
+                         unsafe extern "C" fn(Bank, *mut c_int) -> c_int)))();
+        let state = match state {
+            Ok(f) => f,
+            Err(e) => return Some(Err(e)),
+        };
+        let mut st: c_int = 0;
+        // FMOD_STUDIO_LOADING_STATE: 2 loading, 3 loaded, 4 error
+        let r = unsafe { state(bank, &mut st) };
+        match (r, st) {
+            (0, 2) => None,
+            (0, 3) => Some(self.events(bank)),
+            _ => Some(Err(format!("bank load failed: FMOD_RESULT {r}, state {st}"))),
+        }
+    }
+
     /// Load one more bank (the shared ones: wheel, turbo, environment ...);
     /// returns its event paths. Banks stay loaded.
     pub fn load_extra(&mut self, data: &[u8]) -> Result<Vec<String>, String> {

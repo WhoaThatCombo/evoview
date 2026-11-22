@@ -140,6 +140,8 @@ pub struct AiEngines {
     /// first frame and whenever an online player joined in a new model.
     asked: std::collections::HashSet<String>,
     reader: Option<(std::sync::mpsc::Sender<String>, std::sync::mpsc::Receiver<(String, Vec<u8>)>)>,
+    /// banks FMOD is loading on its own thread (model, bank)
+    loading: Vec<(String, *mut std::ffi::c_void)>,
     pub starts: u32,
     pub stops: u32,
 }
@@ -404,7 +406,33 @@ impl CarSound {
             });
             reader.0.send(m).ok();
         }
+        // EVOVIEW_AI_BANK_ASYNC=0: the bank loaded blocking, in this frame
+        let bank_async = crate::envc::var("EVOVIEW_AI_BANK_ASYNC").map_or(true, |v| v != "0");
+        let mut k = 0;
+        while k < self.ai.loading.len() {
+            let (m, b) = self.ai.loading[k].clone();
+            let Some(r) = self.fmod.bank_events(b) else { k += 1; continue };
+            self.ai.loading.remove(k);
+            let ev = match r {
+                Ok(evs) => evs.into_iter().find(|e| e.ends_with("engine_ext")),
+                Err(e) => {
+                    eprintln!("AI sound {m}: {e}");
+                    None
+                }
+            };
+            println!("AI sound {m}: {}", ev.as_deref().unwrap_or("no engine event"));
+            self.ai.events.push((m, ev));
+        }
         while let Some(Ok((m, bank))) = self.ai.reader.as_ref().map(|r| r.1.try_recv()) {
+            if bank_async && !bank.is_empty() {
+                match self.fmod.load_extra_async(&bank) {
+                    Ok(b) => {
+                        self.ai.loading.push((m, b));
+                        continue;
+                    }
+                    Err(e) => eprintln!("AI sound {m}: {e} (loading it blocking)"),
+                }
+            }
             let ev = if bank.is_empty() {
                 None
             } else {
