@@ -5441,9 +5441,9 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             // one reflection-probe face a frame, from the middle
                             // of the car, through the track pipelines again
                             let mut probe_job: Option<usize> = None;
-                            if let (Some(pr), Some(t), Some(td)) = (probe.as_mut(), track.as_ref(), opts.track_drive.as_ref()) {
+                            let probe_face = probe.as_mut().and_then(|p| p.due_paced());
+                            if let (Some(pr), Some(t), Some(td), Some(face)) = (probe.as_ref(), track.as_ref(), opts.track_drive.as_ref(), probe_face) {
                                 let _t = crate::bench::cpu("enc probe");
-                                let face = pr.due();
                                 let body = if drive_mode == 4 { td.body_flat() } else { td.matrices().0 };
                                 // above the roof: from 0.7 m a kerb under the car
                                 // filled the whole lower face and the windows

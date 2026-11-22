@@ -41,6 +41,8 @@ pub struct Probe {
     pub mips: u32,
     pub size: u32,
     next: usize,
+    /// frames seen by `due_paced`
+    tick: usize,
 }
 
 const BLUR: &str = r#"
@@ -226,7 +228,7 @@ impl Probe {
                 }));
             }
         }
-        Probe { cube, faces, msaa, depth, pipe, blur, mips, size, next: 0 }
+        Probe { cube, faces, msaa, depth, pipe, blur, mips, size, next: 0, tick: 0 }
     }
 
     /// The face to draw this frame.
@@ -234,6 +236,15 @@ impl Probe {
         let f = self.next % 6;
         self.next += 1;
         f
+    }
+
+    /// `due`, or None on the frames EVOVIEW_PROBE_EVERY=<n> skips (a face
+    /// every n-th frame once the cube is whole; default 1, every frame).
+    pub fn due_paced(&mut self) -> Option<usize> {
+        static EVERY: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        let n = *EVERY.get_or_init(|| crate::envc::var("EVOVIEW_PROBE_EVERY").ok().and_then(|v| v.parse().ok()).unwrap_or(1usize).max(1));
+        self.tick = self.tick.wrapping_add(1);
+        (n == 1 || !self.ready() || self.tick % n == 0).then(|| self.due())
     }
 
     /// Every face has been drawn at least once.
