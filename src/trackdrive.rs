@@ -33,6 +33,101 @@ use std::collections::HashMap;
 const CELL: f32 = 6.0;
 const G: f32 = 9.81;
 
+/// Sub-cells per grid cell side (1.5 m): see `Fine`.
+const SUB: usize = 4;
+/// Cells with more triangles than this are cut into sub-cells.
+const SPLIT: usize = 12;
+
+/// The ground grid with its busy cells cut 4 x 4: per sub-cell, the cell's
+/// triangles that can contain a point of it, in the cell list's order.
+///
+/// A probe walked every triangle of its 6 m cell - 150-300 on the
+/// Nordschleife's road - to find the two or three under the point: 1.2 us a
+/// probe, 90 % of the simple car model's step. A triangle is left out of a
+/// sub-cell only when its XZ box, grown by 5 cm + 1 % of its size, misses
+/// the sub-cell: `probe` accepts a point at most 1e-4 (barycentric) outside
+/// a triangle, far inside that margin, so the triangles a probe accepts -
+/// and their order, which settles ties - are the same as from the whole
+/// cell. Slivers (area under 1 % of their box), where that test is at the
+/// mercy of rounding, stay in every sub-cell. Cells of up to SPLIT
+/// triangles (the terrain's millions of cells) keep their one list: cut
+/// too they cost 1.2 GB on the Nordschleife. EVOVIEW_GROUND_FINE=0: the
+/// whole cell again; =check: both, compared on every probe.
+struct Fine {
+    /// per cell (a, b): a whole list `idx[a..b]`, or with b = u32::MAX the
+    /// SUB * SUB + 1 offsets `off[a..]` of its sub-cells' lists in `idx`
+    cell: HashMap<(i32, i32), (u32, u32)>,
+    off: Vec<u32>,
+    idx: Vec<u32>,
+    /// cells cut, and their triangle entries before the cut
+    split: (usize, usize),
+}
+
+impl Fine {
+    fn build(grid: &HashMap<(i32, i32), Vec<u32>>, verts: &[[f32; 3]], tris: &[[u32; 3]]) -> Fine {
+        let mut f = Fine { cell: HashMap::with_capacity(grid.len()), off: Vec::new(), idx: Vec::new(), split: (0, 0) };
+        let mut bins: Vec<Vec<u32>> = vec![Vec::new(); SUB * SUB];
+        for (&(gx, gz), list) in grid {
+            if list.len() <= SPLIT {
+                f.cell.insert((gx, gz), (f.idx.len() as u32, (f.idx.len() + list.len()) as u32));
+                f.idx.extend_from_slice(list);
+                continue;
+            }
+            for b in bins.iter_mut() {
+                b.clear();
+            }
+            for &ti in list {
+                let t = tris[ti as usize];
+                let (a, b, c) = (verts[t[0] as usize], verts[t[1] as usize], verts[t[2] as usize]);
+                let (x0, x1) = (a[0].min(b[0]).min(c[0]), a[0].max(b[0]).max(c[0]));
+                let (z0, z1) = (a[2].min(b[2]).min(c[2]), a[2].max(b[2]).max(c[2]));
+                let d = (b[2] - c[2]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[2] - c[2]);
+                let sliver = !(d.abs() >= 0.01 * (x1 - x0) * (z1 - z0));
+                let pad = 0.05 + 0.01 * (x1 - x0).max(z1 - z0);
+                // the sub-cells of this cell the grown box reaches
+                let span = |lo: f32, hi: f32, g: i32| -> (usize, usize) {
+                    if sliver {
+                        return (0, SUB - 1);
+                    }
+                    let s = |v: f32| (((v / CELL - g as f32) * SUB as f32).floor() as i64).clamp(0, SUB as i64 - 1) as usize;
+                    (s(lo - pad), s(hi + pad))
+                };
+                let ((sx0, sx1), (sz0, sz1)) = (span(x0, x1, gx), span(z0, z1, gz));
+                for sz in sz0..=sz1 {
+                    for sx in sx0..=sx1 {
+                        bins[sz * SUB + sx].push(ti);
+                    }
+                }
+            }
+            f.split.0 += 1;
+            f.split.1 += list.len();
+            f.cell.insert((gx, gz), (f.off.len() as u32, u32::MAX));
+            for b in &bins {
+                f.off.push(f.idx.len() as u32);
+                f.idx.extend_from_slice(b);
+            }
+            f.off.push(f.idx.len() as u32);
+        }
+        f.idx.shrink_to_fit();
+        f.off.shrink_to_fit();
+        f
+    }
+
+    /// The triangles to try for (x, z); None: no ground cell there.
+    #[inline]
+    fn list(&self, x: f32, z: f32) -> Option<&[u32]> {
+        let (ux, uz) = (x / CELL, z / CELL);
+        let (gx, gz) = (ux.floor(), uz.floor());
+        let (a, b) = *self.cell.get(&(gx as i32, gz as i32))?;
+        if b != u32::MAX {
+            return Some(&self.idx[a as usize..b as usize]);
+        }
+        let s = |u: f32, g: f32| (((u - g) * SUB as f32) as usize).min(SUB - 1);
+        let k = a as usize + s(uz, gz) * SUB + s(ux, gx);
+        Some(&self.idx[self.off[k] as usize..self.off[k + 1] as usize])
+    }
+}
+
 pub struct Ground {
     /// wall segments (Collision.walls) and their XZ grid
     walls: Vec<[f32; 6]>,
@@ -42,6 +137,9 @@ pub struct Ground {
     tris: Vec<[u32; 3]>,
     surf: Vec<u16>,
     grid: HashMap<(i32, i32), Vec<u32>>,
+    /// the grid in sub-cells (then `grid` is empty, unless checking)
+    fine: Option<Fine>,
+    fine_check: bool,
     /// per collision surface index: grip multiplier, bump (height, length)
     grip: Vec<f32>,
     bump: Vec<(f32, f32)>,
@@ -69,6 +167,11 @@ pub struct Hit {
 
 impl Ground {
     pub fn new(c: &Collision, defs: &[SurfaceDef]) -> Ground {
+        Self::new_mode(c, defs, &crate::envc::var("EVOVIEW_GROUND_FINE").unwrap_or_default())
+    }
+
+    /// `mode`: EVOVIEW_GROUND_FINE ("0": whole cells, "check": both).
+    fn new_mode(c: &Collision, defs: &[SurfaceDef], mode: &str) -> Ground {
         let mut grid: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
         let mut big = 0usize;
         // WALL-category surfaces are never ground, however they lean: a
@@ -218,8 +321,23 @@ impl Ground {
             let tg = |ti: usize| c.tri_surf.get(ti).map_or(false, |&s| tagged.get(s as usize).copied().unwrap_or(false));
             crate::groundode::OdeGround::build(&c.verts, &c.tris, keep, tg)
         });
+        let fine_check = mode == "check";
+        let t0 = std::time::Instant::now();
+        let fine = (mode != "0").then(|| Fine::build(&grid, &c.verts, &c.tris));
+        if let Some(f) = fine.as_ref() {
+            if crate::simprof::on() {
+                let coarse: usize = grid.values().map(|l| l.len()).sum();
+                println!("ground: {} cells, {} triangle entries; {} cells over {SPLIT} cut in {}: their {} entries -> {} ({:.0} -> {:.1} a probe list), {:.0} -> {:.0} MB, {:.2} s",
+                         grid.len(), coarse, f.split.0, SUB * SUB, f.split.1, f.idx.len() - (coarse - f.split.1),
+                         f.split.1 as f32 / f.split.0.max(1) as f32, (f.idx.len() - (coarse - f.split.1)) as f32 / (f.split.0 * SUB * SUB).max(1) as f32,
+                         coarse as f32 * 4.0 / 1048576.0, (f.idx.len() + f.off.len()) as f32 * 4.0 / 1048576.0, t0.elapsed().as_secs_f32());
+            }
+            if !fine_check {
+                grid = HashMap::new();
+            }
+        }
         Ground { walls: c.walls.clone(), wall_src: c.wall_src.clone(), wall_grid, verts: c.verts.clone(), tris: c.tris.clone(),
-                 surf: c.tri_surf.clone(), grid, grip, bump, rain, kind, vib, names: c.surfaces.clone(), tagged, ode }
+                 surf: c.tri_surf.clone(), grid, fine, fine_check, grip, bump, rain, kind, vib, names: c.surfaces.clone(), tagged, ode }
     }
 
     /// Walls near `p` (XZ) whose height range overlaps [y0, y1]: each as
@@ -330,8 +448,29 @@ impl Ground {
         if let Some(o) = self.ode.as_ref() {
             return o.probe(x, z, top).map(|(y, n, ti)| Hit { y, n, surf: self.surf[ti as usize] });
         }
-        let cell = ((x / CELL).floor() as i32, (z / CELL).floor() as i32);
-        let list = self.grid.get(&cell)?;
+        let Some(f) = self.fine.as_ref() else {
+            let cell = ((x / CELL).floor() as i32, (z / CELL).floor() as i32);
+            return self.probe_list(self.grid.get(&cell)?, x, z, top);
+        };
+        let h = f.list(x, z).and_then(|l| self.probe_list(l, x, z, top));
+        if self.fine_check {
+            let cell = ((x / CELL).floor() as i32, (z / CELL).floor() as i32);
+            let o = self.grid.get(&cell).and_then(|l| self.probe_list(l, x, z, top));
+            let bits = |h: Option<Hit>| h.map(|h| (h.y.to_bits(), h.n.to_array().map(f32::to_bits), h.surf));
+            assert!(bits(h) == bits(o), "ground probe ({x}, {z}, {top}): sub-cells {h:?}, whole cell {o:?}");
+        }
+        h
+    }
+
+    /// How many triangles a probe at (x, z) tries (a debug print).
+    pub fn probe_tris(&self, x: f32, z: f32) -> usize {
+        match self.fine.as_ref() {
+            Some(f) => f.list(x, z).map_or(0, |l| l.len()),
+            None => self.grid.get(&((x / CELL).floor() as i32, (z / CELL).floor() as i32)).map_or(0, |l| l.len()),
+        }
+    }
+
+    fn probe_list(&self, list: &[u32], x: f32, z: f32, top: f32) -> Option<Hit> {
         let (mut best, mut best_t): (Option<Hit>, Option<Hit>) = (None, None);
         for &ti in list {
             let t = self.tris[ti as usize];
@@ -2189,7 +2328,7 @@ pub fn test_run(td: &mut TrackDrive, secs: f32, mut driver: Option<LineDriver>, 
                 let (x, z) = (v[0], v[1]);
                 let cell = ((x / CELL).floor() as i32, (z / CELL).floor() as i32);
                 let h = td.ground.probe(x, z, v.get(2).copied().unwrap_or(1e5));
-                println!("PROBE ({x}, {z}): cell {cell:?} {} tris -> {:?} {}", td.ground.grid.get(&cell).map_or(0, |l| l.len()), h,
+                println!("PROBE ({x}, {z}): cell {cell:?} {} tris -> {:?} {}", td.ground.probe_tris(x, z), h,
                          h.map_or("", |h| td.ground.surf_name(h.surf)));
             }
         }
@@ -2582,8 +2721,102 @@ pub fn downshift_old() -> bool {
 
 /// EVOVIEW_LINE_RECOVER=0: the racing-line driver keeps the line's speed
 /// when it is off the line or the road (the old behaviour).
+fn walls_stack() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::envc::var("EVOVIEW_WALLS_STACK").map_or(true, |v| v != "0"))
+}
+
+fn line_hoist() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::envc::var("EVOVIEW_LINE_HOIST").map_or(true, |v| v != "0"))
+}
+
 fn recover() -> bool {
     use std::sync::OnceLock;
     static R: OnceLock<bool> = OnceLock::new();
     *R.get_or_init(|| crate::envc::var("EVOVIEW_LINE_RECOVER").map_or(true, |v| v != "0"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sub-cell lists give every probe the whole cell's answer, bit for
+    /// bit: overlapping layers, tagged over untagged, slivers, triangles
+    /// across many cells, points on shared edges and vertices.
+    #[test]
+    fn fine_grid_probes_as_the_whole_cell() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / (1u64 << 24) as f32
+        };
+        let mut c = Collision { verts: Vec::new(), tris: Vec::new(), tri_surf: Vec::new(), surfaces: vec!["road".into(), String::new()],
+                                walls: Vec::new(), wall_src: Vec::new(), wall_surf: Vec::new() };
+        // a wavy 0.75 m lattice (shared edges), an untagged copy just above it
+        let (n, step) = (64usize, 0.75f32);
+        for layer in 0..2u16 {
+            let base = c.verts.len() as u32;
+            for z in 0..=n {
+                for x in 0..=n {
+                    let (px, pz) = (x as f32 * step - 20.0, z as f32 * step - 20.0);
+                    c.verts.push([px, (px * 0.3).sin() * 0.4 + (pz * 0.2).cos() * 0.3 + layer as f32 * 0.2, pz]);
+                }
+            }
+            for z in 0..n as u32 {
+                for x in 0..n as u32 {
+                    let i = base + z * (n as u32 + 1) + x;
+                    c.tris.push([i, i + 1, i + n as u32 + 1]);
+                    c.tris.push([i + 1, i + n as u32 + 2, i + n as u32 + 1]);
+                    c.tri_surf.extend([layer, layer]);
+                }
+            }
+        }
+        // loose triangles of every size, some slivers, some huge
+        for k in 0..3000 {
+            let (cx, cz, cy) = (rnd() * 60.0 - 30.0, rnd() * 60.0 - 30.0, rnd() * 3.0 - 1.0);
+            let size = match k % 4 { 0 => 0.3, 1 => 2.0, 2 => 9.0, _ => 30.0 };
+            let thin = if k % 5 == 0 { 1e-4 } else { 1.0 };
+            let base = c.verts.len() as u32;
+            let (ax, az) = (rnd() - 0.5, rnd() - 0.5);
+            for _ in 0..3 {
+                let (u, v) = ((rnd() - 0.5) * size, (rnd() - 0.5) * size * thin);
+                c.verts.push([cx + u * ax - v * az, cy + rnd() * 0.5, cz + u * az + v * ax]);
+            }
+            c.tris.push([base, base + 1, base + 2]);
+            c.tri_surf.push((k % 2) as u16);
+        }
+        let defs = [SurfaceDef { id: "road".into(), grip: 1.0, ..Default::default() }];
+        let fine = Ground::new_mode(&c, &defs, "");
+        let whole = Ground::new_mode(&c, &defs, "0");
+        assert!(fine.fine.is_some() && fine.grid.is_empty() && whole.fine.is_none());
+        let bits = |h: Option<Hit>| h.map(|h| (h.y.to_bits(), h.n.to_array().map(f32::to_bits), h.surf));
+        let mut hits = 0;
+        let mut check = |x: f32, z: f32, top: f32| {
+            let (a, b) = (fine.probe(x, z, top), whole.probe(x, z, top));
+            assert_eq!(bits(a), bits(b), "probe ({x}, {z}, {top})");
+            hits += a.is_some() as u32;
+        };
+        for _ in 0..300_000 {
+            check(rnd() * 70.0 - 35.0, rnd() * 70.0 - 35.0, rnd() * 4.0 - 1.0);
+        }
+        // on the lattice's vertices and edges, and on sub-cell borders
+        for z in 0..=n {
+            for x in 0..=n {
+                let (px, pz) = (x as f32 * step - 20.0, z as f32 * step - 20.0);
+                check(px, pz, 5.0);
+                check(px + step * 0.5, pz, 5.0);
+                check(px, pz + rnd() * step, 5.0);
+            }
+        }
+        for k in -24..=24 {
+            for j in 0..200 {
+                check(k as f32 * 1.5, j as f32 * 0.31 - 30.0, 5.0);
+                check(j as f32 * 0.31 - 30.0, k as f32 * 1.5, 5.0);
+            }
+        }
+        assert!(hits > 100_000, "{hits} hits");
+    }
 }
