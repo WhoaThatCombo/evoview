@@ -142,6 +142,9 @@ pub struct AiEngines {
     reader: Option<(std::sync::mpsc::Sender<String>, std::sync::mpsc::Receiver<(String, Vec<u8>)>)>,
     /// banks FMOD is loading on its own thread (model, bank)
     loading: Vec<(String, *mut std::ffi::c_void)>,
+    /// the reader thread could not start or died (a panic reading a damaged
+    /// bank): banks are read on the render thread from then on
+    reader_dead: bool,
     pub starts: u32,
     pub stops: u32,
 }
@@ -375,6 +378,9 @@ impl CarSound {
         }
         // each model's event, its bank loaded once (the player's is in);
         // the bank is read on a thread of its own and loaded once it is there
+        // (banks read this frame, and whether the reader thread is gone)
+        let mut inline: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut reader_gone = false;
         for c in cars {
             let m = c.model.to_ascii_lowercase();
             if self.ai.events.iter().any(|e| e.0 == m) {
@@ -388,11 +394,23 @@ impl CarSound {
             if !self.ai.asked.insert(m.clone()) {
                 continue;
             }
+            if self.ai.reader_dead {
+                let key = format!("{SFX_DIR}{m}.bank");
+                let bank = crate::pkg::Package::open_filtered(&self.pkg, &[SFX_DIR]).ok()
+                    .and_then(|p| p.by_path.get(&key).copied().map(|e| p.read(e))).unwrap_or_default();
+                inline.push((m, bank));
+                continue;
+            }
             let pkg = self.pkg.clone();
             let reader = self.ai.reader.get_or_insert_with(|| {
                 let (tx, rx) = std::sync::mpsc::channel::<String>();
                 let (btx, brx) = std::sync::mpsc::channel();
+                // EVOVIEW_AI_BANK_READER_OFF=1: no reader thread (tests the
+                // fallback below, as if it could not start)
                 std::thread::Builder::new().name("ai banks".into()).spawn(move || {
+                    if crate::envc::var_os("EVOVIEW_AI_BANK_READER_OFF").is_some() {
+                        return;
+                    }
                     let p = crate::pkg::Package::open_filtered(&pkg, &[SFX_DIR]).ok();
                     for m in rx {
                         let key = format!("{SFX_DIR}{m}.bank");
@@ -404,7 +422,10 @@ impl CarSound {
                 }).ok();
                 (tx, brx)
             });
-            reader.0.send(m).ok();
+            // (a reader that could not start dropped its receiver)
+            if reader.0.send(m).is_err() {
+                reader_gone = true;
+            }
         }
         // EVOVIEW_AI_BANK_ASYNC=0: the bank loaded blocking, in this frame
         let bank_async = crate::envc::var("EVOVIEW_AI_BANK_ASYNC").map_or(true, |v| v != "0");
@@ -423,7 +444,18 @@ impl CarSound {
             println!("AI sound {m}: {}", ev.as_deref().unwrap_or("no engine event"));
             self.ai.events.push((m, ev));
         }
-        while let Some(Ok((m, bank))) = self.ai.reader.as_ref().map(|r| r.1.try_recv()) {
+        loop {
+            let Some(r) = self.ai.reader.as_ref() else { break };
+            match r.1.try_recv() {
+                Ok(x) => inline.push(x),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    reader_gone = true;
+                    break;
+                }
+            }
+        }
+        for (m, bank) in std::mem::take(&mut inline) {
             if bank_async && !bank.is_empty() {
                 match self.fmod.load_extra_async(&bank) {
                     Ok(b) => {
@@ -446,6 +478,15 @@ impl CarSound {
             };
             println!("AI sound {m}: {}", ev.as_deref().unwrap_or("no engine event"));
             self.ai.events.push((m, ev));
+        }
+        // the reader is gone: said once, and the models it never answered
+        // are asked again next frame (read here, on this thread)
+        if reader_gone && !self.ai.reader_dead {
+            eprintln!("AI sound: the bank reader thread is gone; reading the opponents' banks on the render thread");
+            self.ai.reader = None;
+            self.ai.reader_dead = true;
+            let (ev, ld) = (&self.ai.events, &self.ai.loading);
+            self.ai.asked.retain(|m| ev.iter().any(|e| &e.0 == m) || ld.iter().any(|l| &l.0 == m));
         }
         let dist = |c: &AiCar| {
             let p = c.feed.car_pos;
