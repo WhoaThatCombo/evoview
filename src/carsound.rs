@@ -149,12 +149,30 @@ pub struct AiEngines {
     pub stops: u32,
 }
 
-/// One AI car for `CarSound::update_ai`: its model and this frame's feed
-/// (placed in the world, like the player's).
+/// One AI car for `CarSound::update_ai`: its model, where it is, and the
+/// car its feed (placed in the world, like the player's) is made from.
+/// The feed is made only for a car that has a voice: making it for every
+/// car every frame (its engine's peak torque is a scan of the torque
+/// curve) cost more than the five voices that play.
+/// EVOVIEW_AI_SOUND_LAZY=0: every car's feed up front, as before.
 pub struct AiCar<'a> {
     pub name: &'a str,
     pub model: &'a str,
-    pub feed: Feed,
+    /// the feed's `car_pos`
+    pub pos: [f32; 3],
+    pub td: &'a crate::trackdrive::TrackDrive,
+}
+
+impl AiCar<'_> {
+    pub fn feed(&self) -> Feed {
+        let mut f = self.td.sound_feed(false);
+        let p = self.td.pose();
+        f.car_pos = self.pos;
+        f.car_vel = self.td.vel().to_array();
+        f.car_fwd = p.forward.to_array();
+        f.car_up = p.up.to_array();
+        f
+    }
 }
 
 impl CarSound {
@@ -382,10 +400,11 @@ impl CarSound {
         let mut inline: Vec<(String, Vec<u8>)> = Vec::new();
         let mut reader_gone = false;
         for c in cars {
-            let m = c.model.to_ascii_lowercase();
-            if self.ai.events.iter().any(|e| e.0 == m) {
+            // (the usual case first, without the lowercase copy)
+            if self.ai.events.iter().any(|e| e.0.eq_ignore_ascii_case(c.model)) {
                 continue;
             }
+            let m = c.model.to_ascii_lowercase();
             if m == self.model {
                 println!("AI sound {m}: {}", self.engine_event.as_deref().unwrap_or("no engine event"));
                 self.ai.events.push((m, self.engine_event.clone()));
@@ -488,8 +507,11 @@ impl CarSound {
             let (ev, ld) = (&self.ai.events, &self.ai.loading);
             self.ai.asked.retain(|m| ev.iter().any(|e| &e.0 == m) || ld.iter().any(|l| &l.0 == m));
         }
+        let eager: Option<Vec<Feed>> = crate::envc::var("EVOVIEW_AI_SOUND_LAZY").map_or(false, |v| v == "0")
+            .then(|| cars.iter().map(|c| c.feed()).collect());
+        let feed = |k: usize| eager.as_ref().map_or_else(|| cars[k].feed(), |e| e[k]);
         let dist = |c: &AiCar| {
-            let p = c.feed.car_pos;
+            let p = c.pos;
             ((p[0] - ear[0]).powi(2) + (p[1] - ear[1]).powi(2) + (p[2] - ear[2]).powi(2)).sqrt()
         };
         // the nearest n, a playing car counted 20% nearer (hysteresis)
@@ -514,16 +536,15 @@ impl CarSound {
                 }
             }
             if want && v.inst.is_none() {
-                let m = c.model.to_ascii_lowercase();
-                if let Some(e) = self.ai.events.iter().find(|e| e.0 == m).and_then(|e| e.1.as_deref()) {
+                if let Some(e) = self.ai.events.iter().find(|e| e.0.eq_ignore_ascii_case(c.model)).and_then(|e| e.1.as_deref()) {
                     v.inst = fm.spawn(e);
-                    v.last_gear = c.feed.gear;
+                    v.last_gear = c.td.gear;
                     v.shift_t = 9.0;
                     self.ai.starts += 1;
                 }
             }
             let Some(i) = v.inst else { continue };
-            let f = &c.feed;
+            let f = &feed(k);
             if f.gear != v.last_gear {
                 if v.last_gear != 0 && f.gear > 0 {
                     v.shift_up = f.gear > v.last_gear;
@@ -540,8 +561,10 @@ impl CarSound {
             if self.ai.log_t <= 0.0 {
                 self.ai.log_t = 0.5;
                 let live: Vec<String> = cars.iter().zip(&self.ai.voices).filter(|(_, v)| v.inst.is_some())
-                    .map(|(c, _)| format!("{} {:.0}m {:.0}rpm thr {:.2} load {:.0}% g{} {:.0}km/h",
-                                          c.name, dist(c), c.feed.rpm, c.feed.throttle, c.feed.load_pct, c.feed.gear, c.feed.speed_kmh))
+                    .map(|(c, _)| {
+                        let f = c.feed();
+                        format!("{} {:.0}m {:.0}rpm thr {:.2} load {:.0}% g{} {:.0}km/h", c.name, dist(c), f.rpm, f.throttle, f.load_pct, f.gear, f.speed_kmh)
+                    })
                     .collect();
                 println!("AISND {} live (starts {} stops {}): {}", live.len(), self.ai.starts, self.ai.stops, live.join(" | "));
             }

@@ -964,13 +964,8 @@ impl Race {
     /// update_ai).
     pub fn sound_cars(&self) -> Vec<crate::carsound::AiCar<'_>> {
         self.ai.iter().map(|a| {
-            let mut f = a.td.sound_feed(false);
             let p = a.td.pose();
-            f.car_pos = (p.pos + p.up * 0.5).to_array();
-            f.car_vel = a.td.vel().to_array();
-            f.car_fwd = p.forward.to_array();
-            f.car_up = p.up.to_array();
-            crate::carsound::AiCar { name: a.name, model: &a.td.slot.model, feed: f }
+            crate::carsound::AiCar { name: a.name, model: &a.td.slot.model, pos: (p.pos + p.up * 0.5).to_array(), td: &a.td }
         }).collect()
     }
 }
