@@ -214,6 +214,7 @@ struct VsIn {
 };
 
 struct VsOut {
+    // (render.rs prepass_invariant puts @invariant here on request)
     @builtin(position) clip: vec4<f32>,
     @location(0) world: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -1460,6 +1461,41 @@ fn fs_shadow(in: VsOut, @builtin(front_facing) front: bool) {
     if (mat.surf.w > 0.0 && cutout_drop(in.clip.xy, s.alpha)) {
         discard;
     }
+}
+
+/// The main view's cutouts, depth only (track.rs cut_pre): every discard
+/// shade() makes, in its order, and nothing else. Keep the two in step:
+/// a pixel dropped here and kept there is not drawn; the other way round
+/// it is a hole in the picture with the card's depth.
+@fragment
+fn fs_pre(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    if (in.inst.y > 0.0 && lod_dither(in.clip.xy, in.inst.y)) {
+        discard;
+    }
+    if (mat.flags.w > 0.5) {
+        let f = clamp((in.inst.x - frame.misc.z) / max(frame.misc.w - frame.misc.z, 1.0), 0.0, 1.0);
+        if (f > 0.0 && dither(in.clip.xy) < f) {
+            discard;
+        }
+    }
+    let cull = u32(mat.extra.w + 0.5) & 48u;
+    if (cull != 0u) {
+        let outer = front == (in.inst.z >= 0.0);
+        if ((cull == 16u && !outer) || (cull == 32u && outer)) {
+            discard;
+        }
+    }
+    var ng = normalize(in.normal);
+    let keep_n = (u32(mat.extra.w) & 4u) != 0u;
+    if (!front && !keep_n) {
+        ng = -ng;
+    }
+    let s = surface(in, ng);
+    if (mat.surf.w > 0.0 && cutout_drop(in.clip.xy, s.alpha)) {
+        discard;
+    }
+    // (only alpha is written, if anything: "no cutout shaded here yet")
+    return vec4<f32>(0.0);
 }
 
 /// 2D value noise, for puddles.

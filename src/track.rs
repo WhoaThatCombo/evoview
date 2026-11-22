@@ -1590,6 +1590,9 @@ struct TrackMat {
 pub struct TrackRender {
     opaque: wgpu::RenderPipeline,
     cutout: wgpu::RenderPipeline,
+    /// the main view's cutouts as a depth prepass and a shading pass at
+    /// depth Equal (`cut_prepass`); None = one pass, as the other views
+    cut_pre: Option<(wgpu::RenderPipeline, wgpu::RenderPipeline)>,
     blended: wgpu::RenderPipeline,
     sky: wgpu::RenderPipeline,
     /// opaque, cutout, blended, sky for the other views (mirror, probe,
@@ -1965,6 +1968,14 @@ fn carpet_scale(view_proj: glam::Mat4) -> f32 {
     }
     let fy = view_proj.row(1).truncate().length().max(1e-6);
     crate::cull::lod_scale(Some(2.0 * (1.0 / fy).atan()))
+}
+
+/// EVOVIEW_CUT_PREPASS=0: the main view's cutouts in one pass, as before;
+/// 2: the second step at plain depth Equal, the last fragment winning a
+/// depth tie (see `cut_pre`).
+fn cut_prepass() -> u8 {
+    static ON: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::envc::var("EVOVIEW_CUT_PREPASS").ok().and_then(|v| v.parse().ok()).unwrap_or(1))
 }
 
 fn env_f32(name: &str, d: f32) -> f32 {
@@ -2705,7 +2716,7 @@ impl TrackRender {
                         .unwrap_or_else(|| crate::clouds::track_source(include_str!("track.wgsl")));
                     // TAA resolves the track: its texture LOD bias (taa.rs),
                     // per view from the frame uniform (`lod`)
-                    crate::taa::with_mip_bias_expr(&src, "lod_bias()")
+                    crate::render::prepass_invariant(&crate::taa::with_mip_bias_expr(&src, "lod_bias()"))
                         .replace("MV_DEPTH", if samples > 1 { "texture_depth_multisampled_2d" } else { "texture_depth_2d" })
                         // EVOVIEW_PANO_VIEW=0: every direction of the cloud
                         // panorama refreshed at the in-view rate
@@ -2750,7 +2761,7 @@ impl TrackRender {
         }
         // `ssr`: the main pass's SSR targets (ssr.rs) after the colour, Some(true)
         // where the material writes them; None for the other views' passes
-        let make = |label: &str, blend: Option<wgpu::BlendState>, depth_write: bool, a2c: bool, ssr: Option<bool>| {
+        let make_cmp = |label: &str, blend: Option<wgpu::BlendState>, depth_write: bool, a2c: bool, ssr: Option<bool>, cmp: wgpu::CompareFunction| {
             let mut targets = vec![Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })];
             // blended: covers the reflection change behind by its alpha
             let cover = ssr == Some(false) && blend.is_some();
@@ -2784,7 +2795,7 @@ impl TrackRender {
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
                     depth_write_enabled: depth_write,
-                    depth_compare: wgpu::CompareFunction::Less,
+                    depth_compare: cmp,
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
@@ -2797,11 +2808,66 @@ impl TrackRender {
                 cache: None,
             })
         };
+        let make = |label: &str, blend: Option<wgpu::BlendState>, depth_write: bool, a2c: bool, ssr: Option<bool>|
+            make_cmp(label, blend, depth_write, a2c, ssr, wgpu::CompareFunction::Less);
         let opaque = make("track opaque", None, true, false, Some(true));
         // Alpha-to-coverage on cutouts under MSAA: leaf and grass edges get
         // sub-pixel coverage instead of a hard, shimmering discard.
         let cutout = make("track cutout", None, true, true, Some(true));
         let blended = make("track blended", Some(wgpu::BlendState::ALPHA_BLENDING), false, false, Some(false));
+        // The main view's cutouts in two steps (cut_prepass): their depth
+        // first, through a fragment stage that only makes shade()'s discards,
+        // then shaded at depth Equal without depth writes. A shader that
+        // discards AND writes depth gets no early depth test, so in one pass
+        // every leaf card was shaded in full however many stood in front of
+        // it (4.4 ms of cutouts at 3440x1440 on the Nordschleife, 2.8 of it
+        // lighting); now about one fragment a pixel is.
+        // Depth Equal alone lets the LAST fragment at the final depth win,
+        // where one pass kept the FIRST (Less) - and there are many such
+        // ties: foliage modelled as coincident two-sided cards, and distant
+        // trees sharing a depth value. So the prepass also clears the
+        // colour target's alpha where a cutout owns the pixel, and the
+        // shading pass blends by it: the first fragment lands whole and
+        // sets alpha to 1, later ones change nothing (mode 1). Mode 2 is
+        // plain Equal.
+        let cut_pre = (samples == 1 && cut_prepass() != 0).then(|| (
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("track cutout depth"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: "vs_main",
+                    compilation_options: Default::default(),
+                    buffers: &track_buffers,
+                },
+                // (inside the main pass: its targets, none written)
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: "fs_pre",
+                    compilation_options: Default::default(),
+                    targets: &std::iter::once(Some(wgpu::ColorTargetState { format, blend: None,
+                            write_mask: if cut_prepass() == 2 { wgpu::ColorWrites::empty() } else { wgpu::ColorWrites::ALPHA } }))
+                        .chain(crate::ssr::extra_targets(false)).collect::<Vec<_>>(),
+                }),
+                primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            }),
+            make_cmp("track cutout (depth equal)", (cut_prepass() != 2).then_some(wgpu::BlendState {
+                color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::OneMinusDstAlpha, dst_factor: wgpu::BlendFactor::DstAlpha,
+                                              operation: wgpu::BlendOperation::Add },
+                alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::Zero,
+                                              operation: wgpu::BlendOperation::Add },
+            }), false, false, Some(true), wgpu::CompareFunction::Equal),
+        ));
         let shadow_cut = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("track shadow cutout"),
             layout: Some(&layout),
@@ -3134,6 +3200,7 @@ impl TrackRender {
         Some(TrackRender {
             opaque,
             cutout,
+            cut_pre,
             blended,
             sky,
             view_pipes,
@@ -3611,13 +3678,20 @@ impl TrackRender {
             // tinted-transmission glass is a car feature; track glass is Alpha
             _ => return,
         };
-        let mut set = false;
-        let mut last_group = usize::MAX;
         // (counted here and added once: several threads record views at once)
         let (mut n_draws, mut n_tris) = (0u64, 0u64);
-        let mut geo: *const wgpu::Buffer = std::ptr::null();
         let lists = self.phase_meshes(meshes);
         let split = crate::render::track_split();
+        // the main view's cutouts: depth, then shading (cut_pre)
+        let two = self.cut_pre.as_ref().filter(|_| phase == Blend::Cutout && view == 0);
+        let steps: [Option<&wgpu::RenderPipeline>; 2] = match two {
+            Some((pre, eq)) => [Some(pre), Some(eq)],
+            None => [Some(pipe), None],
+        };
+        for pipe in steps.into_iter().flatten() {
+        let mut set = false;
+        let mut last_group = usize::MAX;
+        let mut geo: *const wgpu::Buffer = std::ptr::null();
         for &gi in &lists.phase[phase_index(phase)] {
             let gi = gi as usize;
             let m = &meshes[gi];
@@ -3699,6 +3773,7 @@ impl TrackRender {
                 n_draws += 1;
                 n_tris += cnt as u64 / 3 * n as u64;
             }
+        }
         }
         crate::bench::count_draws(view, n_draws, n_tris);
     }
