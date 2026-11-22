@@ -4248,6 +4248,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     }
                                 }
                                 r.step(td, dt);
+                                let _ai_rows = crate::bench::cpu("ai laps + rows");
                                 // their laps, and the board in race order
                                 if let Some(l) = opts.laps.as_mut() {
                                     l.step_ai(&r.ai.iter().map(|a| &a.td).collect::<Vec<_>>(), dt);
@@ -4675,8 +4676,10 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 || car_cams.get(cam_sel).map_or(false, |c| c.mode == 1 || c.mode == 4);
                             // the opponents' engines, the nearest few
                             if let Some(r) = opts.race.as_ref() {
+                                let _t = crate::bench::cpu("ai sound");
                                 s.update_ai(&r.sound_cars(), f.cam_pos, dt);
                             }
+                            let _t = crate::bench::cpu("car sound");
                             s.update(&f, dt);
                         }
                         // A follow camera overrides the fly camera rather than

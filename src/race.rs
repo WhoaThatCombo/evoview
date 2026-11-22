@@ -313,6 +313,7 @@ impl Race {
         }
         // the lights: 2 s to settle, one red a second, out 0.4..2.4 s after the fifth
         let lights_out = 2.0 + 5.0 + 0.4 + 2.0 * hash01(n, 7);
+        crate::simprof::CARS.store(n.max(1) as u64, std::sync::atomic::Ordering::Relaxed);
         Race {
             ai,
             line,
@@ -438,11 +439,13 @@ impl Race {
     /// One frame, after the player's car has stepped: the opponents'
     /// driving, their physics, contacts with everyone, progress.
     pub fn step(&mut self, player: &mut TrackDrive, dt: f32) {
+        use crate::simprof::{scope, Id};
         let dt = dt.clamp(0.0, 0.1);
         self.t += dt;
         if self.net {
             return;
         }
+        let _step = scope(Id::Step);
         // the start
         if self.go.is_none() {
             match self.start {
@@ -457,22 +460,29 @@ impl Race {
                 _ => {}
             }
         }
-        self.traffic(player, dt);
+        {
+            let _t = scope(Id::Traffic);
+            self.traffic(player, dt);
+        }
         // controls and physics: each car alone, so in parallel
         let held = self.held();
         let work = |a: &mut Ai| {
+            let t = scope(Id::Controls);
             a.ctl = if held {
                 a.drv.rest();
                 Controls { handbrake: true, auto_box: true, ..Default::default() }
             } else {
                 a.drv.controls(&a.td, dt)
             };
+            drop(t);
+            let _t = scope(Id::Physics);
             // stalled (a spin): the starter, as a driver would
             a.ctl.starter = a.td.rig.as_ref().map_or(false, |(rc, _)| !rc.running);
             a.td.step(&a.ctl, dt);
             a.smoke += (a.td.smoke_target() - a.smoke) * (dt * 6.0).min(1.0);
         };
         let _t = crate::bench::cpu("ai physics");
+        let _td = scope(Id::Drive);
         if self.threads <= 1 || self.ai.len() < 2 {
             self.ai.iter_mut().for_each(work);
         } else {
@@ -484,14 +494,21 @@ impl Race {
             });
         }
         drop(_t);
+        drop(_td);
+        let _rest = crate::bench::cpu("ai traffic + contacts");
         // EVOVIEW_AI_CONTACT=0: cars pass through each other (A/B)
         if crate::envc::var("EVOVIEW_AI_CONTACT").map_or(true, |v| v != "0") {
+            let _t = scope(Id::Contacts);
             self.contacts(player);
         }
-        self.prog[0].update(&self.line, player.pos);
-        for (k, a) in self.ai.iter().enumerate() {
-            self.prog[k + 1].update(&self.line, a.td.pos);
+        {
+            let _t = scope(Id::Progress);
+            self.prog[0].update(&self.line, player.pos);
+            for (k, a) in self.ai.iter().enumerate() {
+                self.prog[k + 1].update(&self.line, a.td.pos);
+            }
         }
+        let _t = scope(Id::Unstick);
         self.unstick(player, dt);
     }
 
@@ -795,16 +812,27 @@ pub fn test_run(race: &mut Race, player: &mut TrackDrive, mut drv: LineDriver, s
     let mut ai_ms = 0.0f64;
     // per AI: the most tyre smoke and seconds with some (> 0.2)
     let mut smoke = vec![(0.0f32, 0.0f32); race.ai.len()];
+    let (mut sim_dump, mut sim_steps, mut sim_allocs) = (crate::simprof::Dump::from_env(), 0u64, crate::simprof::allocs());
     while t < secs {
         if race.held() {
             drv.rest();
         }
         let mut c = drv.controls(player, dt);
         race.filter_player(&mut c, player.speed_kmh());
-        player.step(&c, dt);
+        {
+            let _t = crate::simprof::scope(crate::simprof::Id::Player);
+            player.step(&c, dt);
+        }
         let t0 = std::time::Instant::now();
         race.step(player, dt);
         ai_ms += t0.elapsed().as_secs_f64() * 1000.0;
+        sim_dump.tick(player, race.ai.iter().map(|a| &a.td));
+        sim_steps += 1;
+        // the first step is each driver's one-off line clearing
+        if sim_steps == 1 {
+            sim_allocs = crate::simprof::allocs();
+            crate::simprof::reset();
+        }
         t += dt;
         // a car going up fast is a launch (walls, contacts)
         for (k, td) in std::iter::once(&*player).chain(race.ai.iter().map(|a| &a.td)).enumerate() {
@@ -868,6 +896,8 @@ pub fn test_run(race: &mut Race, player: &mut TrackDrive, mut drv: LineDriver, s
     println!("RACE tyre smoke (max, s > 0.2): {}", race.ai.iter().zip(&smoke)
         .map(|(a, s)| format!("{} {:.2} {:.1}s", a.name, s.0, s.1)).collect::<Vec<_>>().join(", "));
     println!("RACE cpu: AI step {:.3} ms per 120 Hz step for {} cars ({:.1} s wall)", ai_ms / (secs as f64 * 120.0), race.ai.len(), wall.elapsed().as_secs_f32());
+    println!("RACE line: {} points over {:.0} m", race.line.pts.len(), race.line.len);
+    crate::simprof::report(sim_steps.saturating_sub(1), sim_allocs);
 }
 
 // ---- HUD: the start lights and the proximity radar (hud.rs look) ----

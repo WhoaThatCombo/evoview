@@ -225,6 +225,7 @@ impl Ground {
     /// Walls near `p` (XZ) whose height range overlaps [y0, y1]: each as
     /// (closest point on it in XZ, distance).
     pub fn walls_near(&self, p: Vec3, r: f32, y0: f32, y1: f32, out: &mut Vec<(Vec3, f32, u32)>) {
+        let _t = crate::simprof::scope(crate::simprof::Id::Walls);
         out.clear();
         let cc = |v: f32| (v / CELL).floor() as i32;
         let mut seen: Vec<u32> = Vec::new();
@@ -325,6 +326,7 @@ impl Ground {
     /// still counts where nothing tagged is near (terrain beyond the run-off).
     /// EVOVIEW_UNTAGGED_GROUND=1: the highest of either, as before.
     pub fn probe(&self, x: f32, z: f32, top: f32) -> Option<Hit> {
+        let _t = crate::simprof::scope(crate::simprof::Id::Probe);
         if let Some(o) = self.ode.as_ref() {
             return o.probe(x, z, top).map(|(y, n, ti)| Hit { y, n, surf: self.surf[ti as usize] });
         }
@@ -913,6 +915,34 @@ impl TrackDrive {
         self.r += dr;
         for w in self.wheels.iter_mut() {
             *w += dp;
+        }
+    }
+
+    /// Every piece of state the step carries on, as raw bits (simprof.rs
+    /// EVOVIEW_SIM_DUMP: two runs of the same drive must agree bit for bit).
+    pub fn state_bits(&self, out: &mut Vec<u8>) {
+        let mut f = |v: f32| out.extend_from_slice(&v.to_bits().to_le_bytes());
+        for v in [self.pos.x, self.pos.y, self.pos.z, self.yaw, self.vx, self.vy, self.r, self.steer, self.thr, self.brk,
+                  self.gear as f32, self.rpm, self.spin, self.pitch, self.pitch_v, self.roll, self.roll_v,
+                  self.up.x, self.up.y, self.up.z, self.ax, self.ay, self.ax_lt, self.mz_front] {
+            f(v);
+        }
+        for w in self.wheels {
+            for v in w.to_array() {
+                f(v);
+            }
+        }
+        if let Some((rc, acc)) = self.rig.as_ref() {
+            for v in [*acc, rc.cg.x, rc.cg.y, rc.cg.z, rc.q.x, rc.q.y, rc.q.z, rc.q.w, rc.v.x, rc.v.y, rc.v.z, rc.w.x, rc.w.y, rc.w.z,
+                      rc.steer, rc.thr, rc.brk, rc.hb, rc.gear as f32, rc.rpm, rc.torque, rc.mz_front, rc.engine_w, rc.clutch_e] {
+                f(v);
+            }
+            for c in &rc.c {
+                for v in [c.x, c.xv, c.omega, c.angle, c.fz, c.alpha, c.sr, c.fx, c.fy, c.mz, c.hub.x, c.hub.y, c.hub.z,
+                          c.grip, c.gap, c.relax_ta, c.relax_sr, c.nd, c.surf as f32] {
+                    f(v);
+                }
+            }
         }
     }
 
@@ -2198,6 +2228,7 @@ pub fn test_run(td: &mut TrackDrive, secs: f32, mut driver: Option<LineDriver>, 
     let mut g_win: std::collections::VecDeque<f32> = Default::default();
     let mut bad = false;
     let mut probe = AidsProbe::from_env();
+    let (mut sim_dump, mut sim_steps, sim_allocs) = (crate::simprof::Dump::from_env(), 0u64, crate::simprof::allocs());
     while t < secs {
         let mut c = match driver.as_mut() {
             Some(d) => d.controls(td, dt),
@@ -2259,7 +2290,12 @@ pub fn test_run(td: &mut TrackDrive, secs: f32, mut driver: Option<LineDriver>, 
                 }
             }
         }
-        td.step(&c, dt);
+        {
+            let _t = crate::simprof::scope(crate::simprof::Id::Player);
+            td.step(&c, dt);
+        }
+        sim_dump.tick(td, std::iter::empty());
+        sim_steps += 1;
         // out of the world (Mount Panorama: a car slid off a bank under a
         // wall's height band, past the collision mesh's edge, fell for
         // kilometres and its numbers ran wild): put it back on the line,
@@ -2349,6 +2385,7 @@ pub fn test_run(td: &mut TrackDrive, secs: f32, mut driver: Option<LineDriver>, 
         }
         t += dt;
     }
+    crate::simprof::report(sim_steps, sim_allocs);
     if driver.is_some() {
         println!("LAPS {lap_n} complete{}; last partial {:.1} s: top {top:.1} km/h, peak {g_peak:.2} g", if bad { " (stopped: non-finite)" } else { "" }, t - lap_t0);
     }

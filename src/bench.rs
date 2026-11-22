@@ -140,6 +140,15 @@ impl Drop for CpuScope {
     }
 }
 
+/// Forget the scopes so far: the race's headless warp (EVOVIEW_AI_WARP) runs
+/// thousands of sim steps before the first frame, and they were counted
+/// into the per-frame figures ("ai physics" read 8x too high).
+pub fn cpu_reset() {
+    if let Ok(mut v) = CPU.lock() {
+        v.clear();
+    }
+}
+
 /// EVOVIEW_BENCH_HITCH=ms: each frame slower than that is printed with the
 /// CPU scopes that grew most in it (what a hitch was spent on).
 fn hitch(frame: u64, t: f32, ms: f64) {
@@ -587,6 +596,7 @@ impl Bench {
                 println!("  cpu {l:>14}: per frame {:.3} ms", ms / frames);
             }
         }
+        crate::simprof::report(self.frame, (0, 0));
         {
             use std::sync::atomic::Ordering::Relaxed;
             let frames = self.frame.max(1) as f64;

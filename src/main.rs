@@ -143,6 +143,7 @@ mod rigwish;
 mod groundode;
 mod collide;
 mod mp;
+mod simprof;
 mod ode;
 
 use std::path::PathBuf;
@@ -1373,6 +1374,7 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
         d.pace = 0.95;
         let dt = 1.0 / 120.0;
         let mut t = 0.0;
+        let warp_t0 = std::time::Instant::now();
         while t < w {
             if r.held() {
                 d.rest();
@@ -1383,6 +1385,10 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
             r.step(&mut td, dt);
             t += dt;
         }
+        // the warp's steps are not frames: out of the per-frame figures
+        println!("race: warp took {:.2} s for {} steps", warp_t0.elapsed().as_secs_f32(), (w / dt) as u32);
+        crate::bench::cpu_reset();
+        crate::simprof::reset();
         println!("race: warped {w:.0} s; order {:?}", r.race_order().iter().map(|(k, v)| format!("{} {v:.2}", r.name(*k))).collect::<Vec<_>>());
     }
     if let Some(secs) = flag("--drive-test").and_then(|v| v.parse::<f32>().ok()) {
