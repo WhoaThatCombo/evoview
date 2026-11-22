@@ -366,6 +366,7 @@ impl CarCull {
                 queue.write_buffer(b, 0, bytemuck::cast_slice(rows));
             }
         };
+        crate::bench::det("car_rows", &self.rows);
         write(&mut self.rows_buf, &self.rows, "car rows");
         if self.has_prev {
             write(&mut self.prev_buf, &self.prev_rows, "car rows (last frame)");

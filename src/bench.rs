@@ -638,3 +638,35 @@ impl Bench {
             info.join(","));
     }
 }
+
+/// EVOVIEW_DET_LOG=1 (see render.rs): a hash of `v`'s bits joins this
+/// frame's DET line, so two runs' logs show which state parted first.
+pub fn det(label: &str, v: &[f32]) {
+    if det_on() {
+        let h = v.iter().fold(0xcbf29ce484222325u64, |h, x| (h ^ x.to_bits() as u64).wrapping_mul(0x100000001b3));
+        if let Ok(mut s) = DET.lock() {
+            s.push_str(&format!(" {label} {h:016x}"));
+        }
+    }
+}
+
+pub fn det_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::envc::var_os("EVOVIEW_DET_LOG").is_some())
+}
+
+static DET: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// What `det` gathered since the last call.
+pub fn det_take() -> String {
+    DET.lock().map(|mut s| std::mem::take(&mut *s)).unwrap_or_default()
+}
+
+/// FNV over bytes, eight at a time (the DET / DS lines).
+pub fn det_bytes(d: &[u8]) -> u64 {
+    d.chunks(8).fold(0xcbf29ce484222325u64, |h, c| {
+        let mut b = [0u8; 8];
+        b[..c.len()].copy_from_slice(c);
+        (h ^ u64::from_le_bytes(b)).wrapping_mul(0x100000001b3)
+    })
+}

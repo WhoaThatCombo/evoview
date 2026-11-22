@@ -907,6 +907,30 @@ fn build_scene_impl(
     mats: Option<&Materials>,
     defer: bool,
 ) -> (Vec<GpuMesh>, Vec3, Vec3, u32) {
+    // EVOVIEW_DET_LOG=1: what was loaded, one DS line per mesh, texture and
+    // material with hashes of their data (two runs' lines diffed show a load
+    // that did not repeat; DETERMINISM.md)
+    if crate::bench::det_on() {
+        let hb = crate::bench::det_bytes;
+        for (i, m) in car.meshes.iter().enumerate() {
+            println!("DS mesh {i} {} v{} x{} p{:016x} n{:016x} u{:016x} i{:016x} b{:016x} w{:016x} xf{:016x} {:?}", m.name, m.vertices, m.xforms.len(),
+                hb(car.slice(m.positions)), hb(car.slice(m.normals)), hb(car.slice(m.uvs)), hb(car.slice(m.indices)), hb(car.slice(m.bone_idx)), hb(car.slice(m.bone_wgt)),
+                hb(bytemuck::cast_slice(&m.xforms)),
+                m.batches.iter().map(|b| format!("{}:{}+{}", b.material, b.start, b.count)).collect::<Vec<_>>());
+        }
+        for (i, t) in car.textures.iter().enumerate() {
+            println!("DS tex {i} {} {} {}x{} l{} d{:016x}", t.name, t.format, t.width, t.height, t.levels.len(), hb(car.tex_data(t)));
+        }
+        for (i, m) in car.materials.iter().enumerate() {
+            let mut sl: Vec<_> = m.slots.iter().collect();
+            sl.sort();
+            let mut pa: Vec<_> = m.params.iter().map(|(k, v)| (k, v.to_bits())).collect();
+            pa.sort();
+            let mut co: Vec<_> = m.colors.iter().map(|(k, v)| (k, v.iter().map(|x| x.to_bits()).collect::<Vec<_>>())).collect();
+            co.sort();
+            println!("DS mat {i} {} {} {:?} {sl:?} {pa:?} {co:?}", m.file, m.path, m.shader);
+        }
+    }
     let mut meshes = Vec::new();
     let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
     let mut tris = 0u32;
@@ -4438,6 +4462,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             };
                             let mut pose = driven.unwrap_or_else(|| skel.pose_many(&playing));
                             pose.resize(MAX_BONES, identity);
+                            crate::bench::det("bones", bytemuck::cast_slice(&pose));
                             queue.write_buffer(&bone_buf, 0, bytemuck::cast_slice(&pose));
                             if let Some(mr) = mirrors.as_mut() {
                                 mr.set_pose(&pose);
@@ -4708,6 +4733,21 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         // no history = no jitter either (each frame stands alone;
                         // supersampled captures of replays, whose cars TAA cannot follow)
                         let vp_draw = taa.as_ref().filter(|_| !taa_hist_off).map_or(view_proj, |t| t.jittered(view_proj));
+                        // EVOVIEW_DET_LOG=1: one DET line a frame with the bits of the
+                        // sim and camera state (the player's car, the opponents, its
+                        // bones, the view, TAA's jitter), hashed: two runs' lines
+                        // diffed show where they part (DETERMINISM.md)
+                        if crate::bench::det_on() {
+                            static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                            let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let h = |v: &[f32]| crate::bench::det_bytes(bytemuck::cast_slice(v));
+                            let (p, bm) = opts.track_drive.as_ref().map_or((Vec3::ZERO, 0), |td| (td.pos, h(&td.body_flat().to_cols_array())));
+                            let ai: Vec<f32> = opts.race.as_ref().map_or(Vec::new(), |r| r.ai.iter().flat_map(|a| a.td.body_flat().to_cols_array()).collect());
+                            let j = taa.as_ref().map_or((0.0, 0.0), |t| t.jitter());
+                            println!("DET {n}{} dt {:08x} pos {:08x} {:08x} {:08x} body {bm:016x} ai {:016x} vp {:016x} eye {:016x} jit {:08x} {:08x} vpd {:016x}",
+                                crate::bench::det_take(), dt.to_bits(), p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), h(&ai),
+                                h(&view_proj.to_cols_array()), h(&eye.to_array()), j.0.to_bits(), j.1.to_bits(), h(&vp_draw.to_cols_array()));
+                        }
                         // A camera cut (C, a TV camera switching, a teleport,
                         // a replay seek): the eye jumps or the view turns
                         // further than any real frame does. Every history
