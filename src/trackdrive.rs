@@ -2001,7 +2001,18 @@ impl LineDriver {
             (a.x * b.z - a.z * b.x).signum() * ang / (a.length() + b.length()).max(0.1)
         };
         let sbend = if td.rig.is_some() { crate::envc::var("EVOVIEW_LINE_SBEND").ok().and_then(|v| v.parse().ok()).unwrap_or(0.85f32) } else { 1.0 };
-        let behind = (0..20usize).map(|k| turn((self.i + n - k) % n)).fold(0.0f32, |m, t| if t.abs() > m.abs() { t } else { m });
+        // what does not change from one line point to the next, worked out
+        // once: the corner-speed factor, the tyres' grip at rest (four
+        // powf) and the track's wetness (a global lock) were re-made at
+        // every point of the 30-450 m looked ahead. EVOVIEW_LINE_HOIST=0:
+        // per point, as before
+        let hoist = line_hoist().then(|| (self.line_k(td), td.grip_estimate(), crate::rain::track_wetness()));
+        // (the S-bend factor is 1 for the simple model: `behind` is not read)
+        let behind = if hoist.is_some() && sbend == 1.0 {
+            0.0
+        } else {
+            (0..20usize).map(|k| turn((self.i + n - k) % n)).fold(0.0f32, |m, t| if t.abs() > m.abs() { t } else { m })
+        };
         let (mut j, mut d) = (self.i, 0.0);
         while d < look {
             let (p0, p1, p2) = (self.line[j], self.line[(j + 4) % n], self.line[(j + 8) % n]);
@@ -2023,11 +2034,7 @@ impl LineDriver {
                 // linkage) ran wide into Villeneuve (MX-5) and out of Variante
                 // Alta (M4) until 0.36. Explicit was 0.43 until its hubs rode with
                 // the body (rigcar hub_ride): now it corners like the slider
-                let k_rig = match crate::envc::var("EVOVIEW_RIG_ODE").as_deref() {
-                    Ok("links") | Err(_) => 0.38,
-                    _ => 0.36,
-                };
-                let k = if td.rig.is_some() { crate::envc::var("EVOVIEW_LINE_K").ok().and_then(|v| v.parse().ok()).unwrap_or(k_rig) } else { 0.85 };
+                let (k, ge, w) = hoist.unwrap_or_else(|| (self.line_k(td), td.grip_estimate(), crate::rain::track_wetness()));
                 // over a crest the road falls away under the car and takes
                 // load off the tyres (v^2 x the vertical curvature): Mount
                 // Panorama's Skyline (7 -> 13 % down in ~40 m) at 135 km/h
@@ -2041,14 +2048,13 @@ impl LineDriver {
                 } else {
                     0.0
                 };
-                let mut vr = (k * td.grip_estimate() * G * r / (1.0 + k * td.grip_estimate() * r * kv)).sqrt() * self.pace * s_f;
+                let mut vr = (k * ge * G * r / (1.0 + k * ge * r * kv)).sqrt() * self.pace * s_f;
                 // in the wet the grip falls with speed (the tyre model's
                 // water term): settle on the speed that grip allows
-                let w = crate::rain::track_wetness();
                 let wet_f = |v: f32| (1.0 - (1.0 - td.groove()) * crate::sctm::WET_K * w * v).clamp(0.15, 1.0) * crate::rain::rubber_grip(w);
                 if w > 0.0 {
                     for _ in 0..4 {
-                        vr = (k * td.grip_estimate() * wet_f(vr) * G * r).sqrt() * self.pace * s_f;
+                        vr = (k * ge * wet_f(vr) * G * r).sqrt() * self.pace * s_f;
                     }
                 }
                 let mut brake_g = if w > 0.0 { 6.5 * wet_f(v) } else { 6.5 } * self.brake_k;
@@ -2188,6 +2194,15 @@ impl LineDriver {
 
     fn a_b(&self, td: &TrackDrive) -> f32 {
         td.a + td.b
+    }
+
+    /// The share of the grip the line's corner speeds are planned on.
+    fn line_k(&self, td: &TrackDrive) -> f32 {
+        let k_rig = match crate::envc::var("EVOVIEW_RIG_ODE").as_deref() {
+            Ok("links") | Err(_) => 0.38,
+            _ => 0.36,
+        };
+        if td.rig.is_some() { crate::envc::var("EVOVIEW_LINE_K").ok().and_then(|v| v.parse().ok()).unwrap_or(k_rig) } else { 0.85 }
     }
 }
 
