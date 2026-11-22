@@ -873,6 +873,40 @@ pub fn build_scene(
     car: &Car,
     mats: Option<&Materials>,
 ) -> (Vec<GpuMesh>, Vec3, Vec3, u32) {
+    build_scene_impl(device, car, mats, false)
+}
+
+/// `build_scene` for a car whose `Materials` do not exist yet (a late
+/// joiner's, on the "mp cars" worker): the same meshes and buffers, but each
+/// draw's material is its batch's index in its source mesh (`usize::MAX` =
+/// the fallback), turned into material indices by `resolve_materials` once
+/// the materials are built. Not for a track (its split streams need them).
+pub fn build_scene_deferred(device: &wgpu::Device, car: &Car) -> (Vec<GpuMesh>, Vec3, Vec3, u32) {
+    build_scene_impl(device, car, None, true)
+}
+
+/// A `build_scene_deferred` result's draws pointed at `mats` - what
+/// `build_scene(device, car, Some(mats))` would have given.
+pub fn resolve_materials(car: &Car, meshes: &mut [GpuMesh], mats: &Materials) {
+    for g in meshes.iter_mut() {
+        let batches = car.meshes.get(g.src).map(|m| m.batches.as_slice()).unwrap_or(&[]);
+        for d in g.draws.iter_mut() {
+            d.2 = match batches.get(d.2) {
+                Some(b) if d.2 != usize::MAX => mats.lookup(&b.material),
+                _ => mats.fallback,
+            };
+        }
+    }
+    let tris = meshes.iter().map(|g| g.index_count / 3).sum();
+    report_scene(car, meshes, tris, mats);
+}
+
+fn build_scene_impl(
+    device: &wgpu::Device,
+    car: &Car,
+    mats: Option<&Materials>,
+    defer: bool,
+) -> (Vec<GpuMesh>, Vec3, Vec3, u32) {
     let mut meshes = Vec::new();
     let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
     let mut tris = 0u32;
@@ -965,14 +999,15 @@ pub fn build_scene(
         let mut draws: Vec<(u32, u32, usize)> = m
             .batches
             .iter()
-            .filter(|b| b.count > 0 && b.start as usize + b.count as usize <= idx.len()) // widened: u32 sum wraps
-            .map(|b| {
-                let mi = mats.map(|x| x.lookup(&b.material)).unwrap_or(0);
+            .enumerate()
+            .filter(|(_, b)| b.count > 0 && b.start as usize + b.count as usize <= idx.len()) // widened: u32 sum wraps
+            .map(|(k, b)| {
+                let mi = if defer { k } else { mats.map(|x| x.lookup(&b.material)).unwrap_or(0) };
                 (b.start, b.count, mi)
             })
             .collect();
         if draws.is_empty() {
-            draws.push((0, idx.len() as u32, mats.map(|x| x.fallback).unwrap_or(0)));
+            draws.push((0, idx.len() as u32, if defer { usize::MAX } else { mats.map(|x| x.fallback).unwrap_or(0) }));
         }
         // Track meshes carry a second vertex stream (vertex colour + uv1)
         // for the track pipeline.
@@ -1140,10 +1175,17 @@ pub fn build_scene(
     arena.flush(device, &mut meshes, None);
     arena_static.flush(device, &mut meshes, zero_bones.as_ref());
     arena_skinned.flush(device, &mut meshes, None);
+    if let Some(m) = mats {
+        report_scene(car, &meshes, tris, m);
+    }
+    (meshes, lo, hi, tris)
+}
+
+fn report_scene(car: &Car, meshes: &[GpuMesh], tris: u32, m: &Materials) {
     // A machine-readable line so a sweep over every car can tell a real
     // failure from an ugly render. Batches that fell back are the honest
     // signal that a material did not bind.
-    if let Some(m) = mats {
+    {
         let fb: usize = meshes
             .iter()
             .flat_map(|x| x.draws.iter())
@@ -1186,7 +1228,6 @@ pub fn build_scene(
             println!("unbound materials: {}", names.join(", "));
         }
     }
-    (meshes, lo, hi, tris)
 }
 
 /// Shading switches both material shaders (shader.wgsl, track.wgsl) read as
@@ -1925,6 +1966,9 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
             .await
             .expect("device (does this GPU support BC textures?)"),
     };
+    // shared with the "mp cars" worker, which uploads a late joiner's meshes
+    let device = std::sync::Arc::new(device);
+    let queue = std::sync::Arc::new(queue);
     crate::perf::add("device init", t_device.elapsed().as_secs_f64());
 
     let size = window.inner_size();
@@ -2135,7 +2179,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     // the side windows' streak maps (rain.rs), a 1-texel stand-in without
     let streak_view = crate::rain::streak_view(&device, &queue, car.rain_streaks.as_deref().map(|v| v.as_slice()));
     // the windshield rain maps on the GPU (rain.rs)
-    let rain_views: Vec<Option<std::rc::Rc<wgpu::TextureView>>> = car.rain_tex.iter()
+    let rain_views: Vec<Option<std::sync::Arc<wgpu::TextureView>>> = car.rain_tex.iter()
         .map(|t| t.and_then(|i| materials.textures.get(&device, &queue, &car, i, false)))
         .collect();
     // The driven car's reflection probe (probe.rs): HDR only, since the
@@ -2357,14 +2401,33 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     let mut view_ai: Option<usize> = crate::envc::var("EVOVIEW_VIEW_AI").ok().and_then(|v| v.parse().ok());
     // online: late joiners' cars, loaded one at a time on a worker thread
     // (replayscene::load_net_car) and appended to the scene when done
-    type NetCar = (u16, String, Result<(crate::asset::Car, crate::replayscene::Slot), String>);
+    // (with its meshes already uploaded, materials unresolved: build_scene_deferred)
+    // and its materials, when built there too
+    type NetCar = (u16, String, Result<(crate::asset::Car, crate::replayscene::Slot, Option<Vec<GpuMesh>>, Option<Materials>), String>);
     let (net_job_tx, net_job_rx) = std::sync::mpsc::channel::<(u16, String, Option<Vec<u8>>)>();
     let (net_done_tx, net_done_rx) = std::sync::mpsc::channel::<NetCar>();
     if let (Some(_), Some(pkg)) = (opts.mp.as_ref(), opts.pkg.clone()) {
+        // EVOVIEW_JOIN_PACK=0: the joiner's vertices packed and uploaded on
+        // the render thread, as before (~25 ms of its join frame)
+        let pack = crate::envc::var("EVOVIEW_JOIN_PACK").map_or(true, |v| v != "0");
+        // EVOVIEW_JOIN_MATS=0: its materials built on the render thread, as
+        // before (~20-35 ms of its join frame). On the worker they share the
+        // scene's texture cache (one map, locked) as the render thread's did.
+        let mats_on = crate::envc::var("EVOVIEW_JOIN_MATS").map_or(true, |v| v != "0");
+        let tex_cache = materials.textures.clone();
+        let (device, queue) = (device.clone(), queue.clone());
         std::thread::Builder::new().name("mp cars".into()).spawn(move || {
             for (n, car, fs) in net_job_rx {
                 let t = std::time::Instant::now();
-                let r = crate::replayscene::load_net_car(&pkg, None, &car, fs.as_deref(), &format!("n{n}"));
+                let r = crate::replayscene::load_net_car(&pkg, None, &car, fs.as_deref(), &format!("n{n}"))
+                    .map(|(c, slot)| {
+                        let mm = mats_on.then(|| {
+                            let _t = crate::bench::cpu("join mats (worker)");
+                            Materials::build_reusing(&device, &queue, &c, tex_cache.clone())
+                        });
+                        let g = pack.then(|| build_scene_deferred(&device, &c).0);
+                        (c, slot, g, mm)
+                    });
                 println!("mp: car #{n} ({car}) loaded in {:.1}s", t.elapsed().as_secs_f32());
                 if net_done_tx.send((n, car, r)).is_err() {
                     break;
@@ -3556,6 +3619,8 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                     }
                     WindowEvent::RedrawRequested => {
                         let _frame_t = crate::bench::cpu("redraw total");
+                        // the redraw up to the bench's frame mark, in parts (hitch log)
+                        let mut seg = Some(crate::bench::cpu("h1 input"));
                         if let (Some(rx), Some(sw)) = (livery_rx.as_ref(), livery.as_ref()) {
                             while let Ok(cmd) = rx.try_recv() {
                                 let mut it = cmd.splitn(2, ' ');
@@ -3937,6 +4002,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 }
                                 p.filter(&mut c, td);
                             }
+                            drop(seg.replace(crate::bench::cpu("h2 sim")));
                             let _t = crate::bench::cpu("car physics");
                             td.step(&c, dt);
                             if let Some(p) = opts.pits.as_mut() {
@@ -3961,8 +4027,11 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                     for job in m.new_cars() {
                                         net_job_tx.send(job).ok();
                                     }
-                                    while let Ok((n, model, res)) = net_done_rx.try_recv() {
-                                        let (mini, slot) = match res {
+                                    // one joiner a frame: each append is tens of ms
+                                    // (EVOVIEW_JOIN_ONE=0: every one that is ready)
+                                    let join_n = if crate::envc::var("EVOVIEW_JOIN_ONE").map_or(true, |v| v != "0") { 1 } else { usize::MAX };
+                                    for (n, model, res) in std::iter::from_fn(|| net_done_rx.try_recv().ok()).take(join_n) {
+                                        let (mini, slot, packed, built) = match res {
                                             Ok(x) => x,
                                             Err(e) => {
                                                 eprintln!("mp: car #{n}: {e}");
@@ -3971,11 +4040,30 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                             }
                                         };
                                         let t0 = std::time::Instant::now();
-                                        let prev = std::mem::take(&mut materials.textures);
-                                        let mut mm = Materials::build_reusing(&device, &queue, &mini, prev);
+                                        let t_mats = crate::bench::cpu("join mats");
+                                        let on_worker = built.is_some();
+                                        let mut mm = match built {
+                                            Some(m) => m,
+                                            None => {
+                                                let prev = std::mem::take(&mut materials.textures);
+                                                Materials::build_reusing(&device, &queue, &mini, prev)
+                                            }
+                                        };
                                         mm.set_light_state(&queue, materials.light_state);
-                                        let (mut nmeshes, _, _, _) = build_scene(&device, &mini, Some(&mm));
-                                        materials.textures = std::mem::take(&mut mm.textures);
+                                        drop(t_mats);
+                                        let t_scene = crate::bench::cpu("join scene");
+                                        let mut nmeshes = match packed {
+                                            Some(mut g) => {
+                                                resolve_materials(&mini, &mut g, &mm);
+                                                g
+                                            }
+                                            None => build_scene(&device, &mini, Some(&mm)).0,
+                                        };
+                                        drop(t_scene);
+                                        // (built on the worker: its cache is the scene's own map)
+                                        if !on_worker {
+                                            materials.textures = std::mem::take(&mut mm.textures);
+                                        }
                                         let off = materials.append(mm);
                                         let base = meshes.len();
                                         let mut to_gpu = vec![usize::MAX; mini.meshes.len()];
@@ -4549,6 +4637,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 }
                             }
                         }
+                        drop(seg.replace(crate::bench::cpu("h3 scene")));
                         // the replay rigs of the cars that can show, posed into
                         // their bone blocks and uploaded in one write
                         if let (Some(pb), false) = (opts.playback.as_ref(), pose_jobs.is_empty()) {
@@ -4777,6 +4866,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             lu.view_proj = view_proj.to_cols_array_2d();
                             fxg.set_late_camera(&queue, bytemuck::bytes_of(&lu));
                         }
+                        drop(seg.replace(crate::bench::cpu("h4 track")));
                         if let Some(t) = track.as_ref() {
                             {
                                 let _t = crate::bench::cpu("track update");
@@ -5071,6 +5161,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             (None, Some(t)) => t,
                             (None, None) => unreachable!(),
                         };
+                        drop(seg.replace(crate::bench::cpu("h5 encoder")));
                         let view = target.create_view(&Default::default());
                         let mut enc = device.create_command_encoder(&Default::default());
                         // command buffers finished before `enc`'s, in submit order
@@ -5079,6 +5170,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         // records the motion vectors (set up with the passes below)
                         let rec_motion;
                         let encode_t = crate::bench::cpu("encode");
+                        drop(seg.take());
                         if let Some(b) = bench.as_mut() {
                             b.begin(&mut enc);
                         }

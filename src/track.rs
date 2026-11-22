@@ -2440,7 +2440,7 @@ impl TrackRender {
         // The shared texture cache Materials::build filled (material::TexCache):
         // one GPU copy per (texture, sRGB), whoever binds it.
         let mut n_get = std::collections::HashSet::new();
-        let mut get = |i: Option<usize>, srgb: bool| -> Option<std::rc::Rc<wgpu::TextureView>> {
+        let mut get = |i: Option<usize>, srgb: bool| -> Option<std::sync::Arc<wgpu::TextureView>> {
             let i = i?;
             n_get.insert((i, srgb));
             materials.textures.get(device, queue, car, i, srgb)
@@ -2645,7 +2645,7 @@ impl TrackRender {
                 contents: bytemuck::bytes_of(&u),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
-            let view = |t: &Option<std::rc::Rc<wgpu::TextureView>>, d: &wgpu::TextureView| -> *const wgpu::TextureView {
+            let view = |t: &Option<std::sync::Arc<wgpu::TextureView>>, d: &wgpu::TextureView| -> *const wgpu::TextureView {
                 match t {
                     Some(r) => &**r as *const _,
                     None => d as *const _,

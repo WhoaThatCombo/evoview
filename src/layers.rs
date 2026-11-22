@@ -19,7 +19,7 @@
 //!           mapped layers (stock: Green oil + Blue noise on exhaust parts).
 
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 const BLIT_WGSL: &str = r#"
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -40,13 +40,13 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 const MAX_EDGE: u32 = 1024;
 
 pub struct LayerArrays {
-    white: Rc<wgpu::Texture>,
+    white: Arc<wgpu::Texture>,
     sampler: wgpu::Sampler,
     bgl: wgpu::BindGroupLayout,
     shader: wgpu::ShaderModule,
     pipes: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
     /// (source texture identities, srgb) -> resampled array
-    cache: HashMap<(Vec<usize>, bool), Rc<wgpu::Texture>>,
+    cache: HashMap<(Vec<usize>, bool), Arc<wgpu::Texture>>,
     /// arrays resampled, for the log
     pub resampled: u32,
     pub bytes: u64,
@@ -115,7 +115,7 @@ impl LayerArrays {
             source: wgpu::ShaderSource::Wgsl(BLIT_WGSL.into()),
         });
         LayerArrays {
-            white: Rc::new(white),
+            white: Arc::new(white),
             sampler,
             bgl,
             shader,
@@ -133,16 +133,16 @@ impl LayerArrays {
 
     /// One array holding `maps` in order (layer i = maps[i]).
     pub fn build(&mut self, device: &wgpu::Device, queue: &wgpu::Queue,
-                 maps: &[Rc<wgpu::Texture>], srgb: bool) -> wgpu::TextureView {
+                 maps: &[Arc<wgpu::Texture>], srgb: bool) -> wgpu::TextureView {
         match maps.len() {
             0 => self.white_view(),
             1 => array_view(&maps[0], 1),
             n => {
-                let key = (maps.iter().map(|t| Rc::as_ptr(t) as usize).collect::<Vec<_>>(), srgb);
+                let key = (maps.iter().map(|t| Arc::as_ptr(t) as usize).collect::<Vec<_>>(), srgb);
                 if let Some(t) = self.cache.get(&key) {
                     return array_view(t, n as u32);
                 }
-                let t = Rc::new(self.resample(device, queue, maps, srgb));
+                let t = Arc::new(self.resample(device, queue, maps, srgb));
                 self.cache.insert(key, t.clone());
                 array_view(&t, n as u32)
             }
@@ -186,7 +186,7 @@ impl LayerArrays {
     }
 
     fn resample(&mut self, device: &wgpu::Device, queue: &wgpu::Queue,
-                maps: &[Rc<wgpu::Texture>], srgb: bool) -> wgpu::Texture {
+                maps: &[Arc<wgpu::Texture>], srgb: bool) -> wgpu::Texture {
         use wgpu::util::DeviceExt;
         let w = maps.iter().map(|t| t.width()).max().unwrap_or(1).clamp(1, MAX_EDGE);
         let h = maps.iter().map(|t| t.height()).max().unwrap_or(1).clamp(1, MAX_EDGE);

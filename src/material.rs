@@ -259,12 +259,15 @@ pub fn is_driver(path_lower: &str) -> bool {
 ///
 /// `Materials::build` fills one and keeps it as `Materials::textures`, so
 /// any later pipeline (the track renderer) can bind the same copies.
-#[derive(Default)]
+///
+/// A clone is another handle on the same cache: a late joiner's materials,
+/// built on the "mp cars" worker, reuse (and add to) the scene's copies.
+#[derive(Default, Clone)]
 pub struct TexCache {
     #[allow(clippy::type_complexity)]
-    map: std::cell::RefCell<
-        HashMap<(TexKey, bool), Option<(std::rc::Rc<wgpu::Texture>, std::rc::Rc<wgpu::TextureView>)>>,
-    >,
+    map: std::sync::Arc<std::sync::Mutex<
+        HashMap<(TexKey, bool), Option<(std::sync::Arc<wgpu::Texture>, std::sync::Arc<wgpu::TextureView>)>>,
+    >>,
 }
 
 /// What identifies a texture's CONTENT, so a cache survives a reload of the
@@ -285,10 +288,14 @@ fn tex_key(car: &Car, idx: usize) -> TexKey {
 }
 
 impl TexCache {
+    #[allow(clippy::type_complexity)]
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<(TexKey, bool), Option<(std::sync::Arc<wgpu::Texture>, std::sync::Arc<wgpu::TextureView>)>>> {
+        self.map.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Vfs keys of every texture uploaded (see `Vfs::mark_resident`).
     pub fn resident_srcs(&self) -> Vec<String> {
-        self.map
-            .borrow()
+        self.lock()
             .iter()
             .filter(|(_, v)| v.is_some())
             .filter_map(|((k, _), _)| k.0.strip_prefix("s:").map(str::to_string))
@@ -304,7 +311,7 @@ impl TexCache {
         car: &Car,
         idx: usize,
         srgb: bool,
-    ) -> Option<std::rc::Rc<wgpu::TextureView>> {
+    ) -> Option<std::sync::Arc<wgpu::TextureView>> {
         self.entry(device, queue, car, idx, srgb).map(|e| e.1)
     }
 
@@ -316,7 +323,7 @@ impl TexCache {
         car: &Car,
         idx: usize,
         srgb: bool,
-    ) -> Option<std::rc::Rc<wgpu::Texture>> {
+    ) -> Option<std::sync::Arc<wgpu::Texture>> {
         self.entry(device, queue, car, idx, srgb).map(|e| e.0)
     }
 
@@ -327,19 +334,19 @@ impl TexCache {
         car: &Car,
         idx: usize,
         srgb: bool,
-    ) -> Option<(std::rc::Rc<wgpu::Texture>, std::rc::Rc<wgpu::TextureView>)> {
+    ) -> Option<(std::sync::Arc<wgpu::Texture>, std::sync::Arc<wgpu::TextureView>)> {
         let key = (tex_key(car, idx), srgb);
-        if let Some(v) = self.map.borrow().get(&key) {
+        if let Some(v) = self.lock().get(&key) {
             crate::perf::add("tex upload: shared", 0.0);
             return v.clone();
         }
         let t0 = std::time::Instant::now();
         let e = upload_texture(device, queue, car, idx, srgb).map(|t| {
-            let v = std::rc::Rc::new(t.create_view(&Default::default()));
-            (std::rc::Rc::new(t), v)
+            let v = std::sync::Arc::new(t.create_view(&Default::default()));
+            (std::sync::Arc::new(t), v)
         });
         crate::perf::add("tex upload: unique", t0.elapsed().as_secs_f64());
-        self.map.borrow_mut().insert(key, e.clone());
+        self.lock().insert(key, e.clone());
         e
     }
 }
@@ -379,10 +386,10 @@ fn upload_view(
     car: &Car,
     idx: usize,
     srgb: bool,
-) -> Option<std::rc::Rc<wgpu::TextureView>> {
+) -> Option<std::sync::Arc<wgpu::TextureView>> {
     BUILDING.with(|c| match c.borrow().as_ref() {
         Some(cache) => cache.get(device, queue, car, idx, srgb),
-        None => upload_texture(device, queue, car, idx, srgb).map(|t| std::rc::Rc::new(t.create_view(&Default::default()))),
+        None => upload_texture(device, queue, car, idx, srgb).map(|t| std::sync::Arc::new(t.create_view(&Default::default()))),
     })
 }
 
@@ -394,10 +401,10 @@ pub(crate) fn upload_rc(
     car: &Car,
     idx: usize,
     srgb: bool,
-) -> Option<std::rc::Rc<wgpu::Texture>> {
+) -> Option<std::sync::Arc<wgpu::Texture>> {
     BUILDING.with(|c| match c.borrow().as_ref() {
         Some(cache) => cache.texture(device, queue, car, idx, srgb),
-        None => upload_texture(device, queue, car, idx, srgb).map(std::rc::Rc::new),
+        None => upload_texture(device, queue, car, idx, srgb).map(std::sync::Arc::new),
     })
 }
 
@@ -842,13 +849,13 @@ thread_local! {
 
 thread_local! {
     /// `solid_view`'s views, by device and colour
-    static SOLID_VIEWS: std::cell::RefCell<HashMap<(wgpu::Id<wgpu::Device>, [u8; 4]), std::rc::Rc<wgpu::TextureView>>> = std::cell::RefCell::new(HashMap::new());
+    static SOLID_VIEWS: std::cell::RefCell<HashMap<(wgpu::Id<wgpu::Device>, [u8; 4]), std::sync::Arc<wgpu::TextureView>>> = std::cell::RefCell::new(HashMap::new());
 }
 
 /// `solid`, one shared view per colour (see `upload_view`).
-fn solid_view(device: &wgpu::Device, queue: &wgpu::Queue, rgba: [u8; 4]) -> std::rc::Rc<wgpu::TextureView> {
+fn solid_view(device: &wgpu::Device, queue: &wgpu::Queue, rgba: [u8; 4]) -> std::sync::Arc<wgpu::TextureView> {
     SOLID_VIEWS.with(|c| {
-        c.borrow_mut().entry((device.global_id(), rgba)).or_insert_with(|| std::rc::Rc::new(solid(device, queue, rgba))).clone()
+        c.borrow_mut().entry((device.global_id(), rgba)).or_insert_with(|| std::sync::Arc::new(solid(device, queue, rgba))).clone()
     })
 }
 
@@ -1107,7 +1114,7 @@ impl Materials {
         let mut dash_of: HashMap<usize, usize> = HashMap::new();
         // Paint detail maps are SHARED (flakes_NM sits on 60+ materials of one
         // car), so upload each once rather than once per material.
-        let mut detail_cache: HashMap<usize, std::rc::Rc<wgpu::TextureView>> = HashMap::new();
+        let mut detail_cache: HashMap<usize, std::sync::Arc<wgpu::TextureView>> = HashMap::new();
         let (mut n_pd_n, mut n_pd_cc, mut n_pd_ao) = (0u32, 0u32, 0u32);
 
         // Track materials are shaded by the track pipeline (track.rs), which
@@ -1451,12 +1458,12 @@ impl Materials {
                     && opacity_i.is_none() && detail_i.is_none());
             // Each splat layer's own colour and roughness maps (layer_map /
             // layer_rough_map), bound as two arrays (layers.rs).
-            let col_tex: Vec<Option<std::rc::Rc<wgpu::Texture>>> = ["Red", "Green", "Blue"]
+            let col_tex: Vec<Option<std::sync::Arc<wgpu::Texture>>> = ["Red", "Green", "Blue"]
                 .iter()
                 .map(|l| layer_map(m, l, &shader_l, &fname, splat_path)
                     .and_then(|i| upload_rc(device, queue, car, i, true)))
                 .collect();
-            let rough_tex: Vec<Option<std::rc::Rc<wgpu::Texture>>> = rough_layer_i
+            let rough_tex: Vec<Option<std::sync::Arc<wgpu::Texture>>> = rough_layer_i
                 .iter()
                 .map(|i| if splat_path || splat_i.is_some() {
                     i.and_then(|i| upload_rc(device, queue, car, i, false))
@@ -1923,8 +1930,8 @@ impl Materials {
             // colour keeps its sign (+ replace, - multiply); the shader
             // multiplies it by the map, so it carries only what the modulation
             // flag lets <Layer>_Basecolor contribute.
-            let mut col_maps: Vec<std::rc::Rc<wgpu::Texture>> = Vec::new();
-            let mut rough_maps: Vec<std::rc::Rc<wgpu::Texture>> = Vec::new();
+            let mut col_maps: Vec<std::sync::Arc<wgpu::Texture>> = Vec::new();
+            let mut rough_maps: Vec<std::sync::Arc<wgpu::Texture>> = Vec::new();
             for (li, l) in ["Red", "Green", "Blue"].iter().enumerate() {
                 let (mut xf, off, pbr, custom) = layer_uv_xf(m, l);
                 if let Some(t) = &col_tex[li] {
@@ -1966,7 +1973,7 @@ impl Materials {
                     dash_targets.push((pi, crate::fxgpu::dash_target(device, pg.width, pg.height)));
                     dash_targets.len() - 1
                 });
-                std::rc::Rc::new(dash_targets[k].1.create_view(&Default::default()))
+                std::sync::Arc::new(dash_targets[k].1.create_view(&Default::default()))
             } else {
                 crate::lights::emissive_slot(m, car_fx)
                     .and_then(|(i, srgb)| upload_view(device, queue, car, i, srgb))
