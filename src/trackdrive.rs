@@ -78,8 +78,10 @@ impl Ground {
             .map(|s| defs.iter().find(|d| d.id.eq_ignore_ascii_case(s)).map_or(false, |d| d.category == 2))
             .collect();
         let mut wall_tris = 0usize;
+        // (read once: it was one env lookup per triangle, 7.1 M on the Nordschleife)
+        let walls_as_ground = crate::envc::var_os("EVOVIEW_WALLS_AS_GROUND").is_some();
         for (ti, t) in c.tris.iter().enumerate() {
-            if crate::envc::var_os("EVOVIEW_WALLS_AS_GROUND").is_none() && c.tri_surf.get(ti).map_or(false, |&s| wall_surf.get(s as usize).copied().unwrap_or(false)) {
+            if !walls_as_ground && c.tri_surf.get(ti).map_or(false, |&s| wall_surf.get(s as usize).copied().unwrap_or(false)) {
                 wall_tris += 1;
                 continue;
             }
@@ -206,7 +208,7 @@ impl Ground {
         // the same triangles the grid keeps (no walls, nothing steep)
         let ode = crate::groundode::OdeGround::enabled().then(|| {
             let keep = |ti: usize| {
-                if crate::envc::var_os("EVOVIEW_WALLS_AS_GROUND").is_none() && c.tri_surf.get(ti).map_or(false, |&s| wall_surf.get(s as usize).copied().unwrap_or(false)) {
+                if !walls_as_ground && c.tri_surf.get(ti).map_or(false, |&s| wall_surf.get(s as usize).copied().unwrap_or(false)) {
                     return false;
                 }
                 let p = c.tris[ti].map(|i| Vec3::from(c.verts[i as usize]));
