@@ -828,6 +828,11 @@ impl Scene {
             };
             let mut t = crate::load::load_track_any(pkg, track, base).map_err(|e| format!("track {track}: {e}"));
             crate::perf::stamp("track loaded");
+            // said now: the error is returned once the car thread is done
+            // (the scope waits for it), 15 s or more with a full grid
+            if let Err(e) = &t {
+                eprintln!("could not load: {e} (finishing the car load first)");
+            }
             // the driving ground (one more thread) while the cars finish:
             // it needs only the colliders; the env comes back with it
             let ground_job = t.as_mut().ok().and_then(|t| t.car.track_env.take()).map(|e| std::thread::spawn(move || {
@@ -841,7 +846,18 @@ impl Scene {
                 None => race_cars(pkg, base, model, ai, own),
             };
             crate::perf::stamp("cars loaded");
-            Self::race_scene(t?, cars?, ground_job, model, track)
+            // (the cars failed: the ground thread is joined, not left
+            // detached holding the track's colliders)
+            let cars = match cars {
+                Ok(c) => c,
+                Err(e) => {
+                    if let Some(g) = ground_job {
+                        let _ = g.join();
+                    }
+                    return Err(t.err().unwrap_or(e));
+                }
+            };
+            Self::race_scene(t?, cars, ground_job, model, track)
         })
     }
 
@@ -910,9 +926,15 @@ impl Scene {
             }
         }
         for mut m in ai_materials {
-            for v in m.slots.values_mut() {
-                *v = to[*v];
-            }
+            // (a slot past its car's textures - possible with
+            // EVOVIEW_AI_SHARE_TEX=0's plain merge - is dropped, not a panic)
+            m.slots.retain(|_, v| match to.get(*v) {
+                Some(&j) => {
+                    *v = j;
+                    true
+                }
+                None => false,
+            });
             materials.push(m);
         }
         for mut m in ai_meshes {
