@@ -39,3 +39,10 @@ opt-level = 3
 [profile.release]
 lto = true
 codegen-units = 1
+
+# wgpu-core 22.1.0 with one change (vendor/wgpu-core/PATCH.md): Queue::submit
+# releases the command buffer registry before it walks what the command
+# buffers use, so the passes other threads begin meanwhile do not stall behind
+# the submit thread (src/submit.rs). Drop this and vendor/ when wgpu is upgraded.
+[patch.crates-io]
+wgpu-core = { path = "vendor/wgpu-core" }

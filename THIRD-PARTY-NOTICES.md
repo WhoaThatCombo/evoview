@@ -1,8 +1,8 @@
 # Third-party notices
 
-evoview links 219 Rust crates. Every one is used unmodified, under the licence
-shown. Nothing here is redistributed in source form; these are the obligations that
-travel with the compiled binary.
+evoview links 219 Rust crates, under the licence shown. Every one is used unmodified
+except `wgpu-core`, and nothing but `wgpu-core` is redistributed in source form (see
+"Vendored source"); these are the obligations that travel with the compiled binary.
 
 The Apache-2.0 entries are why this file exists: Apache-2.0 section 4(d) requires the
 attribution notice to be carried with any distribution, source or binary.
@@ -37,6 +37,15 @@ Regenerate with:
 ```
 cargo metadata --format-version 1 --all-features
 ```
+
+## Vendored source
+
+- `vendor/wgpu-core` is a patched copy of wgpu-core 22.1.0 (MIT OR Apache-2.0, the gfx-rs
+  developers; its `LICENSE.MIT` and `LICENSE.APACHE` are in the directory). One change,
+  in `src/device/queue.rs`, marked `evoview:`: `Queue::submit` takes its command buffers
+  out of the command buffer registry first and releases the registry before walking the
+  resources they use, instead of holding it throughout. `vendor/wgpu-core/PATCH.md`
+  explains it; `vendor/wgpu-core/evoview-submit-registry.diff` is the change alone.
 
 ## Techniques
 

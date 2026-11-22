@@ -1,0 +1,49 @@
+--- a/src/device/queue.rs
++++ b/src/device/queue.rs
+@@ -1066,7 +1066,29 @@
+             let mut submit_surface_textures_owned = FastHashMap::default();
+ 
+             {
+-                let mut command_buffer_guard = hub.command_buffers.write();
++                // evoview: the command buffers are taken out of the registry up front
++                // and the registry is let go. Upstream holds it for the whole loop
++                // below - the walk over everything the command buffers use,
++                // milliseconds with many resources - and every thread that begins a
++                // pass, makes or finishes an encoder or writes a timestamp meanwhile
++                // stalls behind it (evoview submits from a thread of its own while
++                // the frame's other passes are still being recorded: src/submit.rs).
++                // Nothing below uses the registry again; the ids stay taken (their
++                // entries are `Error`) until the caller drops them, as before.
++                // EVOVIEW_WGPU_SUBMIT_LOCK=1: held throughout, as upstream.
++                let (taken, _held_as_upstream) = {
++                    static HOLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++                    let hold = *HOLD.get_or_init(|| {
++                        std::env::var_os("EVOVIEW_WGPU_SUBMIT_LOCK").map_or(false, |v| v == "1")
++                    });
++                    let mut command_buffer_guard = hub.command_buffers.write();
++                    let taken: Vec<_> = command_buffer_ids
++                        .iter()
++                        .map(|&cmb_id| command_buffer_guard.replace_with_error(cmb_id))
++                        .collect();
++                    (taken, hold.then_some(command_buffer_guard))
++                };
++                let mut taken = taken.into_iter();
+ 
+                 if !command_buffer_ids.is_empty() {
+                     profiling::scope!("prepare");
+@@ -1078,13 +1100,14 @@
+                     // finish all the command buffers first
+                     for &cmb_id in command_buffer_ids {
+                         profiling::scope!("process command buffer");
++                        let taken_cmdbuf = taken.next().expect("one per id");
+ 
+                         // we reset the used surface textures every time we use
+                         // it, so make sure to set_size on it.
+                         used_surface_textures.set_size(device.tracker_indices.textures.size());
+ 
+                         #[allow(unused_mut)]
+-                        let mut cmdbuf = match command_buffer_guard.replace_with_error(cmb_id) {
++                        let mut cmdbuf = match taken_cmdbuf {
+                             Ok(cmdbuf) => cmdbuf,
+                             Err(_) => continue,
+                         };
