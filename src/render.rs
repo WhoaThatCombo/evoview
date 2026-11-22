@@ -2587,7 +2587,12 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     // SurfaceDefinitionData by id) its (grass, dirt) and "id/kind" for
     // EVOVIEW_FX_LOG. SurfaceType 3 grass, 1 extra turf, 4 sand; gravel /
     // dirt by name (also when the id has no definition).
-    let fx_ground: Option<(crate::trackdrive::Ground, Vec<((f32, f32), String)>)> = car.track_env.as_deref()
+    // Driving: the car's own ground (built from the same colliders and
+    // surface definitions), not a second Ground::new (~4 s of the load on
+    // the Nordschleife). EVOVIEW_FX_GROUND_SHARE=0: its own build, as before.
+    let share_ground = crate::envc::var("EVOVIEW_FX_GROUND_SHARE").map_or(true, |v| v != "0");
+    let drive_ground = opts.track_drive.as_ref().filter(|_| share_ground).map(|td| td.ground.clone());
+    let fx_ground: Option<(std::sync::Arc<crate::trackdrive::Ground>, Vec<((f32, f32), String)>)> = car.track_env.as_deref()
         .and_then(|e| e.collision.as_ref().map(|c| {
             let kinds = c.surfaces.iter().map(|s| {
                 // ⚠ untagged is NOT grass here: the Karussell's concrete
@@ -2609,7 +2614,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                 };
                 (gd, format!("{s}/{}", if kind == u32::MAX { "?".to_string() } else { kind.to_string() }))
             }).collect();
-            (crate::trackdrive::Ground::new(c, &e.surface_defs), kinds)
+            (drive_ground.unwrap_or_else(|| std::sync::Arc::new(crate::trackdrive::Ground::new(c, &e.surface_defs))), kinds)
         }));
     let surface_named = move |x: f32, z: f32, top: f32| -> ((f32, f32), String) {
         let Some((g, kinds)) = fx_ground.as_ref() else { return ((0.0, 0.0), "-".into()) };
