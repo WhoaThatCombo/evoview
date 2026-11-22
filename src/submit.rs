@@ -25,24 +25,20 @@
 //! render thread is still recording; the render thread only waits for the
 //! frame's last one.
 //!
-//! OFF BY DEFAULT (EVOVIEW_SUBMIT_THREAD=1 turns it on), because wgpu 22
-//! takes most of it back: a submit holds wgpu's command buffer registry for
-//! the whole walk, and beginning a pass, making or finishing an encoder and
-//! writing a timestamp all need that registry. The render thread's main pass
-//! is one long pass and does not care, but the post chain after it is dozens
-//! of short passes and stalls behind a walk in progress - and the heavy
-//! command buffers (the cars') are finished about when the main pass is.
-//! Measured, render thread encode + submit, off -> on (the frame is GPU
-//! bound in all four and does not change):
-//!   200 cars   9.5 -> 8.9 ms (submit 2.1 -> 0.2, encode 7.5 -> 8.7)
-//!   100 cars   7.1 -> 7.9    (1.1 -> 0.2, 6.0 -> 7.7)
-//!    23 cars   4.8 -> 5.3    (0.8 -> 0.1, 4.0 -> 5.2)
-//!   replay     2.6 -> 2.6
-//! It pays where the frame is CPU bound and the submit heavy (before the
-//! materials shared their texture views, 200 cars: frame 21.9 -> 18.1 ms),
-//! and it would pay everywhere with a wgpu whose submit lets go of the
-//! registry before its walk (tried with a patched wgpu-core 22.1, not
-//! shipped: 23 cars 4.7 -> 4.0, 200 cars 12.9 -> 10.1).
+//! It needs the wgpu-core in vendor/ (vendor/wgpu-core/PATCH.md). Upstream
+//! 22.1 holds its command buffer registry for a submit's whole walk, and
+//! beginning a pass, making or finishing an encoder and writing a timestamp
+//! all need that registry: the post chain's dozens of short passes stalled
+//! behind every walk and most of the gain came back as encode time (23 cars:
+//! encode + submit 4.8 -> 5.3 ms). The vendored copy releases the registry
+//! before the walk. Render thread encode + submit, one submit with upstream's
+//! locking -> this thread (the frames are GPU bound and do not change):
+//!   200 cars   7.6 -> 6.6 ms (submit 1.8 -> 0.5, encode 5.8 -> 6.1)
+//!   100 cars   6.0 -> 5.1    (1.2 -> 0.1, 4.8 -> 5.0)
+//!    23 cars   4.0 -> 3.6    (0.8 -> 0.2, 3.2 -> 3.4)
+//!   replay     2.4 -> 2.4
+//! EVOVIEW_SUBMIT_THREAD=0: one submit of everything by the render thread at
+//! the end of the frame.
 //!
 //! ⚠ `queue.write_buffer` data goes out with the NEXT submit, whichever
 //! thread makes it. With one submit a frame every write of a frame precedes
@@ -75,10 +71,10 @@ pub struct Submitter {
 }
 
 /// Whether the frame's command buffers go through the submit thread.
-/// EVOVIEW_SUBMIT_THREAD=1; off by default (see the module's notes).
+/// On unless EVOVIEW_SUBMIT_THREAD=0.
 pub fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| crate::envc::var("EVOVIEW_SUBMIT_THREAD").map_or(false, |v| v == "1"))
+    *ON.get_or_init(|| crate::envc::var("EVOVIEW_SUBMIT_THREAD").map_or(true, |v| v != "0"))
 }
 
 impl Submitter {
