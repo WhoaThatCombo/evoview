@@ -14,7 +14,7 @@
 //!   RB / LB      gear up / down   Start     pit menu     Back  leaderboard
 //!   d-pad        TC up / down (up / down), ABS up / down (right / left);
 //!                with the pit menu up it moves in the menu and A is OK
-//!   left stick click  starter     right stick click  back to the pits
+//!   left stick click  starter     right stick held  back to the pits
 //!
 //! Tunables: EVOVIEW_PAD_DEADZONE (0.10), EVOVIEW_PAD_GAMMA (1.4),
 //! EVOVIEW_PAD_TRIGGER_DEADZONE (0.03), EVOVIEW_PAD_BRAKE_GAMMA (1.0),
@@ -67,6 +67,23 @@ struct Vibration {
 
 type GetState = unsafe extern "system" fn(u32, *mut State) -> u32;
 type SetState = unsafe extern "system" fn(u32, *mut Vibration) -> u32;
+type GetCaps = unsafe extern "system" fn(u32, u32, *mut Caps) -> u32;
+
+/// XINPUT_CAPABILITIES
+#[repr(C)]
+#[derive(Default)]
+struct Caps {
+    kind: u8,
+    sub_type: u8,
+    flags: u16,
+    pad: Gamepad,
+    vib: [u16; 2],
+}
+
+/// XINPUT_DEVSUBTYPE_GAMEPAD; 0 = unknown (some third-party pads)
+fn is_gamepad(sub_type: u8) -> bool {
+    sub_type == 0 || sub_type == 1
+}
 
 /// The stick curve and trigger shaping.
 #[derive(Clone, Copy, Debug)]
@@ -209,6 +226,9 @@ pub struct Pad {
     _lib: libloading::Library,
     get: GetState,
     set: Option<SetState>,
+    caps: Option<GetCaps>,
+    /// right stick held this long (back to the pits needs a hold)
+    rs_held: f32,
     /// the connected slot, and when the slots were last scanned
     slot: Option<u32>,
     scan_in: f32,
@@ -233,10 +253,13 @@ impl Pad {
             })?.into();
             let get: GetState = *lib.get::<GetState>(b"XInputGetState").ok()?;
             let set: Option<SetState> = lib.get::<SetState>(b"XInputSetState").ok().map(|s| *s);
+            let caps: Option<GetCaps> = lib.get::<GetCaps>(b"XInputGetCapabilities").ok().map(|s| *s);
             let mut p = Pad {
                 _lib: lib,
                 get,
                 set,
+                caps,
+                rs_held: 0.0,
                 slot: None,
                 scan_in: 0.0,
                 scan_next: 0,
@@ -261,6 +284,14 @@ impl Pad {
         for i in slots {
             let mut s = State::default();
             if unsafe { (self.get)(i, &mut s) } == 0 {
+                // an Xbox-mode wheel (G920, TMX...) or a flight stick is an
+                // XInput device too: it is wheel.rs's, never the pad's
+                if let Some(caps) = self.caps {
+                    let mut c = Caps::default();
+                    if unsafe { caps(i, 0, &mut c) } == 0 && !is_gamepad(c.sub_type) {
+                        continue;
+                    }
+                }
                 self.slot = Some(i);
                 self.prev = s.pad.buttons;
                 println!("pad: controller {} connected (deadzone {:.2}, gamma {:.2}, rumble {:.2})", i + 1, self.shape.deadzone, self.shape.gamma, self.rumble);
@@ -286,8 +317,13 @@ impl Pad {
             self.sent = (0, 0);
             return None;
         }
-        let p = map(&s.pad, self.prev, menu, &self.shape);
+        let mut p = map(&s.pad, self.prev, menu, &self.shape);
         self.prev = s.pad.buttons;
+        // back to the pits: hold the right stick in for 0.8 s (a click is
+        // too easy to hit mid-corner)
+        let was = self.rs_held;
+        self.rs_held = if s.pad.buttons & RS != 0 { was + dt } else { 0.0 };
+        p.pit[7] = was < 0.8 && self.rs_held >= 0.8;
         if crate::envc::var_os("EVOVIEW_PAD_LOG").is_some() {
             self.log_in -= dt;
             if self.log_in <= 0.0 {

@@ -1956,7 +1956,7 @@ KEYS
            LT brake, A handbrake, RB / LB gear up / down, Y camera, X car lights,
            B pit limiter, Start pit menu (d-pad moves in it, A = OK), Back leaderboard,
            d-pad up / down TC, right / left ABS, left stick click starter,
-           right stick click back to the pits. Touch the pad and it drives; a
+           right stick held back to the pits. Touch the pad and it drives; a
            driving key hands the car back to the keyboard. Stick and arrow keys
            both steer through the grip-limit assist (EVOVIEW_PAD_ASSIST=0 /
            EVOVIEW_KEY_ASSIST=0: without)
