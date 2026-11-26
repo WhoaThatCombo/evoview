@@ -316,6 +316,15 @@ impl Sctm {
     }
 
     /// Peak friction at load (the game's D(Fz) = K Fz^ls / Fz).
+    /// tan of the slip angle where the lateral force peaks (nd = 1) at load
+    /// `fz` and grip `grip` - 1 / ky as `solve` builds it, without the
+    /// pressure, carcass-temperature and graining terms (a few per cent)
+    pub fn peak_tan(&self, fz: f32, grip: f32) -> f32 {
+        let dl = (fz - self.fz0) / self.fz0;
+        let gs = self.grip_slip_factor * (grip - 1.0) + 1.0;
+        ((self.tan_peak_loaded - self.tan_peak) * dl + self.tan_peak) * gs
+    }
+
     pub fn d_y(&self, fz: f32) -> f32 {
         if fz > 0.0 { fz.powf(self.ls_y) * self.ky / fz } else { 0.0 }
     }

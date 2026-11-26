@@ -569,7 +569,8 @@ pub struct Controls {
     pub analog: bool,
     /// a gamepad: `steer` is the stick after its deadzone and curve; the
     /// pedals are analog (set `analog` too), the steering goes through the
-    /// pad's own path instead of straight to the lock
+    /// pad's own path (rigid-body car: padassist.rs) instead of straight
+    /// to the lock
     pub pad: bool,
     /// clutch pedal 0 released .. 1 pressed; None = the car's own clutch
     /// (auto for launches) - the rigid-body car only
@@ -2308,6 +2309,10 @@ pub fn test_run(td: &mut TrackDrive, secs: f32, mut driver: Option<LineDriver>, 
         if let Some((rc, _)) = td.rig.as_mut() {
             if crate::envc::var_os("EVOVIEW_RIG_STEADY").is_some() {
                 crate::rigcar::steady_test(rc);
+                return;
+            }
+            if crate::envc::var_os("EVOVIEW_RIG_STICK").is_some() {
+                crate::rigcar::stick_test(rc);
                 return;
             }
             if crate::envc::var_os("EVOVIEW_RIG_DONUT").is_some() {

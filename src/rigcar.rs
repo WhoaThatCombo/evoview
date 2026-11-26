@@ -124,6 +124,8 @@ pub struct RigCar {
     pub water_flow: bool,
     /// whether this step's box ran automatic (the keyboard's brake-to-reverse)
     auto_now: bool,
+    /// a gamepad's steering (padassist.rs): only stepped for Controls::pad
+    pub pad_assist: crate::padassist::Assist,
     /// first paddle / H input switches an automatic box to manual
     pub manual: bool,
     /// the last H gate seen (engage on change only)
@@ -370,6 +372,7 @@ impl RigCar {
             auto_box: false,
             water_flow: true,
             auto_now: false,
+            pad_assist: crate::padassist::Assist::new(crate::padassist::Params::from_env()),
             manual: crate::envc::var_os("EVOVIEW_MANUAL").is_some(),
             h_prev: None,
             missed: false,
@@ -746,6 +749,9 @@ impl RigCar {
         let c = if crate::envc::var_os("EVOVIEW_RIG_IDLE").is_some() { &idle } else { c };
         let approach = |v: &mut f32, t: f32, rate: f32| *v += (t - *v).clamp(-rate * dt, rate * dt);
         self.hb = c.handbrake_v.unwrap_or(if c.handbrake { 1.0 } else { 0.0 });
+        if !c.pad {
+            self.pad_assist.rest();
+        }
         if c.analog {
             // pedals are pedals: no keyboard ramp
             self.thr = c.throttle;
@@ -758,10 +764,9 @@ impl RigCar {
             // the wheel turns the road wheels through the car's own ratio
             self.steer = (wd / self.steer_ratio).to_radians().clamp(-self.max_steer, self.max_steer);
         } else if c.pad {
-            // a stick: the keyboard's speed-scaled lock, no key ramp
-            let vx = self.speed().abs();
-            let speed_k = (1.0 / (1.0 + (vx / 25.0).powi(2))).max(0.25);
-            self.steer = c.steer.clamp(-1.0, 1.0) * self.max_steer * speed_k;
+            // a stick asks for front slip, not for an angle (padassist.rs)
+            let k = self.pad_kin();
+            self.steer = self.pad_assist.step(c.steer, &k, dt);
         } else if c.analog {
             self.steer = c.steer * self.max_steer;
         } else {
@@ -1849,6 +1854,41 @@ impl RigCar {
         self.t
     }
 
+    /// The front tyres' peak slip angle as they stand, rad: each tyre's own
+    /// (its load and the grip under it, sctm.rs peak_tan), weighted by load.
+    /// Off the road the model's peak collapses (grass: past it from the
+    /// first degree) - not below 0.6 of the nominal one, so a pad can still
+    /// steer there.
+    pub fn front_peak_slip(&self) -> f32 {
+        let Some(t) = self.tyre[0].as_ref() else { return 8f32.to_radians() };
+        let floor = t.tan_peak * 0.6;
+        let (mut sum, mut w) = (0.0, 0.0);
+        for c in &self.c[..2] {
+            if c.fz > 0.0 {
+                sum += t.peak_tan(c.fz, c.grip).max(floor) * c.fz;
+                w += c.fz;
+            }
+        }
+        let tan = if w > 0.0 { sum / w } else { t.tan_peak };
+        if tan.is_finite() { tan.atan().clamp(0.035, 0.35) } else { 8f32.to_radians() }
+    }
+
+    /// What the pad's steering reads from the car (padassist.rs).
+    pub fn pad_kin(&self) -> crate::padassist::Kin {
+        let zf = (self.anchor[0].z + self.anchor[1].z) * 0.5;
+        let zr = (self.anchor[2].z + self.anchor[3].z) * 0.5;
+        crate::padassist::Kin {
+            vx: self.v.dot(self.forward()),
+            vy: self.v.dot(self.left()),
+            r: self.w.dot(self.up()),
+            a: zf - self.cg_local.z,
+            b: self.cg_local.z - zr,
+            lock: self.max_steer,
+            peak: self.front_peak_slip(),
+            brake: self.brk,
+        }
+    }
+
     /// corner k's tyre radius (0 without a tyre model)
     pub fn radius(&self, k: usize) -> f32 {
         self.tyre[k / 2].map_or(0.0, |t| t.radius)
@@ -2524,4 +2564,193 @@ pub fn steady_test(rc: &mut RigCar) {
 fn diff_scale() -> f32 {
     static V: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_t("EVOVIEW_RIG_DIFF_SCALE", 1.0))
+}
+
+/// One scripted run of `stick_test`.
+struct StickRun {
+    name: &'static str,
+    kmh: f32,
+    secs: f32,
+    /// the stick over the run's time, -1 right .. +1 left
+    stick: fn(f32) -> f32,
+    /// a slide to start from: the body's slip angle (deg, nose left of the
+    /// path) and yaw rate (rad/s, + left)
+    slide: Option<(f32, f32)>,
+    /// the throttle over the run's time (None: hold the speed)
+    throttle: fn(f32) -> Option<f32>,
+    aids: bool,
+}
+
+/// `EVOVIEW_RIG_PAD=1 EVOVIEW_RIG_STICK=1 --drive-test 1`: a gamepad stick,
+/// scripted, on the flat pad - there is no human with a pad in a test run.
+/// Each trace is driven three ways: the raw stick (stick x full lock, what a
+/// pad is without help), the keyboard's path (rate limit + speed-scaled
+/// lock) and the pad assist (padassist.rs). Per run: the front tyres' slip
+/// against their peak, yaw rate, lateral g, the body's slip angle and
+/// whether the car spun (body slip past 45 deg).
+/// EVOVIEW_STICK_TRACE=<run name>: that run's assist trace every 0.1 s.
+pub fn stick_test(rc: &mut RigCar) {
+    use crate::padassist::{Assist, Params};
+    let g = flat_pad();
+    rc.auto_box = true;
+    let base = rc.pad_assist.p;
+    let (aids0, tc0) = (rc.abs_on, rc.tc_on);
+    #[derive(Clone, Copy)]
+    enum Mode {
+        Raw,
+        Keys,
+        Pad(Params),
+    }
+    let modes = stick_modes(base).into_iter().map(|(n, p)| (n, Mode::Pad(p)));
+    let modes: Vec<(&str, Mode)> = [("raw stick", Mode::Raw), ("keyboard", Mode::Keys)].into_iter().chain(modes).collect();
+    fn step_in(t: f32) -> f32 {
+        if t >= 0.5 { 1.0 } else { 0.0 }
+    }
+    // a thumb's slalom: 0.5 Hz, pushed to the stops
+    fn slalom(t: f32) -> f32 {
+        ((t * std::f32::consts::PI).sin() * 1.6).clamp(-1.0, 1.0)
+    }
+    fn hands_off(_: f32) -> f32 {
+        0.0
+    }
+    // the panic catch: full opposite stick for a second, then let go
+    fn overcorrect(t: f32) -> f32 {
+        if (0.15..1.15).contains(&t) { -1.0 } else { 0.0 }
+    }
+    // a thumb's twitch: a third of the stick for 0.4 s
+    fn twitch(t: f32) -> f32 {
+        if (0.5..0.9).contains(&t) { 0.33 } else { 0.0 }
+    }
+    // a corner exit: full stick, flat out from 1.5 to 3 s (aids off), then
+    // a lift and hands off
+    fn exit(t: f32) -> f32 {
+        if (0.5..3.0).contains(&t) { 1.0 } else { 0.0 }
+    }
+    fn hold(_: f32) -> Option<f32> {
+        None
+    }
+    fn trail(_: f32) -> Option<f32> {
+        Some(0.15)
+    }
+    fn exit_thr(t: f32) -> Option<f32> {
+        Some(if (1.5..3.0).contains(&t) { 1.0 } else { 0.2 })
+    }
+    // EVOVIEW_STICK_SLIDE="deg,rad/s": the slide runs' start
+    let sl = crate::envc::var("EVOVIEW_STICK_SLIDE").ok().and_then(|s| { let (a, b) = s.split_once(',')?; Some((a.trim().parse::<f32>().ok()?, b.trim().parse::<f32>().ok()?)) }).unwrap_or((25.0, 0.8));
+    let runs = [
+        StickRun { name: "step100", kmh: 100.0, secs: 5.0, stick: step_in, slide: None, throttle: hold, aids: true },
+        StickRun { name: "step200", kmh: 200.0, secs: 5.0, stick: step_in, slide: None, throttle: hold, aids: true },
+        StickRun { name: "twitch200", kmh: 200.0, secs: 3.0, stick: twitch, slide: None, throttle: hold, aids: true },
+        StickRun { name: "slalom100", kmh: 100.0, secs: 8.0, stick: slalom, slide: None, throttle: hold, aids: true },
+        StickRun { name: "slalom160", kmh: 160.0, secs: 8.0, stick: slalom, slide: None, throttle: hold, aids: true },
+        StickRun { name: "slide-handsoff", kmh: 100.0, secs: 6.0, stick: hands_off, slide: Some(sl), throttle: trail, aids: true },
+        StickRun { name: "slide-overcorrect", kmh: 100.0, secs: 6.0, stick: overcorrect, slide: Some(sl), throttle: trail, aids: true },
+        StickRun { name: "exit-power", kmh: 70.0, secs: 7.0, stick: exit, slide: None, throttle: exit_thr, aids: false },
+    ];
+    // EVOVIEW_STICK_ONLY=<name,name>: just those runs
+    let only = crate::envc::var("EVOVIEW_STICK_ONLY").ok();
+    let trace = crate::envc::var("EVOVIEW_STICK_TRACE").ok();
+    println!("STICK car {} lock {:.1} deg, front peak slip {:.2} deg at rest; assist {:?}", rc.source(), rc.max_steer.to_degrees(), rc.front_peak_slip().to_degrees(), base);
+    for sc in &runs {
+        if only.as_ref().map_or(false, |o| !o.split(',').any(|n| n == sc.name)) {
+            continue;
+        }
+        println!("STICK {} ({:.0} km/h{}):", sc.name, sc.kmh, sc.slide.map_or(String::new(), |s| format!(", from a {:.0} deg slide yawing {:+.1} rad/s", s.0, s.1)));
+        for (mname, mode) in &modes {
+            let mut acc = 0.0;
+            rc.place(Vec3::new(0.0, 0.0, -1800.0), 0.0);
+            rc.abs_on = aids0 && sc.aids;
+            rc.tc_on = tc0 && sc.aids;
+            rc.pad_assist = Assist::new(match mode {
+                Mode::Pad(p) => *p,
+                _ => Params { on: false, ..base },
+            });
+            for _ in 0..(1.0 / DT) as usize {
+                rc.step(&Controls { brake: 1.0, ..Default::default() }, DT, &g, &mut acc);
+            }
+            let v0 = sc.kmh / 3.6;
+            rc.roll(v0);
+            let mut i_err = 0.0f32;
+            let mut drive = |rc: &mut RigCar, stick: f32, thr: Option<f32>, acc: &mut f32| {
+                let err = v0 - rc.v.length();
+                i_err = (i_err + err * DT).clamp(-2.0, 2.0);
+                let throttle = thr.unwrap_or((0.3 + err * 0.4 + i_err * 0.3).clamp(0.0, 1.0));
+                let c = match mode {
+                    // the arrow keys: all or nothing
+                    Mode::Keys => Controls { throttle, steer: if stick.abs() > 0.3 { stick.signum() } else { 0.0 }, ..Default::default() },
+                    _ => Controls { throttle, steer: stick, analog: true, pad: true, ..Default::default() },
+                };
+                rc.step(&c, DT, &g, acc);
+            };
+            // a second straight at speed, then the slide if there is one
+            for _ in 0..(1.0 / DT) as usize {
+                drive(rc, 0.0, None, &mut acc);
+            }
+            if let Some((beta, r)) = sc.slide {
+                rc.v = Quat::from_axis_angle(rc.up(), -beta.to_radians()) * rc.v;
+                rc.w = rc.up() * r;
+            }
+            let n = (sc.secs / DT) as usize;
+            // peaks, the last 2 s' means, and when things happened
+            let (mut a_pk, mut r_pk, mut ay_pk, mut beta_pk, mut st_pk) = (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            let (mut a_sum, mut ay_sum, mut r_sum, mut cnt) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            let (mut t_06, mut calm_since, mut spun, mut flips, mut beta_last) = (None::<f32>, None::<f32>, false, 0u32, 0.0f32);
+            for i in 0..n {
+                let t = i as f32 * DT;
+                drive(rc, (sc.stick)(t), (sc.throttle)(t), &mut acc);
+                let fz = rc.c[0].fz + rc.c[1].fz;
+                let alpha = if fz > 0.0 { (rc.c[0].alpha.abs() * rc.c[0].fz + rc.c[1].alpha.abs() * rc.c[1].fz) / fz } else { 0.0 };
+                let ratio = alpha / rc.front_peak_slip();
+                let r = rc.w.dot(rc.up());
+                let ay = rc.v.length() * r / G;
+                let beta = (-rc.v.dot(rc.left())).atan2(rc.v.dot(rc.forward())).to_degrees();
+                a_pk = a_pk.max(ratio);
+                r_pk = r_pk.max(r.abs());
+                ay_pk = ay_pk.max(ay.abs());
+                beta_pk = beta_pk.max(beta.abs());
+                st_pk = st_pk.max(rc.steer.abs());
+                spun |= beta.abs() > 45.0;
+                if beta * beta_last < 0.0 && beta.abs() > 0.5 {
+                    flips += 1;
+                }
+                if beta.abs() > 0.5 {
+                    beta_last = beta;
+                }
+                if t_06.is_none() && ay.abs() >= 0.6 {
+                    t_06 = Some(t);
+                }
+                // settled: going straight (slip under 2 deg, yaw under 3 deg/s) for good
+                if beta.abs() < 2.0 && r.abs() < 3f32.to_radians() {
+                    calm_since.get_or_insert(t);
+                } else {
+                    calm_since = None;
+                }
+                if t >= sc.secs - 2.0 {
+                    a_sum += ratio;
+                    ay_sum += ay.abs();
+                    r_sum += r.abs();
+                    cnt += 1.0;
+                }
+                if trace.as_deref() == Some(sc.name) && matches!(mode, Mode::Pad(_)) && i % 33 == 0 {
+                    println!("STICKTRACE {mname} t {t:5.2} stick {:+.2} steer {:+6.2} deg (limit {:5.2}, fade {:.2}) v {:5.1} r {:+6.1} deg/s ay {:+.2} g beta {:+6.1} front alpha/peak {:.2} thr {:.2}",
+                        (sc.stick)(t), rc.steer.to_degrees(), rc.pad_assist.dbg.0.to_degrees(), rc.pad_assist.dbg.1, rc.v.length() * 3.6, r.to_degrees(), ay, beta, ratio, rc.thr);
+                }
+            }
+            let stepped = sc.name.starts_with("step");
+            println!("STICK   {mname:<12} front slip/peak max {a_pk:5.2} end {:5.2} | yaw max {:5.1} end {:5.1} deg/s | lat max {ay_pk:.2} end {:.2} g{} | body slip max {beta_pk:5.1} deg, {flips} swings | steer max {:5.1} deg | end {:5.1} km/h | {}{}",
+                a_sum / cnt, r_pk.to_degrees(), (r_sum / cnt).to_degrees(), ay_sum / cnt,
+                if stepped { format!(" | 0.6 g after {}", t_06.map_or("  -   ".to_string(), |t| format!("{:.2} s", t - 0.5))) } else { String::new() },
+                st_pk.to_degrees(), rc.v.length() * 3.6,
+                if spun { "SPUN" } else { "ok" },
+                calm_since.filter(|_| !spun && !stepped && !sc.name.starts_with("slalom")).map_or(String::new(), |t| format!(", straight again at {t:.2} s")));
+        }
+    }
+    rc.abs_on = aids0;
+    rc.tc_on = tc0;
+    rc.pad_assist = Assist::new(base);
+}
+
+/// The pad-assist variants `stick_test` compares.
+fn stick_modes(base: crate::padassist::Params) -> Vec<(&'static str, crate::padassist::Params)> {
+    vec![("pad assist", base)]
 }
