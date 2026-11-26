@@ -3,9 +3,9 @@
 //! crate, no import library. DirectInput is a poor fit for a pad: the two
 //! triggers share one axis and there is no rumble.
 //!
-//! The first connected pad drives. Polled once a frame; while none is
-//! connected the four slots are only looked at every two seconds (asking an
-//! empty slot is the slow call). `EVOVIEW_PAD=0` turns the whole thing off.
+//! The first connected pad drives. Polled once a frame (~4 us); while none
+//! is connected one slot is asked every half second, in turn (an empty slot
+//! is the slow call, ~0.2 ms). `EVOVIEW_PAD=0` turns the whole thing off.
 //!
 //! The mapping (also in render.rs KEYS):
 //!   left stick   steer            RT / LT   throttle / brake (analog)
@@ -180,6 +180,31 @@ fn map(g: &Gamepad, prev: u16, menu: bool, s: &Shape) -> PadInput {
     p
 }
 
+/// The two motors (low-frequency left, high-frequency right), 0..1, from
+/// the road effects' inputs (rigcar's FxIn, the same data the wheel's FFB
+/// effects use): tyre slip on the light motor - a faint buzz from half the
+/// peak slip, strong past it; kerbs, bumps and the ABS pulse on the heavy
+/// one. `t`: seconds, for the ABS pulse.
+pub fn rumble(fx: &crate::ffb::FxIn, strength: f32, t: f64) -> (f32, f32) {
+    if strength <= 0.0 {
+        return (0.0, 0.0);
+    }
+    // as the wheel's effects: nothing at a standstill, in from 0.5 to 1.5 m/s
+    let fade = (fx.speed - 0.5).clamp(0.0, 1.0);
+    let x = ((fx.nd - 0.5) / 0.5).clamp(0.0, 1.0);
+    let slip = if x > 0.0 { x.powi(4) * 0.95 + 0.05 } else { 0.0 };
+    let kerb = (fx.kerb.0 * 2.5).clamp(0.0, 1.0);
+    // a landing or a pothole: past 0.3 g of vertical jolt
+    let bump = ((fx.up_g.abs() - 0.3) * 0.8).clamp(0.0, 1.0);
+    // ABS: the wheel effect's ~15.5 Hz square wave, here on / off
+    let abs = if fx.abs && (t * 1000.0 / 10.2775).sin() > 0.0 { 0.7 } else { 0.0 };
+    let lo = (kerb.max(bump) * fade).max(abs * fx.speed.clamp(0.0, 1.0));
+    let hi = slip * fade;
+    let k = strength.min(1.0);
+    let ok = |v: f32| if v.is_finite() { (v * k).clamp(0.0, 1.0) } else { 0.0 };
+    (ok(lo), ok(hi))
+}
+
 pub struct Pad {
     _lib: libloading::Library,
     get: GetState,
@@ -187,6 +212,7 @@ pub struct Pad {
     /// the connected slot, and when the slots were last scanned
     slot: Option<u32>,
     scan_in: f32,
+    scan_next: u32,
     prev: u16,
     pub shape: Shape,
     /// EVOVIEW_PAD_RUMBLE, 0..1
@@ -213,6 +239,7 @@ impl Pad {
                 set,
                 slot: None,
                 scan_in: 0.0,
+                scan_next: 0,
                 prev: 0,
                 shape: Shape::from_env(),
                 rumble: env("EVOVIEW_PAD_RUMBLE", 0.4).clamp(0.0, 1.0),
@@ -224,9 +251,14 @@ impl Pad {
         }
     }
 
+    /// Look for a pad: all four slots at start, then one slot every half
+    /// second in turn - asking an empty slot takes ~0.2 ms, four at once
+    /// would be a hitch in that frame.
     fn scan(&mut self) {
-        self.scan_in = 2.0;
-        for i in 0..4 {
+        self.scan_in = 0.5;
+        let slots = if self.scan_next == 0 { 0..4 } else { let i = self.scan_next % 4; i..i + 1 };
+        self.scan_next = self.scan_next % 4 + 1;
+        for i in slots {
             let mut s = State::default();
             if unsafe { (self.get)(i, &mut s) } == 0 {
                 self.slot = Some(i);
@@ -250,7 +282,7 @@ impl Pad {
         if unsafe { (self.get)(slot, &mut s) } != 0 {
             println!("pad: controller {} disconnected", slot + 1);
             self.slot = None;
-            self.scan_in = 2.0;
+            self.scan_in = 0.5;
             self.sent = (0, 0);
             return None;
         }
@@ -363,5 +395,54 @@ mod tests {
         let p = map(&g, 0, true, &s);
         assert_eq!(p.aids, [0, 0, 0]);
         assert!(p.pit[2] && p.pit[4] && p.pit[6] && !p.handbrake);
+    }
+
+    #[test]
+    fn rumble_levels() {
+        use crate::ffb::FxIn;
+        // gripping on smooth road: silent
+        assert_eq!(rumble(&FxIn { speed: 30.0, nd: 0.4, ..Default::default() }, 0.4, 0.0), (0.0, 0.0));
+        // near the limit a faint buzz, past it the full strength, light motor only
+        let (lo, near) = rumble(&FxIn { speed: 30.0, nd: 0.6, ..Default::default() }, 0.4, 0.0);
+        let (_, over) = rumble(&FxIn { speed: 30.0, nd: 1.3, ..Default::default() }, 0.4, 0.0);
+        assert!(lo == 0.0 && near > 0.0 && near < 0.05 && (over - 0.4).abs() < 1e-6, "{near} {over}");
+        // a kerb on the heavy motor; nothing standing still
+        let (lo, hi) = rumble(&FxIn { speed: 30.0, kerb: (0.3, 0.5), ..Default::default() }, 0.4, 0.0);
+        assert!(lo > 0.25 && hi == 0.0);
+        assert_eq!(rumble(&FxIn { speed: 0.0, nd: 2.0, kerb: (0.3, 0.5), ..Default::default() }, 0.4, 0.0), (0.0, 0.0));
+        // ABS pulses; strength 0 and NaN are silent
+        let on = (0..100).filter(|i| rumble(&FxIn { speed: 30.0, abs: true, ..Default::default() }, 1.0, *i as f64 * 0.005).0 > 0.0).count();
+        assert!(on > 30 && on < 70, "{on}");
+        assert_eq!(rumble(&FxIn { speed: 30.0, nd: 2.0, ..Default::default() }, 0.0, 0.0), (0.0, 0.0));
+        assert_eq!(rumble(&FxIn { speed: f32::NAN, nd: f32::NAN, ..Default::default() }, 0.4, 0.0), (0.0, 0.0));
+    }
+
+    /// `cargo test pad_poll_cost -- --ignored --nocapture`: what a frame
+    /// pays for the pad (one XInputGetState; with none connected, a scan of
+    /// the four slots every 2 s). Works with or without a pad attached.
+    #[test]
+    #[ignore]
+    fn pad_poll_cost() {
+        let Some(mut p) = Pad::open() else {
+            println!("pad: XInput not available or EVOVIEW_PAD=0");
+            return;
+        };
+        let n = 2000;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(p.read(1.0 / 120.0, false));
+        }
+        let per = t.elapsed().as_secs_f64() / n as f64;
+        // each slot on its own: an empty one is the slow call
+        let slots: Vec<String> = (0..4).map(|i| {
+            let mut s = State::default();
+            let t = std::time::Instant::now();
+            let mut hr = 0;
+            for _ in 0..200 {
+                hr = unsafe { (p.get)(i, &mut s) };
+            }
+            format!("{} {:.1} us", if hr == 0 { "pad" } else { "empty" }, t.elapsed().as_secs_f64() / 200.0 * 1e6)
+        }).collect();
+        println!("pad: connected {}, read {:.2} us a frame; XInputGetState per slot: {} (one is asked every 0.5 s while no pad is connected)", p.slot.is_some(), per * 1e6, slots.join(", "));
     }
 }

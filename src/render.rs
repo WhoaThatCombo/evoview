@@ -2009,6 +2009,7 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     };
     // the pad has the car (it was touched last; a driving key takes it back)
     let mut pad_drives = false;
+    let mut pad_t = 0.0f64;
     let mut ffb = crate::ffb::Ffb::default();
     let mut kb_prev = [false; 3];
     // the last cockpit-aid press, for the HUD pop-up (aids.rs); and the
@@ -4179,6 +4180,15 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             drop(seg.replace(crate::bench::cpu("h2 sim")));
                             let _t = crate::bench::cpu("car physics");
                             td.step(&c, dt);
+                            // the pad's motors: tyre slip, kerbs, bumps, ABS (pad.rs)
+                            if let Some(p) = pad.as_mut() {
+                                pad_t += dt as f64;
+                                let (lo, hi) = match td.rig.as_ref() {
+                                    Some((rc, _)) if pad_drives => crate::pad::rumble(&rc.fx_in, p.rumble, pad_t),
+                                    _ => (0.0, 0.0),
+                                };
+                                p.vibrate(lo, hi);
+                            }
                             if let Some(p) = opts.pits.as_mut() {
                                 p.update(td, dt);
                             }

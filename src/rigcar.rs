@@ -210,6 +210,8 @@ pub struct RigCar {
     /// the FFB's road effects (kerb, bump, slip, ABS), per physics step,
     /// and the velocity a step ago for the bump channel's vertical g
     pub ffb_fx: crate::ffb::Effects,
+    /// what the effects were stepped with last (a gamepad's rumble reads it)
+    pub fx_in: crate::ffb::FxIn,
     fx_v: Vec3,
     ffb_fz: bool,
     /// camber change per metre of bump, rad (Geometry::camber_gain)
@@ -446,6 +448,7 @@ impl RigCar {
             tc: p.tc.clone().filter(|_| crate::envc::var_os("EVOVIEW_NO_TC").is_none()),
             abs_on: true,
             ffb_fx: Default::default(),
+            fx_in: Default::default(),
             fx_v: Vec3::ZERO,
             tc_on: true,
             tc_mult: 1.0,
@@ -741,6 +744,7 @@ impl RigCar {
                 }
             }
             self.ffb_fx.step(&fi, DT);
+            self.fx_in = fi;
         }
     }
 
