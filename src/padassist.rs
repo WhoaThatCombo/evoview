@@ -34,7 +34,7 @@
 //!                                  follows it one to one (below: softened;
 //!                                  AGA: 72)
 //!   EVOVIEW_PAD_SELF_FILTER  0.04  the self-steer's smoothing, s (AGA: ~0.1)
-//!   EVOVIEW_PAD_REAR_GUARD   1.5   degrees of lock given up per degree the
+//!   EVOVIEW_PAD_REAR_GUARD   2.5   degrees of lock given up per degree the
 //!                                  rear slides past its own peak (0 = off)
 //!   EVOVIEW_PAD_LEAD         0.2   how far ahead, s, the slide is read (its
 //!                                  angle + its rate x this; 0 = as it is)
@@ -111,7 +111,7 @@ pub struct Params {
 
 impl Default for Params {
     fn default() -> Self {
-        Params { on: true, target: 0.95, filter: 0.15, dynamic: 0.575, self_steer: 0.37, damping: 0.37, self_max: 90.0, counter: 0.2, rear_guard: 1.5, self_knee: 30.0, lead: 0.2, self_filter: 0.04 }
+        Params { on: true, target: 0.95, filter: 0.15, dynamic: 0.575, self_steer: 0.37, damping: 0.37, self_max: 90.0, counter: 0.2, rear_guard: 2.5, self_knee: 30.0, lead: 0.2, self_filter: 0.04 }
     }
 }
 
@@ -562,12 +562,12 @@ mod tests {
         let mut a = Assist::default();
         let mut b = Assist::new(Params { rear_guard: 0.0, ..Default::default() });
         assert!((settle(&mut a, 1.0, &k, 2.0) - settle(&mut b, 1.0, &k, 2.0)).abs() < 1e-6);
-        // 4 deg past it: 1.5 x 4 = 6 deg less than the 7.6 x 0.425 floor -
+        // 4 deg past it: 2.5 x 4 = 10 deg less than the 7.6 x 0.425 floor -
         // through zero into opposite lock, with the stick still held left
         let k = sliding(12.0, 0.0);
         let mut a = Assist::default();
         let out = settle(&mut a, 1.0, &k, 2.0).to_degrees();
-        assert!((out - (7.6 * 0.425 - 6.0)).abs() < 0.05, "{out}");
+        assert!((out - (7.6 * 0.425 - 10.0)).abs() < 0.05, "{out}");
         // mirrored
         let k = sliding(-12.0, 0.0);
         let mut a = Assist::default();
