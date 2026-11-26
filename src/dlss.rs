@@ -38,7 +38,9 @@ pub fn quality() -> (i32, f32) {
         "balanced" => (1, 0.58),
         "performance" | "perf" => (0, 0.5),
         "ultraperformance" | "ultra_performance" => (3, 0.333),
-        "ultraquality" => (4, 0.77),
+        // NVIDIA's own UltraQuality value is refused by current drivers
+        // (CreateFeature 0xbad00010): Quality's model at a 77 % render size
+        "ultraquality" => (2, 0.77),
         _ => (2, 0.667),
     }
 }
@@ -733,13 +735,9 @@ impl Dlss {
 /// crashed on the way out.
 impl Drop for Dlss {
     fn drop(&mut self) {
-        unsafe {
-            let _ = self.ash_dev.device_wait_idle();
-            if let Some(f) = self.feature.take() {
-                ffi::NVSDK_NGX_VULKAN_ReleaseFeature(f.handle);
-            }
-            ffi::NVSDK_NGX_VULKAN_DestroyParameters(self.params);
-            ffi::NVSDK_NGX_VULKAN_Shutdown1(self.raw_device);
-        }
+        // ⚠ nothing: Dlss only goes away at exit (a failure keeps it,
+        // render.rs), when the wgpu device may already be destroyed - NGX
+        // Shutdown on it segfaulted on every exit. The process exit frees
+        // it all.
     }
 }

@@ -1336,6 +1336,10 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
     crate::perf::stamp("opponents' physics, spawn");
     println!("{car_id} on {track}: spawned at ({:.1}, {:.1}, {:.1}) heading {:.0} deg, {:.1}s",
              td.pos.x, td.pos.y, td.pos.z, yaw.to_degrees(), t0.elapsed().as_secs_f32());
+    if mp.is_some() {
+        println!("mp: our car's origin is {:.3} m over its wheel centres (what the server is sent)",
+                 -td.slot.centres.iter().map(|c| c.y).sum::<f32>() / 4.0);
+    }
     // the pit lane, its rules and the car's pit data (pits.rs)
     let mut pits = phys_pits.as_ref().map(|p| {
         let mut car = pits::PitCar::load(&mut car_vfs, p);

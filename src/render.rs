@@ -6368,7 +6368,11 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 if let Some(b) = bench.as_mut() { b.mark(&mut enc, "dlss"); }
                             }
                             if !ext_ok && dlss.is_some() {
-                                dlss = None;
+                                // never shut NGX down here: this frame's
+                                // encoder still holds its recorded calls, and
+                                // Shutdown under them crashed in _nvngx.dll.
+                                // Kept alive (unused) until exit instead.
+                                std::mem::forget(dlss.take());
                                 t.reset();
                             }
                             // FSR, the same way

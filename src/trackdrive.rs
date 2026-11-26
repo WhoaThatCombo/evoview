@@ -839,9 +839,27 @@ impl TrackDrive {
         // the game sends the car's centre of mass, not its ground point
         // (players' cars measured 0.35-0.55 m over the road): ours sent
         // at road level stood half sunk into the track in their game
-        let cg = self.rig.as_ref().map_or(0.42, |(rc, _)| rc.cg_height().clamp(0.2, 0.8));
+        // ⚠ CORRECTED: it is the car MODEL's origin, which sits a per-car
+        // offset above the wheel centres (game replays: RX-8 0.10 m, M4 GT3
+        // 0.04, 296 0.03), not the centre of mass: the CG estimate put a
+        // converted RX-8 ~0.1 m into the road in other players' games
+        let n = self.slot.centres.len().max(1) as f32;
+        let above = -self.slot.centres.iter().map(|c| c.y).sum::<f32>() / n;
+        let mid = self.wheels.iter().copied().sum::<Vec3>() / 4.0;
+        let fwd = (self.wheels[0] + self.wheels[1] - self.wheels[2] - self.wheels[3]).normalize_or_zero();
+        let side = (self.wheels[0] - self.wheels[1] + self.wheels[2] - self.wheels[3]).normalize_or_zero();
+        let mut up = fwd.cross(side).normalize_or_zero();
+        if up.y < 0.0 {
+            up = -up;
+        }
+        if up.y < 0.5 {
+            up = Vec3::Y;
+        }
+        let pos = if mid.is_finite() && mid != Vec3::ZERO { mid + up * above } else {
+            self.pos + Vec3::Y * self.rig.as_ref().map_or(0.42, |(rc, _)| rc.cg_height().clamp(0.2, 0.8))
+        };
         crate::mp::CarState {
-            pos: self.pos + Vec3::Y * cg,
+            pos,
             ypr: Vec3::new(-self.yaw, self.pitch, -self.roll),
             vel: self.vel(),
             rpm: self.rpm.max(0.0) as u16,
