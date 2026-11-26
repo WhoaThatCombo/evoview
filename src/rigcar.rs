@@ -757,6 +757,11 @@ impl RigCar {
         if let Some(wd) = c.wheel_deg {
             // the wheel turns the road wheels through the car's own ratio
             self.steer = (wd / self.steer_ratio).to_radians().clamp(-self.max_steer, self.max_steer);
+        } else if c.pad {
+            // a stick: the keyboard's speed-scaled lock, no key ramp
+            let vx = self.speed().abs();
+            let speed_k = (1.0 / (1.0 + (vx / 25.0).powi(2))).max(0.25);
+            self.steer = c.steer.clamp(-1.0, 1.0) * self.max_steer * speed_k;
         } else if c.analog {
             self.steer = c.steer * self.max_steer;
         } else {

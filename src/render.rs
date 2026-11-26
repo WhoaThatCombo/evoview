@@ -1952,6 +1952,12 @@ KEYS
   aids     (track drive) Numpad 7/1 TC up/down, 8/2 ABS up/down, 9/3 brake
            bias front/rear; T / A switch TC / ABS off. Wheel: the game's own
            buttons, or --wheel-setup tc_up tc_down abs_up abs_down bias_up bias_down
+  pad      (track drive, XInput; EVOVIEW_PAD=0 off) left stick steer, RT throttle,
+           LT brake, A handbrake, RB / LB gear up / down, Y camera, X car lights,
+           B pit limiter, Start pit menu (d-pad moves in it, A = OK), Back leaderboard,
+           d-pad up / down TC, right / left ABS, left stick click starter,
+           right stick click back to the pits. Touch the pad and it drives; a
+           driving key hands the car back to the keyboard
   effects  F1 this list, F2 night, F3 bloom, F4 dirt 0 / 0.5 / 1, F5 wet,
            F6 brake-disc temperature, F7 backfire, F8 tyre smoke, F9 dust,
            F10 indicators (off / left / right / hazard), F11 rain / fog light,
@@ -1994,6 +2000,15 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     } else {
         None
     };
+    // a gamepad (pad.rs): only for a car someone drives - not in a bench or a
+    // scripted drive, and a configured wheel keeps the car (EVOVIEW_PAD=0: off)
+    let mut pad = if opts.track_drive.is_some() && wheel.is_none() && opts.bench.is_none() && opts.line_driver.is_none() {
+        crate::pad::Pad::open()
+    } else {
+        None
+    };
+    // the pad has the car (it was touched last; a driving key takes it back)
+    let mut pad_drives = false;
     let mut ffb = crate::ffb::Ffb::default();
     let mut kb_prev = [false; 3];
     // the last cockpit-aid press, for the HUD pop-up (aids.rs); and the
@@ -3041,6 +3056,9 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                         if let Some(w) = wheel.as_mut() {
                             w.zero_force();
                         }
+                        if let Some(p) = pad.as_mut() {
+                            p.stop();
+                        }
                     }
                     // a bench / capture run takes no input: the window pops up
                     // under whatever the user is typing, and their keys flew
@@ -4057,6 +4075,61 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                 c.handbrake |= w.handbrake.map_or(false, |h| h > 0.5);
                                 c.handbrake_v = w.handbrake.map(|h| if c.handbrake && h <= 0.5 { 1.0 } else { h });
                             }
+                            // the gamepad (pad.rs): touched, it has the car until a
+                            // driving key is pressed; its buttons work either way
+                            let pit_menu = opts.pits.as_ref().map_or(false, |p| p.menu);
+                            let pi = pad.as_mut().and_then(|p| p.read(dt, pit_menu));
+                            match pi.as_ref() {
+                                Some(p) if p.touched => pad_drives = true,
+                                Some(_) if c.throttle > 0.0 || c.brake > 0.0 || c.steer != 0.0 || c.handbrake => pad_drives = false,
+                                Some(_) => {}
+                                None => pad_drives = false,
+                            }
+                            if let Some(p) = pi.as_ref() {
+                                if pad_drives {
+                                    c.steer = p.steer;
+                                    c.throttle = c.throttle.max(p.throttle);
+                                    c.brake = c.brake.max(p.brake);
+                                    c.analog = true;
+                                    c.pad = true;
+                                    c.handbrake |= p.handbrake;
+                                }
+                                c.shift_up |= p.shift_up;
+                                c.shift_down |= p.shift_down;
+                                c.starter |= p.starter;
+                                if let Some((rc, _)) = td.rig.as_mut() {
+                                    for (i, k) in crate::aids::Knob::ALL.iter().enumerate() {
+                                        if p.aids[i] != 0 {
+                                            aid_pop = crate::aids::press(rc, *k, p.aids[i], true).or(aid_pop);
+                                        }
+                                    }
+                                }
+                                // Y: the next camera (the C key)
+                                if p.camera {
+                                    let n = car_cams.len() + 3;
+                                    cam_sel = (cam_sel + 1) % n;
+                                    follow = if cam_sel == car_cams.len() + 2 {
+                                        crate::camera::Follow::Free
+                                    } else {
+                                        crate::camera::Follow::Chase
+                                    };
+                                    println!("camera: {}", cam_name(cam_sel));
+                                    title_at = 1e9;
+                                }
+                                // X: the light switch (the H key)
+                                if p.lights {
+                                    let n = crate::lights::STATE_NAMES.len() as u32;
+                                    fxst.lights = (fxst.lights + 1) % n;
+                                    materials.light_state = fxst.lights;
+                                    println!("car lights: {}", crate::lights::STATE_NAMES[fxst.lights as usize]);
+                                }
+                                // Back: the leaderboard (Backspace)
+                                if p.board {
+                                    if let Some(l) = opts.laps.as_mut() {
+                                        l.toggle_board();
+                                    }
+                                }
+                            }
                             // cockpit aids from the wheel's buttons; the pit menu
                             // borrows the TC / ABS buttons while it is up (the
                             // game's own binds, wheel.rs GAME_ROLES)
@@ -4097,6 +4170,9 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                             if let Some(p) = opts.pits.as_mut() {
                                 if let Some(w) = wi.as_ref() {
                                     p.wheel(w.pit, td);
+                                }
+                                if let Some(g) = pi.as_ref() {
+                                    p.wheel(g.pit, td);
                                 }
                                 p.filter(&mut c, td);
                             }

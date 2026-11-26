@@ -567,6 +567,10 @@ pub struct Controls {
     /// a wheel: `steer` is the steering-wheel position itself (no keyboard
     /// rate limit or speed-scaled lock)
     pub analog: bool,
+    /// a gamepad: `steer` is the stick after its deadzone and curve; the
+    /// pedals are analog (set `analog` too), the steering goes through the
+    /// pad's own path instead of straight to the lock
+    pub pad: bool,
     /// clutch pedal 0 released .. 1 pressed; None = the car's own clutch
     /// (auto for launches) - the rigid-body car only
     pub clutch: Option<f32>,
@@ -1142,7 +1146,10 @@ impl TrackDrive {
         approach(&mut self.brk, c.brake, 6.0);
         // less lock at speed, the way a driver steers
         let speed_k = 1.0 / (1.0 + (self.vx.abs() / 25.0).powi(2));
-        if c.analog {
+        if c.pad {
+            // a stick: the keyboard's speed-scaled lock, no key ramp
+            self.steer = c.steer * self.max_steer * speed_k.max(0.25);
+        } else if c.analog {
             self.steer = c.steer * self.max_steer;
         } else {
             approach(&mut self.steer, c.steer * self.max_steer * speed_k.max(0.25), 2.5);

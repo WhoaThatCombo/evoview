@@ -136,6 +136,7 @@ mod sctm;
 mod tyretherm;
 mod ffb;
 mod wheel;
+mod pad;
 mod evophys;
 mod rigcar;
 mod rigode;
