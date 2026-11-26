@@ -1358,7 +1358,22 @@ fn drive_on_track(pkg: &PathBuf, base: Option<&std::path::Path>, track: &str, ca
     // joiner (EVOVIEW_MP_SPARE=0 on an empty server: parked in the pit box)
     let mut race = (!ai_cars.is_empty() || mp.is_some()).then(|| {
         let grid = pits::PitLane::load(pkg, track).map(|l| l.grid).unwrap_or_default();
-        let mut r = race::Race::new(trackdrive::racing_line(pkg, track), ai_cars, &grid, &mut td);
+        // a track with no AI racing line (touge mods, some new tracks): the
+        // timing centre line, then the grid, so nothing divides by zero
+        let mut line = trackdrive::racing_line(pkg, track);
+        if line.len() < 2 {
+            line = laps.as_ref().map(|s| s.track.center.pts.clone()).unwrap_or_default();
+            if line.len() >= 2 {
+                println!("racing line: none in the track data - the centre line instead");
+            }
+        }
+        if line.len() < 2 {
+            line = grid.iter().map(|s| s.pos).collect();
+        }
+        if line.len() < 2 {
+            line = vec![glam::Vec3::ZERO, glam::Vec3::new(0.0, 0.0, 1000.0)];
+        }
+        let mut r = race::Race::new(line, ai_cars, &grid, &mut td);
         r.net = mp.is_some();
         // online the server runs the session: no lights, no hold, no banner
         if r.net {
