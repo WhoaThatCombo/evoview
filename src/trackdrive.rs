@@ -567,10 +567,11 @@ pub struct Controls {
     /// a wheel: `steer` is the steering-wheel position itself (no keyboard
     /// rate limit or speed-scaled lock)
     pub analog: bool,
-    /// a gamepad: `steer` is the stick after its deadzone and curve; the
-    /// pedals are analog (set `analog` too), the steering goes through the
-    /// pad's own path (rigid-body car: padassist.rs) instead of straight
-    /// to the lock
+    /// a gamepad: `steer` is the stick after its deadzone and curve, and
+    /// the steering goes through the pad's own path (rigid-body car:
+    /// padassist.rs) instead of straight to the lock. With `analog` the
+    /// pedals are the triggers; without, the arrow keys' (ramped) - the
+    /// keyboard steers through the same assist
     pub pad: bool,
     /// clutch pedal 0 released .. 1 pressed; None = the car's own clutch
     /// (auto for launches) - the rigid-body car only

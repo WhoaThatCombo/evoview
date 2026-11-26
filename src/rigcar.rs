@@ -767,8 +767,10 @@ impl RigCar {
         if let Some(wd) = c.wheel_deg {
             // the wheel turns the road wheels through the car's own ratio
             self.steer = (wd / self.steer_ratio).to_radians().clamp(-self.max_steer, self.max_steer);
-        } else if c.pad {
-            // a stick asks for front slip, not for an angle (padassist.rs)
+        } else if c.pad && (c.analog || self.pad_assist.p.on) {
+            // a stick (or the arrow keys; those keep their own path with
+            // EVOVIEW_PAD_ASSIST=0) asks for front slip, not for an angle
+            // (padassist.rs)
             let k = self.pad_kin();
             self.steer = self.pad_assist.step(c.steer, &k, dt);
         } else if c.analog {

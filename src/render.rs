@@ -1957,7 +1957,9 @@ KEYS
            B pit limiter, Start pit menu (d-pad moves in it, A = OK), Back leaderboard,
            d-pad up / down TC, right / left ABS, left stick click starter,
            right stick click back to the pits. Touch the pad and it drives; a
-           driving key hands the car back to the keyboard
+           driving key hands the car back to the keyboard. Stick and arrow keys
+           both steer through the grip-limit assist (EVOVIEW_PAD_ASSIST=0 /
+           EVOVIEW_KEY_ASSIST=0: without)
   effects  F1 this list, F2 night, F3 bloom, F4 dirt 0 / 0.5 / 1, F5 wet,
            F6 brake-disc temperature, F7 backfire, F8 tyre smoke, F9 dust,
            F10 indicators (off / left / right / hazard), F11 rain / fog light,
@@ -2010,6 +2012,9 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
     // the pad has the car (it was touched last; a driving key takes it back)
     let mut pad_drives = false;
     let mut pad_t = 0.0f64;
+    // the arrow keys steer through the pad's assist (EVOVIEW_KEY_ASSIST=0:
+    // the old rate limit and speed-scaled lock)
+    let key_assist = crate::envc::var("EVOVIEW_KEY_ASSIST").map_or(true, |v| v != "0");
     let mut ffb = crate::ffb::Ffb::default();
     let mut kb_prev = [false; 3];
     // the last cockpit-aid press, for the HUD pop-up (aids.rs); and the
@@ -4130,6 +4135,15 @@ pub async fn run(car: Car, skeleton: Option<crate::load::Skeleton>, animations: 
                                         l.toggle_board();
                                     }
                                 }
+                            }
+                            // The arrow keys through the same assist (padassist.rs):
+                            // a key is a full stick, so the grip limit, the self-steer
+                            // and the rear guard matter even more - on the scripted
+                            // traces the old path spun 16 times out of 40, this none
+                            // but the GT3's slide past its lock. The pedals keep
+                            // their key ramps. Rigid-body car only.
+                            if key_assist && !c.analog && td.rig.is_some() {
+                                c.pad = true;
                             }
                             // cockpit aids from the wheel's buttons; the pit menu
                             // borrows the TC / ABS buttons while it is up (the
